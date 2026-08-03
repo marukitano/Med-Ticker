@@ -1,0 +1,34 @@
+{
+  "author": "marukitano",
+  "dependencies": {},
+  "keywords": [
+    "pebble",
+    "medication",
+    "pill"
+  ],
+  "name": "pill-reminder-demo",
+  "pebble": {
+    "displayName": "Pill Spin Demo",
+    "enableMultiJS": false,
+    "messageKeys": {},
+    "projectType": "native",
+    "resources": {
+      "media": [
+        {
+          "file": "images/pill_rotate_sheet.png",
+          "name": "IMAGE_PILL_SHEET",
+          "type": "bitmap"
+        }
+      ]
+    },
+    "sdkVersion": "3",
+    "targetPlatforms": [
+      "emery"
+    ],
+    "uuid": "aa20d4d2-49cc-44ae-9732-c67fced38f43",
+    "watchapp": {
+      "watchface": true
+    }
+  },
+  "version": "0.1.0"
+}
