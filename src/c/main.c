@@ -3,8 +3,8 @@
 #define FRAME_COUNT 8
 #define UI_TICK_MS 110
 #define PILL_TICKS_PER_FRAME 2
-#define CANVAS_START_OFFSET_Y -18
 
+#define CANVAS_START_OFFSET_Y -18
 #define BUTTON_SCROLL_STEP 20
 #define BUTTON_SCROLL_REPEAT_MS 100
 
@@ -45,15 +45,20 @@ typedef enum {
   CHECK_VISIBLE
 } CheckState;
 
-static const int s_hint_offsets[] = {
+static const int8_t s_hint_offsets[] = {
   0, 1, 3, 5, 3, 1, 0, 0
 };
 
-static const uint32_t s_impact_vibration_segments[] = {
+static const uint32_t s_impact_vibration_durations[] = {
   50
 };
 
-static const char *s_medications[MEDICATION_COUNT] = {
+static const VibePattern s_impact_vibration_pattern = {
+  .durations = s_impact_vibration_durations,
+  .num_segments = ARRAY_LENGTH(s_impact_vibration_durations)
+};
+
+static const char *const s_medications[MEDICATION_COUNT] = {
   "Xarelto 20 mg",
   "Metformin 1000 mg",
   "Pantoprazol 40 mg"
@@ -90,6 +95,31 @@ static ConfirmationState s_confirmation_state;
 
 static int16_t s_check_size;
 static CheckState s_check_state;
+
+static void mark_canvas_dirty(void) {
+  if (s_canvas_layer) {
+    layer_mark_dirty(s_canvas_layer);
+  }
+}
+
+static void cancel_timer(AppTimer **timer) {
+  if (!*timer) {
+    return;
+  }
+
+  app_timer_cancel(*timer);
+  *timer = NULL;
+}
+
+static void set_canvas_offset(int32_t offset_y) {
+  s_canvas_offset_y = offset_y;
+
+  if (s_canvas_offset_y > CANVAS_START_OFFSET_Y) {
+    s_canvas_offset_y = CANVAS_START_OFFSET_Y;
+  }
+
+  mark_canvas_dirty();
+}
 
 static GColor medication_background(int index) {
   switch (index) {
@@ -267,13 +297,7 @@ static void draw_medications(
       ctx,
       medication_background(index)
     );
-
-    graphics_fill_rect(
-      ctx,
-      row,
-      0,
-      GCornerNone
-    );
+    graphics_fill_rect(ctx, row, 0, GCornerNone);
 
     draw_medication_text(
       ctx,
@@ -304,7 +328,7 @@ static void draw_confirmation_circle(
 }
 
 static int16_t current_check_stroke_radius(void) {
-  int16_t radius =
+  const int16_t radius =
       ((int32_t)CHECK_STROKE_RADIUS * s_check_size +
        CHECK_POP_SETTLE_SIZE / 2) /
       CHECK_POP_SETTLE_SIZE;
@@ -353,30 +377,24 @@ static void draw_confirmation_checkmark(
   const int16_t center_y = bounds.size.h / 2;
   const int16_t size = s_check_size;
 
+  const GPoint start = GPoint(
+    center_x - (size * 42) / 100,
+    center_y
+  );
+
   const GPoint middle = GPoint(
     center_x - (size * 10) / 100,
     center_y + (size * 28) / 100
   );
 
+  const GPoint end = GPoint(
+    center_x + (size * 45) / 100,
+    center_y - (size * 30) / 100
+  );
+
   graphics_context_set_fill_color(ctx, GColorWhite);
-
-  draw_round_line(
-    ctx,
-    GPoint(
-      center_x - (size * 42) / 100,
-      center_y
-    ),
-    middle
-  );
-
-  draw_round_line(
-    ctx,
-    middle,
-    GPoint(
-      center_x + (size * 45) / 100,
-      center_y - (size * 30) / 100
-    )
-  );
+  draw_round_line(ctx, start, middle);
+  draw_round_line(ctx, middle, end);
 }
 
 static void canvas_update_proc(
@@ -416,15 +434,6 @@ static void canvas_update_proc(
   draw_confirmation_checkmark(ctx, bounds);
 }
 
-static void stop_ui_timer(void) {
-  if (!s_ui_timer) {
-    return;
-  }
-
-  app_timer_cancel(s_ui_timer);
-  s_ui_timer = NULL;
-}
-
 static void ui_timer_callback(void *context) {
   s_ui_timer = NULL;
 
@@ -444,7 +453,7 @@ static void ui_timer_callback(void *context) {
     set_frame(s_frame_index);
   }
 
-  layer_mark_dirty(s_canvas_layer);
+  mark_canvas_dirty();
 
   s_ui_timer = app_timer_register(
     UI_TICK_MS,
@@ -454,22 +463,13 @@ static void ui_timer_callback(void *context) {
 }
 
 static void start_ui_timer(void) {
-  stop_ui_timer();
+  cancel_timer(&s_ui_timer);
 
   s_ui_timer = app_timer_register(
     UI_TICK_MS,
     ui_timer_callback,
     NULL
   );
-}
-
-static void stop_confirmation_timer(void) {
-  if (!s_confirmation_timer) {
-    return;
-  }
-
-  app_timer_cancel(s_confirmation_timer);
-  s_confirmation_timer = NULL;
 }
 
 /*
@@ -504,7 +504,7 @@ static void update_confirmation_circle(void) {
     s_check_size = 8;
     s_check_state = CHECK_POPPING_OUT;
 
-    stop_ui_timer();
+    cancel_timer(&s_ui_timer);
     confirm_medication_taken();
     return;
   }
@@ -528,48 +528,36 @@ static void update_confirmation_circle(void) {
   }
 }
 
-static void vibrate_impact(void) {
-  const VibePattern pattern = {
-    .durations = s_impact_vibration_segments,
-    .num_segments = ARRAY_LENGTH(
-      s_impact_vibration_segments
-    )
-  };
-
-  vibes_enqueue_custom_pattern(pattern);
-}
-
 static void update_checkmark(void) {
-  if (s_check_state == CHECK_POPPING_OUT) {
-    s_check_size += CHECK_POP_GROW_STEP;
+  switch (s_check_state) {
+    case CHECK_POPPING_OUT:
+      s_check_size += CHECK_POP_GROW_STEP;
 
-    if (s_check_size >= CHECK_POP_OVERSHOOT_SIZE) {
-      s_check_size = CHECK_POP_OVERSHOOT_SIZE;
-      s_check_state = CHECK_AT_PEAK;
-    }
+      if (s_check_size >= CHECK_POP_OVERSHOOT_SIZE) {
+        s_check_size = CHECK_POP_OVERSHOOT_SIZE;
+        s_check_state = CHECK_AT_PEAK;
+      }
+      break;
 
-    return;
-  }
+    case CHECK_AT_PEAK:
+      vibes_enqueue_custom_pattern(
+        s_impact_vibration_pattern
+      );
+      s_check_state = CHECK_SETTLING;
+      break;
 
-  if (s_check_state == CHECK_AT_PEAK) {
-    /*
-     * The maximum-size frame has now already been drawn.
-     * Vibrate while the checkmark visibly hits the display.
-     */
-    vibrate_impact();
-    s_check_state = CHECK_SETTLING;
-    return;
-  }
+    case CHECK_SETTLING:
+      s_check_size -= CHECK_POP_SHRINK_STEP;
 
-  if (s_check_state != CHECK_SETTLING) {
-    return;
-  }
+      if (s_check_size <= CHECK_POP_SETTLE_SIZE) {
+        s_check_size = CHECK_POP_SETTLE_SIZE;
+        s_check_state = CHECK_VISIBLE;
+      }
+      break;
 
-  s_check_size -= CHECK_POP_SHRINK_STEP;
-
-  if (s_check_size <= CHECK_POP_SETTLE_SIZE) {
-    s_check_size = CHECK_POP_SETTLE_SIZE;
-    s_check_state = CHECK_VISIBLE;
+    case CHECK_HIDDEN:
+    case CHECK_VISIBLE:
+      break;
   }
 }
 
@@ -578,10 +566,7 @@ static void confirmation_timer_callback(void *context) {
 
   update_confirmation_circle();
   update_checkmark();
-
-  if (s_canvas_layer) {
-    layer_mark_dirty(s_canvas_layer);
-  }
+  mark_canvas_dirty();
 
   if (confirmation_animation_active()) {
     schedule_confirmation_timer();
@@ -605,15 +590,7 @@ static void scroll_canvas(int32_t delta_y) {
     return;
   }
 
-  s_canvas_offset_y += delta_y;
-
-  if (s_canvas_offset_y > CANVAS_START_OFFSET_Y) {
-    s_canvas_offset_y = CANVAS_START_OFFSET_Y;
-  }
-
-  if (s_canvas_layer) {
-    layer_mark_dirty(s_canvas_layer);
-  }
+  set_canvas_offset(s_canvas_offset_y + delta_y);
 }
 
 static void scroll_up_handler(
@@ -655,12 +632,13 @@ static void select_button_up(
     return;
   }
 
-  if (s_confirm_radius > 0) {
-    s_confirmation_state = CONFIRM_SHRINKING;
-    schedule_confirmation_timer();
-  } else {
+  if (s_confirm_radius <= 0) {
     s_confirmation_state = CONFIRM_IDLE;
+    return;
   }
+
+  s_confirmation_state = CONFIRM_SHRINKING;
+  schedule_confirmation_timer();
 }
 
 static void back_button_handler(
@@ -701,14 +679,9 @@ static void update_drag_position(int16_t current_y) {
   const int32_t delta_y =
       (int32_t)current_y - (int32_t)s_touch_start_y;
 
-  s_canvas_offset_y =
-      s_drag_start_offset_y + delta_y;
-
-  if (s_canvas_offset_y > CANVAS_START_OFFSET_Y) {
-    s_canvas_offset_y = CANVAS_START_OFFSET_Y;
-  }
-
-  layer_mark_dirty(s_canvas_layer);
+  set_canvas_offset(
+    s_drag_start_offset_y + delta_y
+  );
 }
 
 static void touch_handler(
@@ -753,20 +726,20 @@ static bool load_pill_sheet(void) {
 
   const GRect sheet_bounds = gbitmap_get_bounds(s_sheet);
 
-  if (sheet_bounds.size.w % FRAME_COUNT != 0) {
-    APP_LOG(
-      APP_LOG_LEVEL_ERROR,
-      "Spritesheet width is invalid"
-    );
-
-    gbitmap_destroy(s_sheet);
-    s_sheet = NULL;
-    return false;
+  if (sheet_bounds.size.w % FRAME_COUNT == 0) {
+    s_frame_width = sheet_bounds.size.w / FRAME_COUNT;
+    s_frame_height = sheet_bounds.size.h;
+    return true;
   }
 
-  s_frame_width = sheet_bounds.size.w / FRAME_COUNT;
-  s_frame_height = sheet_bounds.size.h;
-  return true;
+  APP_LOG(
+    APP_LOG_LEVEL_ERROR,
+    "Spritesheet width is invalid"
+  );
+
+  gbitmap_destroy(s_sheet);
+  s_sheet = NULL;
+  return false;
 }
 
 static void reset_ui_state(GRect bounds) {
@@ -823,8 +796,8 @@ static void window_appear(Window *window) {
 }
 
 static void window_disappear(Window *window) {
-  stop_ui_timer();
-  stop_confirmation_timer();
+  cancel_timer(&s_ui_timer);
+  cancel_timer(&s_confirmation_timer);
 
 #if defined(PBL_TOUCH)
   s_dragging = false;
@@ -833,8 +806,8 @@ static void window_disappear(Window *window) {
 }
 
 static void window_unload(Window *window) {
-  stop_ui_timer();
-  stop_confirmation_timer();
+  cancel_timer(&s_ui_timer);
+  cancel_timer(&s_confirmation_timer);
   destroy_frame();
 
   if (s_sheet) {
