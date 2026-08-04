@@ -24,6 +24,8 @@
 #define HINT_HALF_WIDTH 9
 #define HINT_HEIGHT 10
 
+#define SIDE_HANDLE_RADIUS 6
+
 #define MEDICATION_GAP 54
 #define MEDICATION_HEADER_HEIGHT 28
 #define MEDICATION_ROW_HEIGHT 50
@@ -397,6 +399,21 @@ static void draw_confirmation_checkmark(
   draw_round_line(ctx, middle, end);
 }
 
+static void draw_side_handle(
+    GContext *ctx,
+    GRect bounds
+) {
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_circle(
+    ctx,
+    GPoint(
+      bounds.size.w,
+      bounds.size.h / 2
+    ),
+    SIDE_HANDLE_RADIUS
+  );
+}
+
 static void canvas_update_proc(
     Layer *layer,
     GContext *ctx
@@ -430,6 +447,7 @@ static void canvas_update_proc(
     draw_medications(ctx, bounds, pill_y);
   }
 
+  draw_side_handle(ctx, bounds);
   draw_confirmation_circle(ctx, bounds);
   draw_confirmation_checkmark(ctx, bounds);
 }
