@@ -1,9 +1,12 @@
 #include <pebble.h>
 
 #define FRAME_COUNT 8
-#define PILL_FRAME_DURATION_MS 220
 #define UI_TICK_MS 110
+#define PILL_TICKS_PER_FRAME 2
 #define CANVAS_START_OFFSET_Y -18
+
+#define BUTTON_SCROLL_STEP 20
+#define BUTTON_SCROLL_REPEAT_MS 100
 
 #define CONFIRM_ANIMATION_INTERVAL_MS 30
 #define CONFIRM_GROW_STEP 5
@@ -12,10 +15,8 @@
 #define CONFIRM_CENTER_OUTSIDE_X 8
 
 #define CHECK_STROKE_RADIUS 8
-
 #define CHECK_POP_GROW_STEP 140
 #define CHECK_POP_SHRINK_STEP 30
-
 #define CHECK_POP_SETTLE_SIZE 80
 #define CHECK_POP_OVERSHOOT_SIZE 140
 
@@ -29,8 +30,23 @@
 #define MEDICATION_ROW_GAP 8
 #define MEDICATION_COUNT 3
 
+typedef enum {
+  CONFIRM_IDLE,
+  CONFIRM_GROWING,
+  CONFIRM_SHRINKING,
+  CONFIRM_COMPLETE
+} ConfirmationState;
 
-static const int s_hint_offsets[] = {0, 1, 3, 5, 3, 1, 0, 0};
+typedef enum {
+  CHECK_HIDDEN,
+  CHECK_POPPING_OUT,
+  CHECK_SETTLING,
+  CHECK_VISIBLE
+} CheckState;
+
+static const int s_hint_offsets[] = {
+  0, 1, 3, 5, 3, 1, 0, 0
+};
 
 static const char *s_medications[MEDICATION_COUNT] = {
   "Xarelto 20 mg",
@@ -43,32 +59,32 @@ static Layer *s_canvas_layer;
 
 static GBitmap *s_sheet;
 static GBitmap *s_frame;
-static AppTimer *s_timer;
-static AppTimer *s_confirm_timer;
+
+static AppTimer *s_ui_timer;
+static AppTimer *s_confirmation_timer;
 
 static GFont s_medication_font;
 
-static int s_frame_index;
-static int s_frame_width;
-static int s_frame_height;
-static int s_tick_count;
-static int s_hint_phase;
-
+static int16_t s_frame_index;
+static int16_t s_frame_width;
+static int16_t s_frame_height;
+static uint8_t s_ui_tick;
+static uint8_t s_hint_phase;
 
 static int32_t s_canvas_offset_y;
+
+#if defined(PBL_TOUCH)
 static int32_t s_drag_start_offset_y;
 static int16_t s_touch_start_y;
 static bool s_dragging;
-static bool s_window_visible;
+#endif
 
 static int16_t s_confirm_radius;
 static int16_t s_confirm_max_radius;
-static bool s_confirm_holding;
-static bool s_confirm_shrinking;
-static bool s_confirm_complete;
+static ConfirmationState s_confirmation_state;
 
 static int16_t s_check_size;
-static uint8_t s_check_pop_phase;
+static CheckState s_check_state;
 
 static GColor medication_background(int index) {
   switch (index) {
@@ -91,10 +107,12 @@ static GColor medication_text_color(int index) {
 }
 
 static void destroy_frame(void) {
-  if (s_frame) {
-    gbitmap_destroy(s_frame);
-    s_frame = NULL;
+  if (!s_frame) {
+    return;
   }
+
+  gbitmap_destroy(s_frame);
+  s_frame = NULL;
 }
 
 static void set_frame(int index) {
@@ -223,10 +241,10 @@ static void draw_medications(
     NULL
   );
 
-  for (int i = 0; i < MEDICATION_COUNT; i++) {
+  for (int index = 0; index < MEDICATION_COUNT; index++) {
     const int32_t row_y =
         rows_y +
-        i * (MEDICATION_ROW_HEIGHT + MEDICATION_ROW_GAP);
+        index * (MEDICATION_ROW_HEIGHT + MEDICATION_ROW_GAP);
 
     if (row_y + MEDICATION_ROW_HEIGHT < 0 ||
         row_y > bounds.size.h) {
@@ -242,7 +260,7 @@ static void draw_medications(
 
     graphics_context_set_fill_color(
       ctx,
-      medication_background(i)
+      medication_background(index)
     );
 
     graphics_fill_rect(
@@ -255,8 +273,8 @@ static void draw_medications(
     draw_medication_text(
       ctx,
       row,
-      s_medications[i],
-      i
+      s_medications[index],
+      index
     );
   }
 }
@@ -269,59 +287,51 @@ static void draw_confirmation_circle(
     return;
   }
 
-  const GPoint center = GPoint(
-    bounds.size.w + CONFIRM_CENTER_OUTSIDE_X,
-    bounds.size.h / 2
-  );
-
   graphics_context_set_fill_color(ctx, GColorGreen);
   graphics_fill_circle(
     ctx,
-    center,
+    GPoint(
+      bounds.size.w + CONFIRM_CENTER_OUTSIDE_X,
+      bounds.size.h / 2
+    ),
     (uint16_t)s_confirm_radius
   );
 }
 
-static void draw_thick_line(
+static int16_t current_check_stroke_radius(void) {
+  int16_t radius =
+      ((int32_t)CHECK_STROKE_RADIUS * s_check_size +
+       CHECK_POP_SETTLE_SIZE / 2) /
+      CHECK_POP_SETTLE_SIZE;
+
+  return radius < 1 ? 1 : radius;
+}
+
+static void draw_round_line(
     GContext *ctx,
     GPoint start,
     GPoint end
 ) {
   const int16_t dx = end.x - start.x;
   const int16_t dy = end.y - start.y;
-
   const int16_t abs_dx = dx < 0 ? -dx : dx;
   const int16_t abs_dy = dy < 0 ? -dy : dy;
   const int16_t steps = abs_dx > abs_dy ? abs_dx : abs_dy;
-
-  int16_t stroke_radius =
-      ((int32_t)CHECK_STROKE_RADIUS * s_check_size +
-       CHECK_POP_SETTLE_SIZE / 2) /
-      CHECK_POP_SETTLE_SIZE;
-
-  if (stroke_radius < 1) {
-    stroke_radius = 1;
-  }
+  const int16_t radius = current_check_stroke_radius();
 
   if (steps <= 0) {
-    graphics_fill_circle(
-      ctx,
-      start,
-      stroke_radius
-    );
+    graphics_fill_circle(ctx, start, radius);
     return;
   }
 
   for (int16_t step = 0; step <= steps; step++) {
-    const GPoint point = GPoint(
-      start.x + ((int32_t)dx * step) / steps,
-      start.y + ((int32_t)dy * step) / steps
-    );
-
     graphics_fill_circle(
       ctx,
-      point,
-      stroke_radius
+      GPoint(
+        start.x + ((int32_t)dx * step) / steps,
+        start.y + ((int32_t)dy * step) / steps
+      ),
+      radius
     );
   }
 }
@@ -330,7 +340,7 @@ static void draw_confirmation_checkmark(
     GContext *ctx,
     GRect bounds
 ) {
-  if (!s_confirm_complete || s_check_size <= 0) {
+  if (s_check_state == CHECK_HIDDEN || s_check_size <= 0) {
     return;
   }
 
@@ -338,228 +348,325 @@ static void draw_confirmation_checkmark(
   const int16_t center_y = bounds.size.h / 2;
   const int16_t size = s_check_size;
 
-  const GPoint start = GPoint(
-    center_x - (size * 42) / 100,
-    center_y
-  );
-
   const GPoint middle = GPoint(
     center_x - (size * 10) / 100,
     center_y + (size * 28) / 100
   );
 
-  const GPoint end = GPoint(
-    center_x + (size * 45) / 100,
-    center_y - (size * 30) / 100
+  graphics_context_set_fill_color(ctx, GColorWhite);
+
+  draw_round_line(
+    ctx,
+    GPoint(
+      center_x - (size * 42) / 100,
+      center_y
+    ),
+    middle
   );
 
-  graphics_context_set_fill_color(ctx, GColorWhite);
-  draw_thick_line(ctx, start, middle);
-  draw_thick_line(ctx, middle, end);
+  draw_round_line(
+    ctx,
+    middle,
+    GPoint(
+      center_x + (size * 45) / 100,
+      center_y - (size * 30) / 100
+    )
+  );
 }
 
-static void canvas_update_proc(Layer *layer, GContext *ctx) {
+static void canvas_update_proc(
+    Layer *layer,
+    GContext *ctx
+) {
   const GRect bounds = layer_get_bounds(layer);
 
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
-  if (!s_frame) {
-    return;
+  if (s_frame) {
+    const int32_t pill_y =
+        ((int32_t)bounds.size.h - s_frame_height) / 2 +
+        s_canvas_offset_y;
+
+    if (pill_y > -s_frame_height &&
+        pill_y < bounds.size.h) {
+      graphics_context_set_compositing_mode(ctx, GCompOpSet);
+      graphics_draw_bitmap_in_rect(
+        ctx,
+        s_frame,
+        GRect(
+          (bounds.size.w - s_frame_width) / 2,
+          (int16_t)pill_y,
+          s_frame_width,
+          s_frame_height
+        )
+      );
+    }
+
+    draw_scroll_hint(ctx, bounds, pill_y);
+    draw_medications(ctx, bounds, pill_y);
   }
 
-  const int32_t pill_y =
-      ((int32_t)bounds.size.h - s_frame_height) / 2 +
-      s_canvas_offset_y;
-
-  if (pill_y > -s_frame_height &&
-      pill_y < bounds.size.h) {
-    const GRect destination = GRect(
-      (bounds.size.w - s_frame_width) / 2,
-      (int16_t)pill_y,
-      s_frame_width,
-      s_frame_height
-    );
-
-    graphics_context_set_compositing_mode(ctx, GCompOpSet);
-    graphics_draw_bitmap_in_rect(ctx, s_frame, destination);
-  }
-
-  draw_scroll_hint(ctx, bounds, pill_y);
-  draw_medications(ctx, bounds, pill_y);
   draw_confirmation_circle(ctx, bounds);
   draw_confirmation_checkmark(ctx, bounds);
 }
 
-static void stop_timer(void) {
-  if (s_timer) {
-    app_timer_cancel(s_timer);
-    s_timer = NULL;
-  }
-}
-
-static void timer_callback(void *context) {
-  s_timer = NULL;
-
-  if (!s_window_visible) {
+static void stop_ui_timer(void) {
+  if (!s_ui_timer) {
     return;
   }
 
-  s_tick_count++;
+  app_timer_cancel(s_ui_timer);
+  s_ui_timer = NULL;
+}
+
+static void ui_timer_callback(void *context) {
+  s_ui_timer = NULL;
+
+  if (!s_canvas_layer) {
+    return;
+  }
+
   s_hint_phase =
       (s_hint_phase + 1) %
-      ((int)(sizeof(s_hint_offsets) / sizeof(s_hint_offsets[0])));
+      ARRAY_LENGTH(s_hint_offsets);
 
-  if ((s_tick_count * UI_TICK_MS) %
-      PILL_FRAME_DURATION_MS == 0) {
+  s_ui_tick++;
+
+  if (s_ui_tick >= PILL_TICKS_PER_FRAME) {
+    s_ui_tick = 0;
     s_frame_index = (s_frame_index + 1) % FRAME_COUNT;
     set_frame(s_frame_index);
   }
 
   layer_mark_dirty(s_canvas_layer);
 
-  s_timer = app_timer_register(
+  s_ui_timer = app_timer_register(
     UI_TICK_MS,
-    timer_callback,
+    ui_timer_callback,
     NULL
   );
 }
 
-static void start_timer(void) {
-  stop_timer();
+static void start_ui_timer(void) {
+  stop_ui_timer();
 
-  s_timer = app_timer_register(
+  s_ui_timer = app_timer_register(
     UI_TICK_MS,
-    timer_callback,
+    ui_timer_callback,
     NULL
   );
 }
 
-static void stop_confirmation_timers(void) {
-  if (s_confirm_timer) {
-    app_timer_cancel(s_confirm_timer);
-    s_confirm_timer = NULL;
+static void stop_confirmation_timer(void) {
+  if (!s_confirmation_timer) {
+    return;
   }
+
+  app_timer_cancel(s_confirmation_timer);
+  s_confirmation_timer = NULL;
 }
 
 /*
- * Dies ist der eigentliche Bestätigungsmoment.
- *
- * Sobald die Wakeup-Erinnerung eingebaut ist, wird hier der bereits
- * vorgemerkte 15-Minuten-Wakeup gelöscht. Das Schließen der App ist
- * davon bewusst getrennt.
+ * This is the actual confirmation moment.
+ * The pending 15-minute repeat wakeup will be cancelled here later.
  */
 static void confirm_medication_taken(void) {
-  /* Anschlussstelle für wakeup_cancel(...) folgt später. */
+  /* TODO: Cancel the pending repeat wakeup. */
 }
 
-static void confirmation_timer_callback(void *context) {
-  s_confirm_timer = NULL;
+static bool confirmation_animation_active(void) {
+  return
+      s_confirmation_state == CONFIRM_GROWING ||
+      s_confirmation_state == CONFIRM_SHRINKING ||
+      s_check_state == CHECK_POPPING_OUT ||
+      s_check_state == CHECK_SETTLING;
+}
 
-  if (s_confirm_holding && !s_confirm_complete) {
+static void schedule_confirmation_timer(void);
+
+static void update_confirmation_circle(void) {
+  if (s_confirmation_state == CONFIRM_GROWING) {
     s_confirm_radius += CONFIRM_GROW_STEP;
 
-    if (s_confirm_radius >= s_confirm_max_radius) {
-      s_confirm_radius = s_confirm_max_radius;
-      s_confirm_holding = false;
-      s_confirm_shrinking = false;
-      s_confirm_complete = true;
-      s_check_size = 8;
-      s_check_pop_phase = 1;
-
-      confirm_medication_taken();
-      vibes_short_pulse();
-    }
-  } else if (s_confirm_shrinking) {
-    int16_t shrink_step =
-        s_confirm_radius / CONFIRM_SHRINK_DIVISOR;
-
-    if (shrink_step < CONFIRM_SHRINK_MIN_STEP) {
-      shrink_step = CONFIRM_SHRINK_MIN_STEP;
+    if (s_confirm_radius < s_confirm_max_radius) {
+      return;
     }
 
-    s_confirm_radius -= shrink_step;
+    s_confirm_radius = s_confirm_max_radius;
+    s_confirmation_state = CONFIRM_COMPLETE;
+    s_check_size = 8;
+    s_check_state = CHECK_POPPING_OUT;
 
-    if (s_confirm_radius <= 0) {
-      s_confirm_radius = 0;
-      s_confirm_shrinking = false;
-    }
-  } else if (s_confirm_complete && s_check_pop_phase == 1) {
+    stop_ui_timer();
+    confirm_medication_taken();
+    vibes_short_pulse();
+    return;
+  }
+
+  if (s_confirmation_state != CONFIRM_SHRINKING) {
+    return;
+  }
+
+  int16_t shrink_step =
+      s_confirm_radius / CONFIRM_SHRINK_DIVISOR;
+
+  if (shrink_step < CONFIRM_SHRINK_MIN_STEP) {
+    shrink_step = CONFIRM_SHRINK_MIN_STEP;
+  }
+
+  s_confirm_radius -= shrink_step;
+
+  if (s_confirm_radius <= 0) {
+    s_confirm_radius = 0;
+    s_confirmation_state = CONFIRM_IDLE;
+  }
+}
+
+static void update_checkmark(void) {
+  if (s_check_state == CHECK_POPPING_OUT) {
     s_check_size += CHECK_POP_GROW_STEP;
 
     if (s_check_size >= CHECK_POP_OVERSHOOT_SIZE) {
       s_check_size = CHECK_POP_OVERSHOOT_SIZE;
-      s_check_pop_phase = 2;
+      s_check_state = CHECK_SETTLING;
     }
-  } else if (s_confirm_complete && s_check_pop_phase == 2) {
-    s_check_size -= CHECK_POP_SHRINK_STEP;
 
-    if (s_check_size <= CHECK_POP_SETTLE_SIZE) {
-      s_check_size = CHECK_POP_SETTLE_SIZE;
-      s_check_pop_phase = 3;
-    }
+    return;
   }
 
-  layer_mark_dirty(s_canvas_layer);
+  if (s_check_state != CHECK_SETTLING) {
+    return;
+  }
 
-  if ((s_confirm_holding && !s_confirm_complete) ||
-      s_confirm_shrinking ||
-      s_check_pop_phase == 1 ||
-      s_check_pop_phase == 2) {
-    s_confirm_timer = app_timer_register(
-      CONFIRM_ANIMATION_INTERVAL_MS,
-      confirmation_timer_callback,
-      NULL
-    );
+  s_check_size -= CHECK_POP_SHRINK_STEP;
+
+  if (s_check_size <= CHECK_POP_SETTLE_SIZE) {
+    s_check_size = CHECK_POP_SETTLE_SIZE;
+    s_check_state = CHECK_VISIBLE;
   }
 }
 
-static void ensure_confirmation_timer(void) {
-  if (!s_confirm_timer) {
-    s_confirm_timer = app_timer_register(
-      CONFIRM_ANIMATION_INTERVAL_MS,
-      confirmation_timer_callback,
-      NULL
-    );
+static void confirmation_timer_callback(void *context) {
+  s_confirmation_timer = NULL;
+
+  update_confirmation_circle();
+  update_checkmark();
+
+  if (s_canvas_layer) {
+    layer_mark_dirty(s_canvas_layer);
   }
+
+  if (confirmation_animation_active()) {
+    schedule_confirmation_timer();
+  }
+}
+
+static void schedule_confirmation_timer(void) {
+  if (s_confirmation_timer) {
+    return;
+  }
+
+  s_confirmation_timer = app_timer_register(
+    CONFIRM_ANIMATION_INTERVAL_MS,
+    confirmation_timer_callback,
+    NULL
+  );
+}
+
+static void scroll_canvas(int32_t delta_y) {
+  if (s_confirmation_state != CONFIRM_IDLE) {
+    return;
+  }
+
+  s_canvas_offset_y += delta_y;
+
+  if (s_canvas_offset_y > CANVAS_START_OFFSET_Y) {
+    s_canvas_offset_y = CANVAS_START_OFFSET_Y;
+  }
+
+  if (s_canvas_layer) {
+    layer_mark_dirty(s_canvas_layer);
+  }
+}
+
+static void scroll_up_handler(
+    ClickRecognizerRef recognizer,
+    void *context
+) {
+  scroll_canvas(BUTTON_SCROLL_STEP);
+}
+
+static void scroll_down_handler(
+    ClickRecognizerRef recognizer,
+    void *context
+) {
+  scroll_canvas(-BUTTON_SCROLL_STEP);
 }
 
 static void select_button_down(
     ClickRecognizerRef recognizer,
     void *context
 ) {
-  if (s_confirm_complete) {
+  if (s_confirmation_state != CONFIRM_IDLE) {
     return;
   }
 
-  s_confirm_holding = true;
-  s_confirm_shrinking = false;
-  ensure_confirmation_timer();
+  s_confirmation_state = CONFIRM_GROWING;
+  schedule_confirmation_timer();
+}
+
+static void exit_app(void) {
+  window_stack_pop_all(true);
 }
 
 static void select_button_up(
     ClickRecognizerRef recognizer,
     void *context
 ) {
-  s_confirm_holding = false;
-
-  if (s_confirm_complete) {
-    window_stack_pop_all(true);
+  if (s_confirmation_state == CONFIRM_COMPLETE) {
+    exit_app();
     return;
   }
 
   if (s_confirm_radius > 0) {
-    s_confirm_shrinking = true;
-    ensure_confirmation_timer();
+    s_confirmation_state = CONFIRM_SHRINKING;
+    schedule_confirmation_timer();
+  } else {
+    s_confirmation_state = CONFIRM_IDLE;
   }
 }
 
+static void back_button_handler(
+    ClickRecognizerRef recognizer,
+    void *context
+) {
+  exit_app();
+}
+
 static void click_config_provider(void *context) {
+  window_single_repeating_click_subscribe(
+    BUTTON_ID_UP,
+    BUTTON_SCROLL_REPEAT_MS,
+    scroll_up_handler
+  );
+
   window_raw_click_subscribe(
     BUTTON_ID_SELECT,
     select_button_down,
     select_button_up,
     NULL
+  );
+
+  window_single_repeating_click_subscribe(
+    BUTTON_ID_DOWN,
+    BUTTON_SCROLL_REPEAT_MS,
+    scroll_down_handler
+  );
+
+  window_single_click_subscribe(
+    BUTTON_ID_BACK,
+    back_button_handler
   );
 }
 
@@ -605,13 +712,7 @@ static void touch_handler(
 }
 #endif
 
-static void window_load(Window *window) {
-  Layer *root = window_get_root_layer(window);
-  const GRect bounds = layer_get_bounds(root);
-
-  s_medication_font =
-      fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
-
+static bool load_pill_sheet(void) {
   s_sheet = gbitmap_create_with_resource(
     RESOURCE_ID_IMAGE_PILL_SHEET
   );
@@ -619,9 +720,9 @@ static void window_load(Window *window) {
   if (!s_sheet) {
     APP_LOG(
       APP_LOG_LEVEL_ERROR,
-      "Spritesheet konnte nicht geladen werden"
+      "Spritesheet could not be loaded"
     );
-    return;
+    return false;
   }
 
   const GRect sheet_bounds = gbitmap_get_bounds(s_sheet);
@@ -629,13 +730,50 @@ static void window_load(Window *window) {
   if (sheet_bounds.size.w % FRAME_COUNT != 0) {
     APP_LOG(
       APP_LOG_LEVEL_ERROR,
-      "Spritesheet hat falsche Breite"
+      "Spritesheet width is invalid"
     );
-    return;
+
+    gbitmap_destroy(s_sheet);
+    s_sheet = NULL;
+    return false;
   }
 
   s_frame_width = sheet_bounds.size.w / FRAME_COUNT;
   s_frame_height = sheet_bounds.size.h;
+  return true;
+}
+
+static void reset_ui_state(GRect bounds) {
+  s_frame_index = 0;
+  s_ui_tick = 0;
+  s_hint_phase = 0;
+  s_canvas_offset_y = CANVAS_START_OFFSET_Y;
+
+#if defined(PBL_TOUCH)
+  s_dragging = false;
+#endif
+
+  s_confirm_radius = 0;
+  s_confirm_max_radius =
+      bounds.size.w +
+      CONFIRM_CENTER_OUTSIDE_X +
+      bounds.size.h / 2;
+  s_confirmation_state = CONFIRM_IDLE;
+
+  s_check_size = 0;
+  s_check_state = CHECK_HIDDEN;
+}
+
+static void window_load(Window *window) {
+  Layer *root = window_get_root_layer(window);
+  const GRect bounds = layer_get_bounds(root);
+
+  s_medication_font =
+      fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
+
+  if (!load_pill_sheet()) {
+    return;
+  }
 
   s_canvas_layer = layer_create(bounds);
   layer_set_update_proc(
@@ -644,30 +782,14 @@ static void window_load(Window *window) {
   );
   layer_add_child(root, s_canvas_layer);
 
-  s_frame_index = 0;
-  s_tick_count = 0;
-  s_hint_phase = 0;
-  s_canvas_offset_y = CANVAS_START_OFFSET_Y;
-  s_dragging = false;
-
-  s_confirm_radius = 0;
-  s_confirm_max_radius =
-      bounds.size.w +
-      CONFIRM_CENTER_OUTSIDE_X +
-      bounds.size.h / 2;
-  s_confirm_holding = false;
-  s_confirm_shrinking = false;
-  s_confirm_complete = false;
-
-  s_check_size = 0;
-  s_check_pop_phase = 0;
-
+  reset_ui_state(bounds);
   set_frame(s_frame_index);
 }
 
 static void window_appear(Window *window) {
-  s_window_visible = true;
-  start_timer();
+  if (s_canvas_layer) {
+    start_ui_timer();
+  }
 
 #if defined(PBL_TOUCH)
   touch_service_subscribe(touch_handler, NULL);
@@ -675,22 +797,18 @@ static void window_appear(Window *window) {
 }
 
 static void window_disappear(Window *window) {
-  s_window_visible = false;
-  s_dragging = false;
-  stop_timer();
-  stop_confirmation_timers();
+  stop_ui_timer();
+  stop_confirmation_timer();
 
 #if defined(PBL_TOUCH)
+  s_dragging = false;
   touch_service_unsubscribe();
 #endif
 }
 
 static void window_unload(Window *window) {
-  s_window_visible = false;
-  s_dragging = false;
-  stop_timer();
-  stop_confirmation_timers();
-
+  stop_ui_timer();
+  stop_confirmation_timer();
   destroy_frame();
 
   if (s_sheet) {

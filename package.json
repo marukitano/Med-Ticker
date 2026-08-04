@@ -6,9 +6,9 @@
     "medication",
     "pill"
   ],
-  "name": "pill-reminder-demo",
+  "name": "pill-reminder",
   "pebble": {
-    "displayName": "Pill Spin Demo",
+    "displayName": "Pill Reminder",
     "enableMultiJS": false,
     "messageKeys": {},
     "projectType": "native",
@@ -30,5 +30,5 @@
       "watchface": false
     }
   },
-  "version": "0.1.1"
+  "version": "0.1.2"
 }
