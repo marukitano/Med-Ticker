@@ -15,7 +15,7 @@
 #define CONFIRM_CENTER_OUTSIDE_X 8
 
 #define CHECK_STROKE_RADIUS 8
-#define CHECK_POP_GROW_STEP 140
+#define CHECK_POP_GROW_STEP 44
 #define CHECK_POP_SHRINK_STEP 30
 #define CHECK_POP_SETTLE_SIZE 80
 #define CHECK_POP_OVERSHOOT_SIZE 140
@@ -40,12 +40,17 @@ typedef enum {
 typedef enum {
   CHECK_HIDDEN,
   CHECK_POPPING_OUT,
+  CHECK_AT_PEAK,
   CHECK_SETTLING,
   CHECK_VISIBLE
 } CheckState;
 
 static const int s_hint_offsets[] = {
   0, 1, 3, 5, 3, 1, 0, 0
+};
+
+static const uint32_t s_impact_vibration_segments[] = {
+  50
 };
 
 static const char *s_medications[MEDICATION_COUNT] = {
@@ -480,6 +485,7 @@ static bool confirmation_animation_active(void) {
       s_confirmation_state == CONFIRM_GROWING ||
       s_confirmation_state == CONFIRM_SHRINKING ||
       s_check_state == CHECK_POPPING_OUT ||
+      s_check_state == CHECK_AT_PEAK ||
       s_check_state == CHECK_SETTLING;
 }
 
@@ -500,7 +506,6 @@ static void update_confirmation_circle(void) {
 
     stop_ui_timer();
     confirm_medication_taken();
-    vibes_short_pulse();
     return;
   }
 
@@ -523,15 +528,36 @@ static void update_confirmation_circle(void) {
   }
 }
 
+static void vibrate_impact(void) {
+  const VibePattern pattern = {
+    .durations = s_impact_vibration_segments,
+    .num_segments = ARRAY_LENGTH(
+      s_impact_vibration_segments
+    )
+  };
+
+  vibes_enqueue_custom_pattern(pattern);
+}
+
 static void update_checkmark(void) {
   if (s_check_state == CHECK_POPPING_OUT) {
     s_check_size += CHECK_POP_GROW_STEP;
 
     if (s_check_size >= CHECK_POP_OVERSHOOT_SIZE) {
       s_check_size = CHECK_POP_OVERSHOOT_SIZE;
-      s_check_state = CHECK_SETTLING;
+      s_check_state = CHECK_AT_PEAK;
     }
 
+    return;
+  }
+
+  if (s_check_state == CHECK_AT_PEAK) {
+    /*
+     * The maximum-size frame has now already been drawn.
+     * Vibrate while the checkmark visibly hits the display.
+     */
+    vibrate_impact();
+    s_check_state = CHECK_SETTLING;
     return;
   }
 
