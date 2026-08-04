@@ -399,11 +399,21 @@ static void draw_confirmation_checkmark(
   draw_round_line(ctx, middle, end);
 }
 
-static void draw_side_handle(
+static void draw_side_handles(
     GContext *ctx,
     GRect bounds
 ) {
   graphics_context_set_fill_color(ctx, GColorWhite);
+
+  graphics_fill_circle(
+    ctx,
+    GPoint(
+      0,
+      bounds.size.h / 2
+    ),
+    SIDE_HANDLE_RADIUS
+  );
+
   graphics_fill_circle(
     ctx,
     GPoint(
@@ -447,7 +457,7 @@ static void canvas_update_proc(
     draw_medications(ctx, bounds, pill_y);
   }
 
-  draw_side_handle(ctx, bounds);
+  draw_side_handles(ctx, bounds);
   draw_confirmation_circle(ctx, bounds);
   draw_confirmation_checkmark(ctx, bounds);
 }
