@@ -7,14 +7,83 @@
 #define CANVAS_START_OFFSET_Y 0
 #define BUTTON_SCROLL_REPEAT_MS 100
 
-#define SCROLL_MAGNET_Q8 256
+#define SCROLL_PHYSICS_Q8 256
+#define SCROLL_PHYSICS_FRAME_MS 16
 
-#define SCROLL_MAGNET_PULL_Q8 192
-#define SCROLL_MAGNET_RADIUS_NUM 2
-#define SCROLL_MAGNET_RADIUS_DEN 5
+/*
+ * Der Finger zieht die sichtbare Position über eine Feder.
+ * Je größer dieser Wert, desto direkter folgt der Inhalt.
+ */
+#define SCROLL_FINGER_SPRING_NUM 18
+#define SCROLL_FINGER_SPRING_DEN 100
 
-#define SCROLL_SNAP_FRAME_MS 16
-#define SCROLL_SNAP_STEPS 11
+/*
+ * Statische Haftung am Rastpunkt:
+ * Der Finger spannt zuerst rund 9 Pixel Federweg auf,
+ * bevor sich die sichtbare Position lösen darf.
+ */
+#define SCROLL_BREAKAWAY_DISTANCE_PX 9
+
+#define SCROLL_QUICK_SWIPE_MIN_DISTANCE_PX 5
+#define SCROLL_QUICK_SWIPE_MAX_DURATION_MS 230
+#define SCROLL_BREAKAWAY_FORCE_Q8 \
+  ( \
+    ( \
+      SCROLL_BREAKAWAY_DISTANCE_PX * \
+      SCROLL_PHYSICS_Q8 * \
+      SCROLL_FINGER_SPRING_NUM \
+    ) / \
+    SCROLL_FINGER_SPRING_DEN \
+  )
+
+/*
+ * Die Magnetkraft wird proportional zum Abstand der
+ * Rastpunkte skaliert. Dadurch fühlt sich auch der große
+ * Abstand zwischen Pille und erster Tablette ähnlich an.
+ */
+#define SCROLL_MAGNET_ACCEL_PER_PIXEL_Q8 12
+
+#define SCROLL_EDGE_OVERSCROLL_LIMIT_PX \
+  ((MEDICATION_ROW_HEIGHT + MEDICATION_ROW_GAP) / 2)
+
+#define SCROLL_TOUCH_DAMPING_NUM 68
+#define SCROLL_TOUCH_DAMPING_DEN 100
+
+#define SCROLL_SETTLE_SPRING_NUM 24
+#define SCROLL_SETTLE_SPRING_DEN 100
+
+/*
+ * Die automatische Einrastfeder darf höchstens so
+ * stark beschleunigen wie bei einem normalen Abstand
+ * zwischen zwei Medikamentenzeilen.
+ *
+ * Dadurch bleibt der große Weg Pille -> erste Zeile
+ * erhalten, erzeugt am Ziel aber keinen größeren Bounce.
+ */
+#define SCROLL_SETTLE_REFERENCE_DISTANCE_PX \
+  (MEDICATION_ROW_HEIGHT + MEDICATION_ROW_GAP)
+
+#define SCROLL_SETTLE_MAX_FORCE_Q8 \
+  ( \
+    ( \
+      SCROLL_SETTLE_REFERENCE_DISTANCE_PX * \
+      SCROLL_PHYSICS_Q8 * \
+      SCROLL_SETTLE_SPRING_NUM \
+    ) / \
+    SCROLL_SETTLE_SPRING_DEN \
+  )
+
+#define SCROLL_SETTLE_DAMPING_NUM 62
+#define SCROLL_SETTLE_DAMPING_DEN 100
+
+#define SCROLL_MAX_VELOCITY_Q8 \
+  (32 * SCROLL_PHYSICS_Q8)
+
+#define SCROLL_STOP_POSITION_Q8 \
+  (SCROLL_PHYSICS_Q8 / 4)
+
+#define SCROLL_STOP_VELOCITY_Q8 \
+  (SCROLL_PHYSICS_Q8 / 4)
 
 #define CONFIRM_ANIMATION_INTERVAL_MS 30
 #define CONFIRM_GROW_STEP 5
@@ -83,7 +152,7 @@ static GBitmap *s_frame;
 
 static AppTimer *s_ui_timer;
 static AppTimer *s_confirmation_timer;
-static AppTimer *s_scroll_snap_timer;
+static AppTimer *s_scroll_physics_timer;
 
 static GFont s_medication_font;
 
@@ -95,17 +164,32 @@ static uint8_t s_hint_phase;
 
 static int32_t s_canvas_offset_y;
 static int8_t s_snap_index;
-static int32_t s_scroll_raw_offset_q8;
-static int32_t s_scroll_visual_offset_q8;
+static int32_t s_scroll_position_q8;
+static int32_t s_scroll_velocity_q8;
 
-static int32_t s_scroll_snap_start_q8;
-static int32_t s_scroll_snap_target_q8;
-static uint8_t s_scroll_snap_step;
+static int32_t s_scroll_finger_target_q8;
+static int32_t s_scroll_settle_target_q8;
 
 static bool s_scroll_touching;
+static bool s_scroll_settling;
+
+static bool s_button_edge_bounce_outward;
+static int8_t s_button_edge_bounce_snap_index;
+
+static bool s_scroll_breakaway_locked;
+static int32_t s_scroll_breakaway_anchor_q8;
 
 #if defined(PBL_TOUCH)
 static int16_t s_touch_last_y;
+static int16_t s_touch_total_delta_y;
+static uint32_t s_touch_start_time_ms;
+
+static int8_t s_touch_start_snap_index;
+static int8_t s_touch_neighbor_snap_index;
+static int8_t s_touch_pair_direction;
+
+static bool s_touch_pair_selected;
+static bool s_touch_gesture_consumed;
 static bool s_dragging;
 #endif
 
@@ -133,6 +217,20 @@ static void cancel_timer(AppTimer **timer) {
 
 static int32_t abs_int32(int32_t value) {
   return value < 0 ? -value : value;
+}
+
+static uint32_t current_time_ms(void) {
+  time_t seconds;
+  uint16_t milliseconds;
+
+  time_ms(
+    &seconds,
+    &milliseconds
+  );
+
+  return
+      (uint32_t)seconds * 1000u +
+      milliseconds;
 }
 
 static int32_t snap_anchor_for_index(int index) {
@@ -169,21 +267,21 @@ static int clamp_snap_index(int index) {
 }
 
 static int32_t visual_canvas_offset_y(void) {
-  if (s_scroll_visual_offset_q8 >= 0) {
+  if (s_scroll_position_q8 >= 0) {
     return
         (
-          s_scroll_visual_offset_q8 +
-          SCROLL_MAGNET_Q8 / 2
+          s_scroll_position_q8 +
+          SCROLL_PHYSICS_Q8 / 2
         ) /
-        SCROLL_MAGNET_Q8;
+        SCROLL_PHYSICS_Q8;
   }
 
   return
       (
-        s_scroll_visual_offset_q8 -
-        SCROLL_MAGNET_Q8 / 2
+        s_scroll_position_q8 -
+        SCROLL_PHYSICS_Q8 / 2
       ) /
-      SCROLL_MAGNET_Q8;
+      SCROLL_PHYSICS_Q8;
 }
 
 static void set_canvas_to_snap_index(int index) {
@@ -685,146 +783,197 @@ static void schedule_confirmation_timer(void) {
   );
 }
 
-static int32_t magnetic_curve_q8(
-    int32_t progress_q8
+static int nearest_snap_index_for_position_q8(
+    int32_t position_q8
 ) {
-  if (progress_q8 <= 0) {
-    return 0;
-  }
+  const int current_index =
+      clamp_snap_index(s_snap_index);
 
-  if (progress_q8 >= SCROLL_MAGNET_Q8) {
-    return SCROLL_MAGNET_Q8;
-  }
+  const int32_t current_anchor_q8 =
+      snap_anchor_for_index(current_index) *
+      SCROLL_PHYSICS_Q8;
 
-  const int32_t radius_q8 =
-      (
-        SCROLL_MAGNET_Q8 *
-        SCROLL_MAGNET_RADIUS_NUM
-      ) /
-      SCROLL_MAGNET_RADIUS_DEN;
+  const int32_t escape_distance_q8 =
+      SCROLL_EDGE_OVERSCROLL_LIMIT_PX *
+      SCROLL_PHYSICS_Q8;
 
   /*
-   * Magnetfeld des ersten Rastpunkts.
+   * Jeder Rastpunkt hat denselben Fluchtradius.
+   * Das gilt auch für den großen sichtbaren Abstand
+   * zwischen Pille und erster Medikamentenzeile.
    *
-   * Direkt am Magneten werden 75 % der Bewegung
-   * zurückgehalten. Am Rand des Magnetfelds ist
-   * der Einfluss vollständig verschwunden.
+   * Vor 29 Pixeln gewinnt der aktuelle Rastpunkt.
+   * Ab 29 Pixeln gewinnt genau der benachbarte.
    */
-  if (progress_q8 < radius_q8) {
-    const int32_t distance_q8 =
-        (
-          progress_q8 *
-          SCROLL_MAGNET_Q8
-        ) /
-        radius_q8;
-
-    const int32_t remaining_q8 =
-        SCROLL_MAGNET_Q8 -
-        distance_q8;
-
-    const int32_t field_q8 =
-        (
-          remaining_q8 *
-          remaining_q8
-        ) /
-        SCROLL_MAGNET_Q8;
-
-    const int32_t pull_q8 =
-        (
-          field_q8 *
-          SCROLL_MAGNET_PULL_Q8
-        ) /
-        SCROLL_MAGNET_Q8;
-
-    return
-        (
-          progress_q8 *
-          (
-            SCROLL_MAGNET_Q8 -
-            pull_q8
-          )
-        ) /
-        SCROLL_MAGNET_Q8;
+  if (
+    position_q8 >=
+        current_anchor_q8 +
+        escape_distance_q8 &&
+    current_index > 0
+  ) {
+    return current_index - 1;
   }
 
-  const int32_t distance_to_end_q8 =
-      SCROLL_MAGNET_Q8 -
-      progress_q8;
-
-  /*
-   * Magnetfeld des zweiten Rastpunkts.
-   * Es ist exakt spiegelbildlich zum ersten.
-   */
-  if (distance_to_end_q8 < radius_q8) {
-    const int32_t distance_q8 =
-        (
-          distance_to_end_q8 *
-          SCROLL_MAGNET_Q8
-        ) /
-        radius_q8;
-
-    const int32_t remaining_q8 =
-        SCROLL_MAGNET_Q8 -
-        distance_q8;
-
-    const int32_t field_q8 =
-        (
-          remaining_q8 *
-          remaining_q8
-        ) /
-        SCROLL_MAGNET_Q8;
-
-    const int32_t pull_q8 =
-        (
-          field_q8 *
-          SCROLL_MAGNET_PULL_Q8
-        ) /
-        SCROLL_MAGNET_Q8;
-
-    const int32_t visible_distance_q8 =
-        (
-          distance_to_end_q8 *
-          (
-            SCROLL_MAGNET_Q8 -
-            pull_q8
-          )
-        ) /
-        SCROLL_MAGNET_Q8;
-
-    return
-        SCROLL_MAGNET_Q8 -
-        visible_distance_q8;
+  if (
+    position_q8 <=
+        current_anchor_q8 -
+        escape_distance_q8 &&
+    current_index < MEDICATION_COUNT
+  ) {
+    return current_index + 1;
   }
 
-  /*
-   * Zwischen beiden Magnetfeldern liegt eine
-   * neutrale Zone. Hier folgt der Inhalt dem
-   * Finger ohne zusätzliche Verformung.
-   */
-  return progress_q8;
+  return current_index;
 }
 
-static int32_t magnetic_offset_for_raw_q8(
-    int32_t raw_offset_q8
+static int32_t magnet_force_for_position_q8(
+    int32_t position_q8
 ) {
   const int32_t top_anchor_q8 =
       snap_anchor_for_index(0) *
-      SCROLL_MAGNET_Q8;
+      SCROLL_PHYSICS_Q8;
 
   const int32_t bottom_anchor_q8 =
       snap_anchor_for_index(MEDICATION_COUNT) *
-      SCROLL_MAGNET_Q8;
+      SCROLL_PHYSICS_Q8;
 
   /*
-   * Außerhalb der Liste bleibt die Bewegung bewusst
-   * vollständig 1:1. Beim Loslassen zieht der äußere
-   * Magnet die Anzeige wieder zurück.
+   * Außerhalb der äußeren Rastpunkte wirkt ein
+   * starker elastischer Anschlag. Dadurch kann der
+   * Inhalt nur ein kleines Stück über den Rand hinaus.
    */
-  if (
-    raw_offset_q8 >= top_anchor_q8 ||
-    raw_offset_q8 <= bottom_anchor_q8
-  ) {
-    return raw_offset_q8;
+  if (position_q8 >= top_anchor_q8) {
+    /*
+     * Oberhalb der Pille liegt ein virtueller
+     * Rastpunkt im normalen Medikamentenabstand.
+     * Erreichbar ist nur dessen erste Hälfte.
+     */
+    const int32_t virtual_anchor_q8 =
+        top_anchor_q8 +
+        (
+          MEDICATION_ROW_HEIGHT +
+          MEDICATION_ROW_GAP
+        ) *
+        SCROLL_PHYSICS_Q8;
+
+    const int32_t distance_q8 =
+        virtual_anchor_q8 -
+        top_anchor_q8;
+
+    const int32_t travelled_q8 =
+        position_q8 -
+        top_anchor_q8;
+
+    int32_t progress_q8 =
+        (
+          travelled_q8 *
+          SCROLL_PHYSICS_Q8
+        ) /
+        distance_q8;
+
+    if (
+      progress_q8 >
+      SCROLL_PHYSICS_Q8 / 2
+    ) {
+      progress_q8 =
+          SCROLL_PHYSICS_Q8 / 2;
+    }
+
+    const int32_t angle =
+        (
+          progress_q8 *
+          TRIG_MAX_ANGLE
+        ) /
+        SCROLL_PHYSICS_Q8;
+
+    const int32_t sine =
+        sin_lookup(angle);
+
+    const int32_t distance_pixels =
+        distance_q8 /
+        SCROLL_PHYSICS_Q8;
+
+    const int32_t maximum_force_q8 =
+        distance_pixels *
+        SCROLL_MAGNET_ACCEL_PER_PIXEL_Q8;
+
+    return
+        -(
+          (
+            maximum_force_q8 *
+            sine
+          ) /
+          TRIG_MAX_RATIO
+        );
+  }
+
+  if (position_q8 <= bottom_anchor_q8) {
+    /*
+     * Unter dem letzten echten Rastpunkt liegt ein
+     * unsichtbarer virtueller Rastpunkt im gleichen
+     * Abstand wie die Medikamentenzeilen.
+     *
+     * Der Finger darf nur bis zur Mitte dorthin.
+     * Deshalb erleben wir exakt die erste Hälfte
+     * derselben Magnetkurve wie zwischen zwei echten
+     * Medikamenten, können aber nie zum virtuellen
+     * Rastpunkt wechseln.
+     */
+    const int32_t virtual_anchor_q8 =
+        bottom_anchor_q8 -
+        (
+          MEDICATION_ROW_HEIGHT +
+          MEDICATION_ROW_GAP
+        ) *
+        SCROLL_PHYSICS_Q8;
+
+    const int32_t distance_q8 =
+        bottom_anchor_q8 -
+        virtual_anchor_q8;
+
+    const int32_t travelled_q8 =
+        bottom_anchor_q8 -
+        position_q8;
+
+    int32_t progress_q8 =
+        (
+          travelled_q8 *
+          SCROLL_PHYSICS_Q8
+        ) /
+        distance_q8;
+
+    if (
+      progress_q8 >
+      SCROLL_PHYSICS_Q8 / 2
+    ) {
+      progress_q8 =
+          SCROLL_PHYSICS_Q8 / 2;
+    }
+
+    const int32_t angle =
+        (
+          progress_q8 *
+          TRIG_MAX_ANGLE
+        ) /
+        SCROLL_PHYSICS_Q8;
+
+    const int32_t sine =
+        sin_lookup(angle);
+
+    const int32_t distance_pixels =
+        distance_q8 /
+        SCROLL_PHYSICS_Q8;
+
+    const int32_t maximum_force_q8 =
+        distance_pixels *
+        SCROLL_MAGNET_ACCEL_PER_PIXEL_Q8;
+
+    return
+        (
+          maximum_force_q8 *
+          sine
+        ) /
+        TRIG_MAX_RATIO;
   }
 
   for (
@@ -834,313 +983,621 @@ static int32_t magnetic_offset_for_raw_q8(
   ) {
     const int32_t first_anchor_q8 =
         snap_anchor_for_index(index) *
-        SCROLL_MAGNET_Q8;
+        SCROLL_PHYSICS_Q8;
 
     const int32_t second_anchor_q8 =
         snap_anchor_for_index(index + 1) *
-        SCROLL_MAGNET_Q8;
+        SCROLL_PHYSICS_Q8;
 
     if (
-      raw_offset_q8 <= first_anchor_q8 &&
-      raw_offset_q8 >= second_anchor_q8
+      position_q8 <= first_anchor_q8 &&
+      position_q8 >= second_anchor_q8
     ) {
       const int32_t distance_q8 =
           first_anchor_q8 -
           second_anchor_q8;
 
+      if (distance_q8 <= 0) {
+        return 0;
+      }
+
       const int32_t travelled_q8 =
           first_anchor_q8 -
-          raw_offset_q8;
+          position_q8;
 
       const int32_t progress_q8 =
           (
             travelled_q8 *
-            SCROLL_MAGNET_Q8
+            SCROLL_PHYSICS_Q8
           ) /
           distance_q8;
 
-      const int32_t curved_q8 =
-          magnetic_curve_q8(progress_q8);
-
-      return
-          first_anchor_q8 -
+      const int32_t angle =
           (
-            distance_q8 *
-            curved_q8
+            progress_q8 *
+            TRIG_MAX_ANGLE
           ) /
-          SCROLL_MAGNET_Q8;
-    }
-  }
+          SCROLL_PHYSICS_Q8;
 
-  return raw_offset_q8;
-}
+      const int32_t sine =
+          sin_lookup(angle);
 
-static int32_t raw_offset_for_magnetic_q8(
-    int32_t visual_offset_q8
-) {
-  const int32_t top_anchor_q8 =
-      snap_anchor_for_index(0) *
-      SCROLL_MAGNET_Q8;
+      const int32_t distance_pixels =
+          distance_q8 /
+          SCROLL_PHYSICS_Q8;
 
-  const int32_t bottom_anchor_q8 =
-      snap_anchor_for_index(MEDICATION_COUNT) *
-      SCROLL_MAGNET_Q8;
-
-  if (
-    visual_offset_q8 >= top_anchor_q8 ||
-    visual_offset_q8 <= bottom_anchor_q8
-  ) {
-    return visual_offset_q8;
-  }
-
-  for (
-    int index = 0;
-    index < MEDICATION_COUNT;
-    index++
-  ) {
-    const int32_t first_anchor_q8 =
-        snap_anchor_for_index(index) *
-        SCROLL_MAGNET_Q8;
-
-    const int32_t second_anchor_q8 =
-        snap_anchor_for_index(index + 1) *
-        SCROLL_MAGNET_Q8;
-
-    if (
-      visual_offset_q8 <= first_anchor_q8 &&
-      visual_offset_q8 >= second_anchor_q8
-    ) {
-      int32_t lower_raw_q8 =
-          second_anchor_q8;
-
-      int32_t upper_raw_q8 =
-          first_anchor_q8;
+      const int32_t maximum_force_q8 =
+          distance_pixels *
+          SCROLL_MAGNET_ACCEL_PER_PIXEL_Q8;
 
       /*
-       * Die Umkehrfunktion wird mit einer kleinen
-       * binären Suche bestimmt. Dadurch springt die
-       * Anzeige nicht, wenn ein laufender Snap mit
-       * dem Finger eingefangen wird.
+       * Erste Hälfte: positive Kraft zurück zum
+       * ersten Magneten.
+       *
+       * Zweite Hälfte: negative Kraft vorwärts zum
+       * nächsten Magneten.
+       *
+       * Exakt in der Mitte sind beide Magnetkräfte
+       * gleich stark und heben sich auf.
        */
-      for (int iteration = 0; iteration < 12; iteration++) {
-        const int32_t middle_raw_q8 =
-            (
-              lower_raw_q8 +
-              upper_raw_q8
-            ) /
-            2;
-
-        const int32_t middle_visual_q8 =
-            magnetic_offset_for_raw_q8(
-              middle_raw_q8
-            );
-
-        if (middle_visual_q8 > visual_offset_q8) {
-          upper_raw_q8 = middle_raw_q8;
-        } else {
-          lower_raw_q8 = middle_raw_q8;
-        }
-      }
-
       return
           (
-            lower_raw_q8 +
-            upper_raw_q8
+            maximum_force_q8 *
+            sine
           ) /
-          2;
+          TRIG_MAX_RATIO;
     }
   }
 
-  return visual_offset_q8;
+  return 0;
 }
 
-static int nearest_snap_index_for_offset_q8(
-    int32_t offset_q8
+static int32_t clamp_scroll_velocity_q8(
+    int32_t velocity_q8
 ) {
-  int nearest_index =
-      clamp_snap_index(s_snap_index);
-
-  int32_t nearest_distance =
-      abs_int32(
-        offset_q8 -
-        snap_anchor_for_index(nearest_index) *
-            SCROLL_MAGNET_Q8
-      );
-
-  for (
-    int index = 0;
-    index <= MEDICATION_COUNT;
-    index++
+  if (
+    velocity_q8 >
+    SCROLL_MAX_VELOCITY_Q8
   ) {
-    const int32_t distance =
-        abs_int32(
-          offset_q8 -
-          snap_anchor_for_index(index) *
-              SCROLL_MAGNET_Q8
-        );
-
-    if (distance < nearest_distance) {
-      nearest_index = index;
-      nearest_distance = distance;
-    }
+    return SCROLL_MAX_VELOCITY_Q8;
   }
 
-  return nearest_index;
+  if (
+    velocity_q8 <
+    -SCROLL_MAX_VELOCITY_Q8
+  ) {
+    return -SCROLL_MAX_VELOCITY_Q8;
+  }
+
+  return velocity_q8;
 }
 
-static bool scroll_snap_active(void) {
-  return s_scroll_snap_timer != NULL;
+static int32_t clamp_settle_force_q8(
+    int32_t force_q8
+) {
+  if (
+    force_q8 >
+    SCROLL_SETTLE_MAX_FORCE_Q8
+  ) {
+    return SCROLL_SETTLE_MAX_FORCE_Q8;
+  }
+
+  if (
+    force_q8 <
+    -SCROLL_SETTLE_MAX_FORCE_Q8
+  ) {
+    return -SCROLL_SETTLE_MAX_FORCE_Q8;
+  }
+
+  return force_q8;
 }
 
-static void cancel_scroll_snap(void) {
-  cancel_timer(&s_scroll_snap_timer);
-  s_scroll_snap_step = 0;
+static bool scroll_physics_active(void) {
+  return
+      s_scroll_touching ||
+      s_scroll_settling;
 }
 
-/*
- * Kompatibilitätsfunktionen für die bestehenden
- * Fenster-Cleanup-Blöcke. Die alte Feder-, Tal-
- * und Fling-Physik existiert nicht mehr.
- */
-static void cancel_scroll_fling(void) {
+static void cancel_scroll_physics(void) {
+  cancel_timer(&s_scroll_physics_timer);
+
+  s_scroll_touching = false;
+  s_scroll_settling = false;
+  s_button_edge_bounce_outward = false;
+  s_scroll_breakaway_locked = false;
+  s_scroll_velocity_q8 = 0;
 }
 
-static void cancel_scroll_spring(void) {
-  cancel_scroll_snap();
-}
+static void schedule_scroll_physics(void);
 
-static void cancel_scroll_downhill(void) {
-  cancel_scroll_snap();
-}
+static void start_scroll_settle_to_index(
+    int target_index,
+    bool keep_velocity
+);
 
-static void schedule_scroll_snap(void);
+static void start_canonical_snap_bounce(
+    int start_index,
+    int target_index
+);
 
-static void scroll_snap_tick(void *context) {
-  s_scroll_snap_timer = NULL;
+static void scroll_physics_tick(void *context) {
+  s_scroll_physics_timer = NULL;
+
+  if (!scroll_physics_active()) {
+    return;
+  }
+
+  int32_t acceleration_q8 = 0;
 
   if (s_scroll_touching) {
-    return;
+    const int32_t finger_force_q8 =
+        (
+          (
+            s_scroll_finger_target_q8 -
+            s_scroll_position_q8
+          ) *
+          SCROLL_FINGER_SPRING_NUM
+        ) /
+        SCROLL_FINGER_SPRING_DEN;
+
+    /*
+     * Solange die statische Haftung nicht überwunden
+     * ist, bleibt der Inhalt pixelgenau am Rastpunkt.
+     * Das Fingerziel bewegt sich trotzdem weiter und
+     * baut dadurch echte Federspannung auf.
+     */
+    if (s_scroll_breakaway_locked) {
+      if (
+        abs_int32(finger_force_q8) <
+        SCROLL_BREAKAWAY_FORCE_Q8
+      ) {
+        s_scroll_position_q8 =
+            s_scroll_breakaway_anchor_q8;
+
+        s_scroll_velocity_q8 = 0;
+
+        schedule_scroll_physics();
+        return;
+      }
+
+      /*
+       * Losbrechmoment erreicht: Die bereits gespannte
+       * Feder bleibt erhalten und setzt die Bewegung in
+       * derselben Richtung in Gang.
+       */
+      s_scroll_breakaway_locked = false;
+      s_scroll_position_q8 =
+          s_scroll_breakaway_anchor_q8;
+      s_scroll_velocity_q8 = 0;
+    }
+
+    const int32_t magnet_force_q8 =
+        magnet_force_for_position_q8(
+          s_scroll_position_q8
+        );
+
+    acceleration_q8 =
+        finger_force_q8 +
+        magnet_force_q8;
+
+    s_scroll_velocity_q8 +=
+        acceleration_q8;
+
+    s_scroll_velocity_q8 =
+        (
+          s_scroll_velocity_q8 *
+          SCROLL_TOUCH_DAMPING_NUM
+        ) /
+        SCROLL_TOUCH_DAMPING_DEN;
+  } else {
+    const int32_t settle_force_q8 =
+        clamp_settle_force_q8(
+          (
+            (
+              s_scroll_settle_target_q8 -
+              s_scroll_position_q8
+            ) *
+            SCROLL_SETTLE_SPRING_NUM
+          ) /
+          SCROLL_SETTLE_SPRING_DEN
+        );
+
+    const int32_t magnet_force_q8 =
+        magnet_force_for_position_q8(
+          s_scroll_position_q8
+        );
+
+    acceleration_q8 =
+        settle_force_q8 +
+        magnet_force_q8;
+
+    s_scroll_velocity_q8 +=
+        acceleration_q8;
+
+    s_scroll_velocity_q8 =
+        (
+          s_scroll_velocity_q8 *
+          SCROLL_SETTLE_DAMPING_NUM
+        ) /
+        SCROLL_SETTLE_DAMPING_DEN;
   }
 
-  if (s_scroll_snap_step < SCROLL_SNAP_STEPS) {
-    s_scroll_snap_step++;
-  }
+  s_scroll_velocity_q8 =
+      clamp_scroll_velocity_q8(
+        s_scroll_velocity_q8
+      );
 
-  if (s_scroll_snap_step >= SCROLL_SNAP_STEPS) {
-    s_scroll_visual_offset_q8 =
-        s_scroll_snap_target_q8;
-
-    s_scroll_raw_offset_q8 =
-        s_scroll_snap_target_q8;
-
-    s_scroll_snap_step = 0;
-    mark_canvas_dirty();
-    return;
-  }
-
-  const int32_t progress_q8 =
-      (
-        (int32_t)s_scroll_snap_step *
-        SCROLL_MAGNET_Q8
-      ) /
-      SCROLL_SNAP_STEPS;
-
-  const int32_t remaining_q8 =
-      SCROLL_MAGNET_Q8 -
-      progress_q8;
-
-  const int32_t remaining_squared_q8 =
-      (
-        remaining_q8 *
-        remaining_q8
-      ) /
-      SCROLL_MAGNET_Q8;
-
-  const int32_t remaining_cubed_q8 =
-      (
-        remaining_squared_q8 *
-        remaining_q8
-      ) /
-      SCROLL_MAGNET_Q8;
+  s_scroll_position_q8 +=
+      s_scroll_velocity_q8;
 
   /*
-   * Kubisches Ease-out:
-   * Der Magnet zieht anfangs kräftig und kommt
-   * weich exakt auf dem Rastpunkt zum Stillstand.
+   * Auch die sichtbare Position selbst darf den
+   * Mittelpunkt zum virtuellen Rastpunkt nicht
+   * durch ihre Geschwindigkeit überschießen.
    */
-  const int32_t eased_q8 =
-      SCROLL_MAGNET_Q8 -
-      remaining_cubed_q8;
+  const int32_t top_limit_q8 =
+      snap_anchor_for_index(0) *
+      SCROLL_PHYSICS_Q8 +
+      SCROLL_EDGE_OVERSCROLL_LIMIT_PX *
+      SCROLL_PHYSICS_Q8;
 
-  s_scroll_visual_offset_q8 =
-      s_scroll_snap_start_q8 +
-      (
+  const int32_t bottom_limit_q8 =
+      snap_anchor_for_index(
+        MEDICATION_COUNT
+      ) *
+      SCROLL_PHYSICS_Q8 -
+      SCROLL_EDGE_OVERSCROLL_LIMIT_PX *
+      SCROLL_PHYSICS_Q8;
+
+  if (
+    s_scroll_position_q8 >
+    top_limit_q8
+  ) {
+    s_scroll_position_q8 =
+        top_limit_q8;
+
+    if (s_scroll_velocity_q8 > 0) {
+      s_scroll_velocity_q8 = 0;
+    }
+  }
+
+  if (
+    s_scroll_position_q8 <
+    bottom_limit_q8
+  ) {
+    s_scroll_position_q8 =
+        bottom_limit_q8;
+
+    if (s_scroll_velocity_q8 < 0) {
+      s_scroll_velocity_q8 = 0;
+    }
+  }
+
+  /*
+   * Eine Taste am Listenrand fährt zunächst bis zum
+   * virtuellen Halb-Rastpunkt. Sobald die sichtbare
+   * Randgrenze erreicht ist, übernimmt wieder dieselbe
+   * Federphysik und bringt den Inhalt zum echten
+   * Rand-Rastpunkt zurück.
+   */
+  if (s_button_edge_bounce_outward) {
+    const bool reached_top_edge =
+        s_button_edge_bounce_snap_index == 0 &&
+        s_scroll_position_q8 >= top_limit_q8;
+
+    const bool reached_bottom_edge =
+        s_button_edge_bounce_snap_index ==
+            MEDICATION_COUNT &&
+        s_scroll_position_q8 <= bottom_limit_q8;
+
+    if (
+      reached_top_edge ||
+      reached_bottom_edge
+    ) {
+      const int return_index =
+          s_button_edge_bounce_snap_index;
+
+      s_button_edge_bounce_outward = false;
+      s_scroll_velocity_q8 = 0;
+
+      start_scroll_settle_to_index(
+        return_index,
+        false
+      );
+
+      mark_canvas_dirty();
+      return;
+    }
+  }
+
+#if defined(PBL_TOUCH)
+  /*
+   * Echte Rastpunkt-Paare bleiben während des gesamten
+   * Touchs interaktiv. Nur ein virtueller Tabellenrand
+   * verbraucht die Geste weiterhin beim Erreichen seiner
+   * halben Raststrecke.
+   */
+  if (
+    s_scroll_touching &&
+    s_touch_pair_selected &&
+    !s_touch_gesture_consumed &&
+    s_touch_neighbor_snap_index ==
+        s_touch_start_snap_index
+  ) {
+    const bool reached_virtual_edge =
         (
-          s_scroll_snap_target_q8 -
-          s_scroll_snap_start_q8
-        ) *
-        eased_q8
-      ) /
-      SCROLL_MAGNET_Q8;
+          s_touch_pair_direction < 0 &&
+          s_touch_start_snap_index == 0 &&
+          s_scroll_position_q8 >=
+              top_limit_q8
+        ) ||
+        (
+          s_touch_pair_direction > 0 &&
+          s_touch_start_snap_index ==
+              MEDICATION_COUNT &&
+          s_scroll_position_q8 <=
+              bottom_limit_q8
+        );
+
+    if (reached_virtual_edge) {
+      s_touch_gesture_consumed = true;
+
+      start_scroll_settle_to_index(
+        s_touch_start_snap_index,
+        true
+      );
+
+      mark_canvas_dirty();
+      return;
+    }
+  }
+#endif
+
+  if (
+    s_scroll_settling &&
+    abs_int32(
+      s_scroll_settle_target_q8 -
+      s_scroll_position_q8
+    ) <= SCROLL_STOP_POSITION_Q8 &&
+    abs_int32(
+      s_scroll_velocity_q8
+    ) <= SCROLL_STOP_VELOCITY_Q8
+  ) {
+    s_scroll_position_q8 =
+        s_scroll_settle_target_q8;
+
+    s_scroll_velocity_q8 = 0;
+    s_scroll_settling = false;
+  }
 
   mark_canvas_dirty();
-  schedule_scroll_snap();
+
+  if (scroll_physics_active()) {
+    schedule_scroll_physics();
+  }
 }
 
-static void schedule_scroll_snap(void) {
-  if (s_scroll_snap_timer) {
+static void schedule_scroll_physics(void) {
+  if (s_scroll_physics_timer) {
     return;
   }
 
-  s_scroll_snap_timer = app_timer_register(
-    SCROLL_SNAP_FRAME_MS,
-    scroll_snap_tick,
+  s_scroll_physics_timer = app_timer_register(
+    SCROLL_PHYSICS_FRAME_MS,
+    scroll_physics_tick,
     NULL
   );
 
-  if (!s_scroll_snap_timer) {
-    s_scroll_visual_offset_q8 =
-        s_scroll_snap_target_q8;
+  if (!s_scroll_physics_timer) {
+    if (s_scroll_settling) {
+      s_scroll_position_q8 =
+          s_scroll_settle_target_q8;
 
-    s_scroll_raw_offset_q8 =
-        s_scroll_snap_target_q8;
-
-    s_scroll_snap_step = 0;
-    mark_canvas_dirty();
+      s_scroll_velocity_q8 = 0;
+      s_scroll_settling = false;
+      mark_canvas_dirty();
+    }
   }
 }
 
-static void start_scroll_snap(int target_index) {
-  cancel_scroll_snap();
-
+static void start_scroll_settle_to_index(
+    int target_index,
+    bool keep_velocity
+) {
   target_index =
       clamp_snap_index(target_index);
 
-  s_scroll_snap_start_q8 =
-      s_scroll_visual_offset_q8;
+#if defined(PBL_TOUCH)
+  s_dragging = false;
+#endif
 
-  s_scroll_snap_target_q8 =
+  s_scroll_touching = false;
+  s_scroll_settling = true;
+  s_button_edge_bounce_outward = false;
+  s_scroll_breakaway_locked = false;
+
+  if (!keep_velocity) {
+    s_scroll_velocity_q8 = 0;
+  }
+
+  s_scroll_settle_target_q8 =
       snap_anchor_for_index(target_index) *
-      SCROLL_MAGNET_Q8;
+      SCROLL_PHYSICS_Q8;
 
   set_canvas_to_snap_index(target_index);
 
   if (
-    s_scroll_snap_start_q8 ==
-    s_scroll_snap_target_q8
+    s_scroll_position_q8 ==
+    s_scroll_settle_target_q8
   ) {
-    s_scroll_visual_offset_q8 =
-        s_scroll_snap_target_q8;
-
-    s_scroll_raw_offset_q8 =
-        s_scroll_snap_target_q8;
-
+    s_scroll_velocity_q8 = 0;
+    s_scroll_settling = false;
     mark_canvas_dirty();
     return;
   }
 
-  s_scroll_snap_step = 0;
-  schedule_scroll_snap();
+  schedule_scroll_physics();
+}
+
+static void start_button_edge_bounce(
+    int direction
+) {
+  cancel_timer(&s_scroll_physics_timer);
+
+  const int edge_index =
+      clamp_snap_index(s_snap_index);
+
+  const int32_t edge_anchor_q8 =
+      snap_anchor_for_index(edge_index) *
+      SCROLL_PHYSICS_Q8;
+
+  const int32_t half_interval_q8 =
+      SCROLL_EDGE_OVERSCROLL_LIMIT_PX *
+      SCROLL_PHYSICS_Q8;
+
+  s_scroll_touching = false;
+  s_scroll_settling = true;
+  s_scroll_breakaway_locked = false;
+
+  s_button_edge_bounce_outward = true;
+  s_button_edge_bounce_snap_index =
+      edge_index;
+
+  s_scroll_velocity_q8 = 0;
+
+  /*
+   * Das physikalische Ziel liegt bewusst hinter der
+   * sichtbaren Randgrenze. Dadurch erreicht die Anzeige
+   * trotz Magnet- und Federgegenkraft zuverlässig den
+   * virtuellen Halb-Rastpunkt. Die sichtbare Position
+   * selbst bleibt weiterhin auf die halbe Strecke
+   * begrenzt.
+   */
+  s_scroll_settle_target_q8 =
+      edge_anchor_q8 +
+      (
+        direction < 0
+            ? 2 * half_interval_q8
+            : -2 * half_interval_q8
+      );
+
+  schedule_scroll_physics();
+}
+
+/*
+ * Erzeugt exakt den gleichen Ziel-Bounce für Tasten,
+ * Quick-Swipe und normales Fingerziehen.
+ *
+ * Dafür wird die bestehende Settle-Feder intern vom
+ * Ausgangsrastpunkt bis zum ersten Überqueren des
+ * Zielrastpunkts simuliert. Position und Geschwindigkeit
+ * dieses Moments werden anschließend als gemeinsamer
+ * Startzustand für den sichtbaren Bounce verwendet.
+ */
+static void start_canonical_snap_bounce(
+    int start_index,
+    int target_index
+) {
+  start_index =
+      clamp_snap_index(start_index);
+
+  target_index =
+      clamp_snap_index(target_index);
+
+  if (start_index == target_index) {
+    start_scroll_settle_to_index(
+      target_index,
+      false
+    );
+    return;
+  }
+
+  const int32_t start_anchor_q8 =
+      snap_anchor_for_index(start_index) *
+      SCROLL_PHYSICS_Q8;
+
+  const int32_t target_anchor_q8 =
+      snap_anchor_for_index(target_index) *
+      SCROLL_PHYSICS_Q8;
+
+  int32_t simulated_position_q8 =
+      start_anchor_q8;
+
+  int32_t simulated_velocity_q8 = 0;
+
+  for (int step = 0; step < 32; step++) {
+    const int32_t settle_force_q8 =
+        clamp_settle_force_q8(
+          (
+            (
+              target_anchor_q8 -
+              simulated_position_q8
+            ) *
+            SCROLL_SETTLE_SPRING_NUM
+          ) /
+          SCROLL_SETTLE_SPRING_DEN
+        );
+
+    simulated_velocity_q8 +=
+        settle_force_q8;
+
+    simulated_velocity_q8 =
+        (
+          simulated_velocity_q8 *
+          SCROLL_SETTLE_DAMPING_NUM
+        ) /
+        SCROLL_SETTLE_DAMPING_DEN;
+
+    simulated_velocity_q8 =
+        clamp_scroll_velocity_q8(
+          simulated_velocity_q8
+        );
+
+    simulated_position_q8 +=
+        simulated_velocity_q8;
+
+    const bool crossed_target =
+        (
+          target_anchor_q8 <
+          start_anchor_q8 &&
+          simulated_position_q8 <=
+              target_anchor_q8
+        ) ||
+        (
+          target_anchor_q8 >
+          start_anchor_q8 &&
+          simulated_position_q8 >=
+              target_anchor_q8
+        );
+
+    if (crossed_target) {
+      break;
+    }
+  }
+
+  cancel_timer(&s_scroll_physics_timer);
+
+#if defined(PBL_TOUCH)
+  s_dragging = false;
+#endif
+
+  s_scroll_touching = false;
+  s_scroll_settling = true;
+  s_button_edge_bounce_outward = false;
+  s_scroll_breakaway_locked = false;
+
+  s_scroll_settle_target_q8 =
+      target_anchor_q8;
+
+  s_scroll_position_q8 =
+      simulated_position_q8;
+
+  s_scroll_velocity_q8 =
+      simulated_velocity_q8;
+
+  set_canvas_to_snap_index(target_index);
+  mark_canvas_dirty();
+  schedule_scroll_physics();
 }
 
 static bool step_snap_index(int direction) {
@@ -1150,10 +1607,36 @@ static bool step_snap_index(int direction) {
       );
 
   if (next_index == s_snap_index) {
+    const bool at_top_edge =
+        s_snap_index == 0 &&
+        direction < 0;
+
+    const bool at_bottom_edge =
+        s_snap_index == MEDICATION_COUNT &&
+        direction > 0;
+
+    if (
+      at_top_edge ||
+      at_bottom_edge
+    ) {
+      start_button_edge_bounce(direction);
+      return true;
+    }
+
     return false;
   }
 
-  start_scroll_snap(next_index);
+  /*
+   * Bei den Tasten wird der vollständige Weg zum
+   * nächsten Rastpunkt sichtbar mit der normalen
+   * Federphysik gefahren. Der Ziel-Bounce entsteht
+   * anschließend natürlich aus dieser Bewegung.
+   */
+  start_scroll_settle_to_index(
+    next_index,
+    true
+  );
+
   return true;
 }
 
@@ -1258,20 +1741,58 @@ static void touch_handler(
       }
 
       /*
-       * Ein laufender Snap kann jederzeit eingefangen
-       * werden. Die sichtbare Position bleibt dabei
-       * ohne Sprung exakt erhalten.
+       * Wie beim PebbleOS-ScrollLayer übernimmt der
+       * Finger eine laufende Bewegung sofort an der
+       * aktuell sichtbaren Position.
        */
-      cancel_scroll_snap();
+      cancel_timer(&s_scroll_physics_timer);
 
       s_dragging = true;
       s_scroll_touching = true;
-      s_touch_last_y = event->y;
+      s_scroll_settling = false;
 
-      s_scroll_raw_offset_q8 =
-          raw_offset_for_magnetic_q8(
-            s_scroll_visual_offset_q8
-          );
+      s_touch_last_y = event->y;
+      s_touch_total_delta_y = 0;
+      s_touch_start_time_ms = current_time_ms();
+
+      s_touch_start_snap_index =
+          clamp_snap_index(s_snap_index);
+
+      s_touch_neighbor_snap_index =
+          s_touch_start_snap_index;
+
+      s_touch_pair_direction = 0;
+      s_touch_pair_selected = false;
+      s_touch_gesture_consumed = false;
+
+      s_scroll_finger_target_q8 =
+          s_scroll_position_q8;
+
+      /*
+       * Die Haftung wird nur aktiviert, wenn der Inhalt
+       * beim Aufsetzen bereits praktisch auf seinem
+       * Rastpunkt steht. Eine laufende Bewegung lässt
+       * sich weiterhin ohne Sprung direkt einfangen.
+       */
+      s_scroll_breakaway_anchor_q8 =
+          snap_anchor_for_index(
+            clamp_snap_index(s_snap_index)
+          ) *
+          SCROLL_PHYSICS_Q8;
+
+      s_scroll_breakaway_locked =
+          abs_int32(
+            s_scroll_position_q8 -
+            s_scroll_breakaway_anchor_q8
+          ) <= SCROLL_PHYSICS_Q8;
+
+      /*
+       * Alte Animationsgeschwindigkeit nicht unter
+       * dem Finger weiterlaufen lassen.
+       */
+      s_scroll_velocity_q8 = 0;
+
+      schedule_scroll_physics();
       break;
 
     case TouchEvent_PositionUpdate:
@@ -1280,22 +1801,135 @@ static void touch_handler(
             event->y -
             s_touch_last_y;
 
+        if (s_touch_gesture_consumed) {
+          break;
+        }
+
         s_touch_last_y = event->y;
+        s_touch_total_delta_y += delta_y;
 
         if (delta_y == 0) {
           break;
         }
 
-        s_scroll_raw_offset_q8 +=
+        /*
+         * Erst wenn das Losbrechmoment erreicht ist,
+         * wird diese Geste fest einem direkten Nachbarn
+         * zugeordnet. Kleine Richtungsänderungen davor
+         * wählen dadurch nicht versehentlich die falsche
+         * Seite.
+         */
+        if (
+          !s_touch_pair_selected &&
+          abs_int32(
+            s_touch_total_delta_y
+          ) >= SCROLL_BREAKAWAY_DISTANCE_PX
+        ) {
+          s_touch_pair_direction =
+              s_touch_total_delta_y < 0
+                  ? 1
+                  : -1;
+
+          s_touch_neighbor_snap_index =
+              clamp_snap_index(
+                s_touch_start_snap_index +
+                s_touch_pair_direction
+              );
+
+          s_touch_pair_selected = true;
+        }
+
+        /*
+         * Der Finger selbst bewegt sein Ziel exakt 1:1.
+         * Die sichtbare Position wird anschließend von
+         * Fingerfeder und Magneten gemeinsam bestimmt.
+         */
+        s_scroll_finger_target_q8 +=
             (int32_t)delta_y *
-            SCROLL_MAGNET_Q8;
+            SCROLL_PHYSICS_Q8;
 
-        s_scroll_visual_offset_q8 =
-            magnetic_offset_for_raw_q8(
-              s_scroll_raw_offset_q8
-            );
+        if (s_touch_pair_selected) {
+          const int32_t start_anchor_q8 =
+              snap_anchor_for_index(
+                s_touch_start_snap_index
+              ) *
+              SCROLL_PHYSICS_Q8;
 
-        mark_canvas_dirty();
+          if (
+            s_touch_neighbor_snap_index !=
+            s_touch_start_snap_index
+          ) {
+            const int32_t neighbor_anchor_q8 =
+                snap_anchor_for_index(
+                  s_touch_neighbor_snap_index
+                ) *
+                SCROLL_PHYSICS_Q8;
+
+            const int32_t upper_anchor_q8 =
+                start_anchor_q8 >
+                    neighbor_anchor_q8
+                    ? start_anchor_q8
+                    : neighbor_anchor_q8;
+
+            const int32_t lower_anchor_q8 =
+                start_anchor_q8 <
+                    neighbor_anchor_q8
+                    ? start_anchor_q8
+                    : neighbor_anchor_q8;
+
+            /*
+             * Ein Touch bleibt auf genau dieses Paar
+             * begrenzt, darf darin aber beliebig oft
+             * vor und zurück fahren.
+             */
+            if (
+              s_scroll_finger_target_q8 >
+              upper_anchor_q8
+            ) {
+              s_scroll_finger_target_q8 =
+                  upper_anchor_q8;
+            }
+
+            if (
+              s_scroll_finger_target_q8 <
+              lower_anchor_q8
+            ) {
+              s_scroll_finger_target_q8 =
+                  lower_anchor_q8;
+            }
+          } else {
+            /*
+             * Am virtuellen oberen oder unteren Rand
+             * gibt es keinen zweiten echten Rastpunkt.
+             * Dort bleibt das bisherige Randverhalten
+             * unverändert.
+             */
+            if (
+              s_touch_pair_direction > 0 &&
+              s_scroll_finger_target_q8 >
+                  start_anchor_q8
+            ) {
+              s_scroll_finger_target_q8 =
+                  start_anchor_q8;
+            }
+
+            if (
+              s_touch_pair_direction < 0 &&
+              s_scroll_finger_target_q8 <
+                  start_anchor_q8
+            ) {
+              s_scroll_finger_target_q8 =
+                  start_anchor_q8;
+            }
+          }
+        }
+
+        /*
+         * An den virtuellen Rändern bleibt das Fingerziel
+         * frei genug, um die vollen sichtbaren 29 Pixel
+         * gegen Feder und Magnet zu erreichen.
+         */
+        schedule_scroll_physics();
       }
       break;
 
@@ -1303,13 +1937,90 @@ static void touch_handler(
       if (s_dragging) {
         s_dragging = false;
         s_scroll_touching = false;
+        s_scroll_breakaway_locked = false;
+
+        /*
+         * Wurde am virtuellen Tabellenrand bereits die
+         * maximale halbe Raststrecke erreicht, darf die
+         * Geste nur noch zurück zum echten Randpunkt
+         * federn. Ein neues Weiterbewegen verlangt ein
+         * erneutes Aufsetzen.
+         */
+        if (
+          s_touch_gesture_consumed &&
+          s_touch_neighbor_snap_index ==
+              s_touch_start_snap_index
+        ) {
+          start_scroll_settle_to_index(
+            s_touch_start_snap_index,
+            false
+          );
+          break;
+        }
+
+        const uint32_t touch_duration_ms =
+            current_time_ms() -
+            s_touch_start_time_ms;
+
+        const bool quick_swipe =
+            touch_duration_ms <=
+                SCROLL_QUICK_SWIPE_MAX_DURATION_MS &&
+            abs_int32(
+              s_touch_total_delta_y
+            ) >=
+                SCROLL_QUICK_SWIPE_MIN_DISTANCE_PX;
+
+        if (quick_swipe) {
+          /*
+           * Kurze Wischer werden als eigenes Ereignis
+           * ausgewertet. Dadurch muss der Finger nicht
+           * erst die normale magnetische Umschaltgrenze
+           * erreichen.
+           *
+           * Finger nach oben  -> nächster Rastpunkt.
+           * Finger nach unten -> vorheriger Rastpunkt.
+           */
+          const int direction =
+              s_touch_total_delta_y < 0
+                  ? 1
+                  : -1;
+
+          const int target_index =
+              clamp_snap_index(
+                s_snap_index +
+                direction
+              );
+
+          /*
+           * Der Quick-Swipe verwendet wieder die
+           * vollständige Federfahrt vom aktuellen
+           * sichtbaren Ort bis zum nächsten Rastpunkt.
+           * So bleibt der Übergang so angenehm wie vor
+           * der Bounce-Vereinheitlichung.
+           */
+          start_scroll_settle_to_index(
+            target_index,
+            true
+          );
+          break;
+        }
+
+        /*
+         * Bei langsamem Ziehen bleibt die bestehende
+         * Logik unverändert: Der nächstgelegene Magnet
+         * der sichtbaren Position gewinnt.
+         */
+        s_scroll_velocity_q8 = 0;
 
         const int nearest_index =
-            nearest_snap_index_for_offset_q8(
-              s_scroll_visual_offset_q8
+            nearest_snap_index_for_position_q8(
+              s_scroll_position_q8
             );
 
-        start_scroll_snap(nearest_index);
+        start_scroll_settle_to_index(
+          nearest_index,
+          false
+        );
       }
       break;
   }
@@ -1353,26 +2064,39 @@ static void reset_ui_state(GRect bounds) {
   s_hint_phase = 0;
   s_canvas_offset_y = CANVAS_START_OFFSET_Y;
   s_snap_index = 0;
-  s_scroll_raw_offset_q8 =
+  s_scroll_position_q8 =
       CANVAS_START_OFFSET_Y *
-      SCROLL_MAGNET_Q8;
+      SCROLL_PHYSICS_Q8;
 
-  s_scroll_visual_offset_q8 =
-      CANVAS_START_OFFSET_Y *
-      SCROLL_MAGNET_Q8;
+  s_scroll_velocity_q8 = 0;
 
-  s_scroll_snap_start_q8 =
-      s_scroll_visual_offset_q8;
+  s_scroll_finger_target_q8 =
+      s_scroll_position_q8;
 
-  s_scroll_snap_target_q8 =
-      s_scroll_visual_offset_q8;
+  s_scroll_settle_target_q8 =
+      s_scroll_position_q8;
 
-  s_scroll_snap_step = 0;
   s_scroll_touching = false;
+  s_scroll_settling = false;
+
+  s_button_edge_bounce_outward = false;
+  s_button_edge_bounce_snap_index = 0;
+
+  s_scroll_breakaway_locked = false;
+  s_scroll_breakaway_anchor_q8 =
+      s_scroll_position_q8;
 
 #if defined(PBL_TOUCH)
   s_dragging = false;
   s_touch_last_y = 0;
+  s_touch_total_delta_y = 0;
+  s_touch_start_time_ms = 0;
+
+  s_touch_start_snap_index = 0;
+  s_touch_neighbor_snap_index = 0;
+  s_touch_pair_direction = 0;
+  s_touch_pair_selected = false;
+  s_touch_gesture_consumed = false;
 #endif
 
   s_confirm_radius = 0;
@@ -1421,9 +2145,7 @@ static void window_appear(Window *window) {
 static void window_disappear(Window *window) {
   cancel_timer(&s_ui_timer);
   cancel_timer(&s_confirmation_timer);
-  cancel_scroll_fling();
-  cancel_scroll_spring();
-  cancel_scroll_downhill();
+  cancel_scroll_physics();
 
 #if defined(PBL_TOUCH)
   s_dragging = false;
@@ -1434,9 +2156,7 @@ static void window_disappear(Window *window) {
 static void window_unload(Window *window) {
   cancel_timer(&s_ui_timer);
   cancel_timer(&s_confirmation_timer);
-  cancel_scroll_fling();
-  cancel_scroll_spring();
-  cancel_scroll_downhill();
+  cancel_scroll_physics();
   destroy_frame();
 
   if (s_sheet) {
