@@ -7,22 +7,30 @@
 #define CANVAS_START_OFFSET_Y 0
 #define BUTTON_SCROLL_REPEAT_MS 100
 
-#define SCROLL_PIXELS_PER_DETENT 32
-#define SCROLL_DETENT_THRESHOLD_PX   (SCROLL_PIXELS_PER_DETENT / 2)
+#define SCROLL_SPRING_FRAME_MS 16
+#define SCROLL_SPRING_Q8 256
 
-#define SCROLL_ROLL_FRAME_MS 16
-#define SCROLL_ROLL_STRENGTH_NUM 48
-#define SCROLL_ROLL_STRENGTH_DEN 100
+#define SCROLL_SPRING_STIFFNESS_NUM 28
+#define SCROLL_SPRING_STIFFNESS_DEN 100
+#define SCROLL_SPRING_DAMPING_NUM 65
+#define SCROLL_SPRING_DAMPING_DEN 100
 
-#define SCROLL_DRAG_PREVIEW_DIVISOR 2
-#define SCROLL_DRAG_PREVIEW_MAX_PX 12
+#define SCROLL_SPRING_STOP_OFFSET_Q8 \
+  (SCROLL_SPRING_Q8 / 4)
+#define SCROLL_SPRING_STOP_VELOCITY_Q8 \
+  (SCROLL_SPRING_Q8 / 4)
 
-#define SCROLL_FLING_FRAME_MS 28
+#define SCROLL_HILL_PROGRESS_Q8 256
+
+#define SCROLL_FLING_FRAME_MS 20
 #define SCROLL_FLING_Q8 256
-#define SCROLL_FLING_MIN_START_Q8   (4 * SCROLL_FLING_Q8)
-#define SCROLL_FLING_MAX_SPEED_Q8   (36 * SCROLL_FLING_Q8)
-#define SCROLL_FLING_STOP_SPEED_Q8   (SCROLL_FLING_Q8 / 2)
-#define SCROLL_FLING_FRICTION_NUM 92
+#define SCROLL_FLING_MIN_START_Q8 \
+  (3 * SCROLL_FLING_Q8)
+#define SCROLL_FLING_MAX_SPEED_Q8 \
+  (30 * SCROLL_FLING_Q8)
+#define SCROLL_FLING_STOP_SPEED_Q8 \
+  (SCROLL_FLING_Q8 / 2)
+#define SCROLL_FLING_FRICTION_NUM 94
 #define SCROLL_FLING_FRICTION_DEN 100
 
 #define CONFIRM_ANIMATION_INTERVAL_MS 30
@@ -92,7 +100,7 @@ static GBitmap *s_frame;
 
 static AppTimer *s_ui_timer;
 static AppTimer *s_confirmation_timer;
-static AppTimer *s_scroll_roll_timer;
+static AppTimer *s_scroll_spring_timer;
 static AppTimer *s_scroll_fling_timer;
 
 static GFont s_medication_font;
@@ -107,7 +115,8 @@ static int32_t s_canvas_offset_y;
 static int8_t s_snap_index;
 static int16_t s_scroll_drag_accumulator;
 static int16_t s_scroll_drag_preview_y;
-static int16_t s_scroll_roll_offset_y;
+static int32_t s_scroll_spring_offset_q8;
+static int32_t s_scroll_spring_velocity_q8;
 static int32_t s_scroll_fling_velocity_q8;
 static int32_t s_scroll_fling_position_q8;
 static int32_t s_recent_drag_velocity_q8;
@@ -180,8 +189,9 @@ static int clamp_snap_index(int index) {
 static int32_t visual_canvas_offset_y(void) {
   return
       s_canvas_offset_y +
-      s_scroll_roll_offset_y +
-      s_scroll_drag_preview_y;
+      s_scroll_drag_preview_y +
+      s_scroll_spring_offset_q8 /
+          SCROLL_SPRING_Q8;
 }
 
 static void set_canvas_to_snap_index(int index) {
@@ -683,126 +693,288 @@ static void schedule_confirmation_timer(void) {
   );
 }
 
-static void cancel_scroll_roll(void) {
-  cancel_timer(&s_scroll_roll_timer);
-  s_scroll_roll_offset_y = 0;
-  s_scroll_drag_preview_y = 0;
+static bool scroll_spring_active(void) {
+  return
+      s_scroll_spring_timer != NULL ||
+      s_scroll_spring_offset_q8 != 0 ||
+      s_scroll_spring_velocity_q8 != 0;
 }
 
-static void scroll_roll_tick(void *context) {
-  s_scroll_roll_timer = NULL;
+static void cancel_scroll_spring(void) {
+  cancel_timer(&s_scroll_spring_timer);
+  s_scroll_spring_offset_q8 = 0;
+  s_scroll_spring_velocity_q8 = 0;
+}
 
-  if (s_scroll_roll_offset_y == 0) {
-    return;
-  }
+static void schedule_scroll_spring(void);
 
-  int16_t movement =
+static void scroll_spring_tick(void *context) {
+  s_scroll_spring_timer = NULL;
+
+  s_scroll_spring_velocity_q8 +=
       (
-        -s_scroll_roll_offset_y *
-        SCROLL_ROLL_STRENGTH_NUM
+        -s_scroll_spring_offset_q8 *
+        SCROLL_SPRING_STIFFNESS_NUM
       ) /
-      SCROLL_ROLL_STRENGTH_DEN;
+      SCROLL_SPRING_STIFFNESS_DEN;
 
-  if (movement == 0) {
-    movement =
-        s_scroll_roll_offset_y > 0
-            ? -1
-            : 1;
-  }
+  s_scroll_spring_velocity_q8 =
+      (
+        s_scroll_spring_velocity_q8 *
+        SCROLL_SPRING_DAMPING_NUM
+      ) /
+      SCROLL_SPRING_DAMPING_DEN;
 
-  s_scroll_roll_offset_y += movement;
+  s_scroll_spring_offset_q8 +=
+      s_scroll_spring_velocity_q8;
 
-  if (abs_int32(s_scroll_roll_offset_y) <= 1) {
-    s_scroll_roll_offset_y = 0;
+  if (
+    abs_int32(s_scroll_spring_offset_q8) <=
+        SCROLL_SPRING_STOP_OFFSET_Q8 &&
+    abs_int32(s_scroll_spring_velocity_q8) <=
+        SCROLL_SPRING_STOP_VELOCITY_Q8
+  ) {
+    s_scroll_spring_offset_q8 = 0;
+    s_scroll_spring_velocity_q8 = 0;
+    mark_canvas_dirty();
+    return;
   }
 
   mark_canvas_dirty();
-
-  if (s_scroll_roll_offset_y != 0) {
-    s_scroll_roll_timer = app_timer_register(
-      SCROLL_ROLL_FRAME_MS,
-      scroll_roll_tick,
-      NULL
-    );
-
-    if (!s_scroll_roll_timer) {
-      s_scroll_roll_offset_y = 0;
-      mark_canvas_dirty();
-    }
-  }
+  schedule_scroll_spring();
 }
 
-static void schedule_scroll_roll_timer(void) {
-  if (s_scroll_roll_timer) {
+static void schedule_scroll_spring(void) {
+  if (s_scroll_spring_timer) {
     return;
   }
 
-  s_scroll_roll_timer = app_timer_register(
-    SCROLL_ROLL_FRAME_MS,
-    scroll_roll_tick,
+  s_scroll_spring_timer = app_timer_register(
+    SCROLL_SPRING_FRAME_MS,
+    scroll_spring_tick,
     NULL
   );
 
-  if (!s_scroll_roll_timer) {
-    s_scroll_roll_offset_y = 0;
+  if (!s_scroll_spring_timer) {
+    s_scroll_spring_offset_q8 = 0;
+    s_scroll_spring_velocity_q8 = 0;
     mark_canvas_dirty();
   }
 }
 
-static void update_scroll_drag_preview(void) {
-  int16_t preview =
-      s_scroll_drag_accumulator /
-      SCROLL_DRAG_PREVIEW_DIVISOR;
+static void start_scroll_spring(
+    int32_t offset_q8,
+    int32_t velocity_q8
+) {
+  cancel_timer(&s_scroll_spring_timer);
 
-  if (preview > SCROLL_DRAG_PREVIEW_MAX_PX) {
-    preview = SCROLL_DRAG_PREVIEW_MAX_PX;
-  } else if (
-    preview < -SCROLL_DRAG_PREVIEW_MAX_PX
+  s_scroll_spring_offset_q8 = offset_q8;
+  s_scroll_spring_velocity_q8 = velocity_q8;
+
+  if (
+    s_scroll_spring_offset_q8 == 0 &&
+    s_scroll_spring_velocity_q8 == 0
   ) {
-    preview = -SCROLL_DRAG_PREVIEW_MAX_PX;
+    mark_canvas_dirty();
+    return;
   }
 
-  s_scroll_drag_preview_y = preview;
+  mark_canvas_dirty();
+  schedule_scroll_spring();
+}
+
+static int16_t snap_distance_between(
+    int first_index,
+    int second_index
+) {
+  return (int16_t)abs_int32(
+    snap_anchor_for_index(first_index) -
+    snap_anchor_for_index(second_index)
+  );
+}
+
+static int drag_direction_from_accumulator(void) {
+  if (s_scroll_drag_accumulator < 0) {
+    return 1;
+  }
+
+  if (s_scroll_drag_accumulator > 0) {
+    return -1;
+  }
+
+  return 0;
+}
+
+static int16_t hill_summit_distance(int direction) {
+  const int next_index =
+      clamp_snap_index(
+        s_snap_index + direction
+      );
+
+  if (next_index == s_snap_index) {
+    return 0;
+  }
+
+  const int16_t distance =
+      snap_distance_between(
+        s_snap_index,
+        next_index
+      );
+
+  const int16_t summit =
+      distance / 2;
+
+  return summit > 0
+      ? summit
+      : 1;
+}
+
+static void update_hill_preview(void) {
+  const int direction =
+      drag_direction_from_accumulator();
+
+  if (direction == 0) {
+    s_scroll_drag_preview_y = 0;
+    mark_canvas_dirty();
+    return;
+  }
+
+  const int next_index =
+      clamp_snap_index(
+        s_snap_index + direction
+      );
+
+  if (next_index == s_snap_index) {
+    /*
+     * Am Listenrand gibt es kein weiteres Tal.
+     * Der Inhalt folgt dem Finger trotzdem ohne künstliche
+     * Begrenzung über die komplette Strecke 1:1.
+     */
+    const int32_t edge_distance =
+        abs_int32(s_scroll_drag_accumulator);
+
+    s_scroll_drag_preview_y =
+        direction > 0
+            ? -(int16_t)edge_distance
+            : (int16_t)edge_distance;
+
+    mark_canvas_dirty();
+    return;
+  }
+
+  const int16_t summit =
+      hill_summit_distance(direction);
+
+  int32_t drag_distance =
+      abs_int32(s_scroll_drag_accumulator);
+
+  if (drag_distance > summit) {
+    drag_distance = summit;
+  }
+
+  /*
+   * Direkte 1:1-Bewegung:
+   * Ein Pixel Fingerweg bewegt den Inhalt um einen Pixel.
+   * Nur der Gipfel begrenzt den manuellen Weg.
+   */
+  s_scroll_drag_preview_y =
+      direction > 0
+          ? -(int16_t)drag_distance
+          : (int16_t)drag_distance;
+
   mark_canvas_dirty();
 }
 
-static void bounce_scroll_drag_preview_back(void) {
-  if (s_scroll_drag_preview_y == 0) {
+static void roll_from_summit_into_valley(
+    int direction
+) {
+  const int previous_index =
+      s_snap_index;
+
+  const int next_index =
+      clamp_snap_index(
+        previous_index + direction
+      );
+
+  if (next_index == previous_index) {
+    s_scroll_drag_accumulator = 0;
+    s_scroll_drag_preview_y = 0;
     return;
   }
 
   /*
-   * Transfer the visible finger displacement into the existing
-   * 48-percent roll animation. The content therefore continues
-   * from its current position and snaps back without a jump.
+   * Der Gipfel wurde überwunden:
+   * Der nächste Punkt rastet sofort im Tal ein.
+   * Es gibt hier bewusst keine Federanimation mehr,
+   * damit weitere Fingerbewegungen direkt wirken.
    */
-  s_scroll_roll_offset_y +=
+  s_scroll_drag_accumulator = 0;
+  s_scroll_drag_preview_y = 0;
+
+  /*
+   * Ein Wisch darf weiterhin höchstens einen
+   * Rastpunkt überwinden.
+   */
+  s_scroll_fling_velocity_q8 = 0;
+  s_scroll_fling_position_q8 = 0;
+  s_recent_drag_velocity_q8 = 0;
+
+  set_canvas_to_snap_index(next_index);
+}
+
+static void apply_hill_drag_delta(
+    int16_t delta_y
+) {
+  if (delta_y == 0 || scroll_spring_active()) {
+    return;
+  }
+
+  s_scroll_drag_accumulator += delta_y;
+
+  const int direction =
+      drag_direction_from_accumulator();
+
+  if (direction == 0) {
+    update_hill_preview();
+    return;
+  }
+
+  const int16_t summit =
+      hill_summit_distance(direction);
+
+  if (summit <= 0) {
+    update_hill_preview();
+    return;
+  }
+
+  if (
+    abs_int32(s_scroll_drag_accumulator) >=
+        summit
+  ) {
+    roll_from_summit_into_valley(direction);
+    return;
+  }
+
+  update_hill_preview();
+}
+
+static void return_to_current_valley(void) {
+  if (s_scroll_drag_preview_y == 0) {
+    s_scroll_drag_accumulator = 0;
+    return;
+  }
+
+  const int16_t preview =
       s_scroll_drag_preview_y;
 
   s_scroll_drag_preview_y = 0;
-  schedule_scroll_roll_timer();
-}
+  s_scroll_drag_accumulator = 0;
 
-static void start_scroll_roll(
-    int previous_index,
-    int next_index
-) {
-  const int32_t previous_anchor =
-      snap_anchor_for_index(previous_index);
-
-  const int32_t next_anchor =
-      snap_anchor_for_index(next_index);
-
-  /*
-   * Keep the old item visually in place for the first frame.
-   * The accumulated offset then rolls quickly into the new detent.
-   */
-  s_scroll_roll_offset_y +=
-      previous_anchor - next_anchor;
-
-  set_canvas_to_snap_index(next_index);
-
-  schedule_scroll_roll_timer();
+  start_scroll_spring(
+    (int32_t)preview *
+        SCROLL_SPRING_Q8,
+    0
+  );
 }
 
 static void cancel_scroll_fling(void) {
@@ -812,73 +984,30 @@ static void cancel_scroll_fling(void) {
   s_recent_drag_velocity_q8 = 0;
 }
 
-static bool step_snap_index(int direction) {
-  const int previous_index = s_snap_index;
-
-  const int next_index =
-      clamp_snap_index(
-        previous_index + direction
-      );
-
-  if (next_index == previous_index) {
-    return false;
-  }
-
-  start_scroll_roll(
-    previous_index,
-    next_index
-  );
-
-  return true;
-}
-
-static bool apply_scroll_drag_delta(int16_t delta_y) {
-  if (delta_y == 0) {
-    return false;
-  }
-
-  s_scroll_drag_accumulator += delta_y;
-
-  if (delta_y < 0) {
-    while (
-      s_scroll_drag_accumulator <=
-      -SCROLL_DETENT_THRESHOLD_PX
-    ) {
-      if (s_snap_index >= MEDICATION_COUNT) {
-        s_scroll_drag_accumulator =
-            -SCROLL_DETENT_THRESHOLD_PX + 1;
-        return true;
-      }
-
-      s_scroll_drag_accumulator +=
-          SCROLL_PIXELS_PER_DETENT;
-
-      step_snap_index(1);
-    }
-  } else {
-    while (
-      s_scroll_drag_accumulator >=
-      SCROLL_DETENT_THRESHOLD_PX
-    ) {
-      if (s_snap_index <= 0) {
-        s_scroll_drag_accumulator =
-            SCROLL_DETENT_THRESHOLD_PX - 1;
-        return true;
-      }
-
-      s_scroll_drag_accumulator -=
-          SCROLL_PIXELS_PER_DETENT;
-
-      step_snap_index(-1);
-    }
-  }
-
-  return false;
-}
-
 static void finish_scroll_fling(void) {
-  cancel_scroll_fling();
-  s_scroll_drag_accumulator = 0;
+  cancel_timer(&s_scroll_fling_timer);
+  s_scroll_fling_velocity_q8 = 0;
+  s_scroll_fling_position_q8 = 0;
+  s_recent_drag_velocity_q8 = 0;
+
+  if (!scroll_spring_active()) {
+    return_to_current_valley();
+  }
+}
+
+static void schedule_scroll_fling(void);
+
+static bool slow_scroll_fling(void) {
+  s_scroll_fling_velocity_q8 =
+      (
+        s_scroll_fling_velocity_q8 *
+        SCROLL_FLING_FRICTION_NUM
+      ) /
+      SCROLL_FLING_FRICTION_DEN;
+
+  return
+      abs_int32(s_scroll_fling_velocity_q8) <
+      SCROLL_FLING_STOP_SPEED_Q8;
 }
 
 static void scroll_fling_tick(void *context) {
@@ -889,7 +1018,22 @@ static void scroll_fling_tick(void *context) {
     s_scroll_touching ||
     s_confirmation_state != CONFIRM_IDLE
   ) {
-    cancel_scroll_fling();
+    finish_scroll_fling();
+    return;
+  }
+
+  /*
+   * Während die Kugel vom Gipfel ins Tal rollt,
+   * verliert der Wisch langsam Schwung. Ist nach
+   * der Landung noch genug übrig, läuft sie weiter.
+   */
+  if (scroll_spring_active()) {
+    if (slow_scroll_fling()) {
+      cancel_scroll_fling();
+      return;
+    }
+
+    schedule_scroll_fling();
     return;
   }
 
@@ -906,27 +1050,33 @@ static void scroll_fling_tick(void *context) {
       (int32_t)movement *
       SCROLL_FLING_Q8;
 
-  const bool reached_boundary =
-      movement != 0 &&
-      apply_scroll_drag_delta(movement);
+  if (movement != 0) {
+    apply_hill_drag_delta(movement);
+  }
 
-  s_scroll_fling_velocity_q8 =
-      (
-        s_scroll_fling_velocity_q8 *
-        SCROLL_FLING_FRICTION_NUM
-      ) /
-      SCROLL_FLING_FRICTION_DEN;
+  /*
+   * Sobald der nächste Gipfel überwunden ist und
+   * die Kugel ins nächste Tal rollt, ist der komplette
+   * Wisch-Schwung verbraucht. So kann niemals ein
+   * weiterer Rastpunkt übersprungen werden.
+   */
+  if (scroll_spring_active()) {
+    cancel_scroll_fling();
+    return;
+  }
 
-  if (
-    reached_boundary ||
-    abs_int32(s_scroll_fling_velocity_q8) <
-        SCROLL_FLING_STOP_SPEED_Q8
-  ) {
+  if (slow_scroll_fling()) {
     finish_scroll_fling();
     return;
   }
 
-  mark_canvas_dirty();
+  schedule_scroll_fling();
+}
+
+static void schedule_scroll_fling(void) {
+  if (s_scroll_fling_timer) {
+    return;
+  }
 
   s_scroll_fling_timer = app_timer_register(
     SCROLL_FLING_FRAME_MS,
@@ -947,14 +1097,15 @@ static bool start_scroll_fling(void) {
     abs_int32(requested_velocity) <
         SCROLL_FLING_MIN_START_Q8
   ) {
-    cancel_scroll_fling();
     return false;
   }
 
   cancel_timer(&s_scroll_fling_timer);
 
-  if (requested_velocity >
-      SCROLL_FLING_MAX_SPEED_Q8) {
+  if (
+    requested_velocity >
+    SCROLL_FLING_MAX_SPEED_Q8
+  ) {
     s_scroll_fling_velocity_q8 =
         SCROLL_FLING_MAX_SPEED_Q8;
   } else if (
@@ -969,18 +1120,31 @@ static bool start_scroll_fling(void) {
   }
 
   s_scroll_fling_position_q8 = 0;
+  schedule_scroll_fling();
 
-  s_scroll_fling_timer = app_timer_register(
-    SCROLL_FLING_FRAME_MS,
-    scroll_fling_tick,
-    NULL
-  );
+  return s_scroll_fling_timer != NULL;
+}
 
-  if (!s_scroll_fling_timer) {
-    cancel_scroll_fling();
+static bool step_snap_index(int direction) {
+  const int next_index =
+      clamp_snap_index(
+        s_snap_index + direction
+      );
+
+  if (next_index == s_snap_index) {
     return false;
   }
 
+  /*
+   * Tasten rasten direkt ein. Dadurch blockiert
+   * keine Ankunftsanimation den nächsten Klick.
+   */
+  cancel_scroll_spring();
+
+  s_scroll_drag_accumulator = 0;
+  s_scroll_drag_preview_y = 0;
+
+  set_canvas_to_snap_index(next_index);
   return true;
 }
 
@@ -993,7 +1157,6 @@ static void scroll_up_handler(
   }
 
   cancel_scroll_fling();
-  s_scroll_drag_accumulator = 0;
   step_snap_index(-1);
 }
 
@@ -1006,7 +1169,6 @@ static void scroll_down_handler(
   }
 
   cancel_scroll_fling();
-  s_scroll_drag_accumulator = 0;
   step_snap_index(1);
 }
 
@@ -1089,11 +1251,25 @@ static void touch_handler(
       }
 
       cancel_scroll_fling();
-      cancel_scroll_roll();
+
+      /*
+       * Ein Rückfeder-Bounce darf jederzeit mit dem
+       * Finger eingefangen und weitergezogen werden.
+       */
+      const int16_t carried_offset =
+          (int16_t)(
+            s_scroll_drag_preview_y +
+            s_scroll_spring_offset_q8 /
+                SCROLL_SPRING_Q8
+          );
+
+      cancel_scroll_spring();
+
       s_dragging = true;
       s_scroll_touching = true;
       s_touch_last_y = event->y;
-      s_scroll_drag_accumulator = 0;
+      s_scroll_drag_accumulator = carried_offset;
+      s_scroll_drag_preview_y = carried_offset;
       s_recent_drag_velocity_q8 = 0;
       break;
 
@@ -1109,9 +1285,9 @@ static void touch_handler(
         }
 
         /*
-         * Same weighted velocity estimate as Swiss Chronograph:
-         * newest movement counts strongly, but the last tiny event
-         * cannot erase a fast swipe.
+         * Neue Bewegungen zählen stark. Ein winziges
+         * letztes Event löscht einen schnellen Wisch
+         * aber nicht sofort.
          */
         s_recent_drag_velocity_q8 =
             (
@@ -1124,8 +1300,7 @@ static void touch_handler(
             ) /
             4;
 
-        apply_scroll_drag_delta(delta_y);
-        update_scroll_drag_preview();
+        apply_hill_drag_delta(delta_y);
       }
       break;
 
@@ -1134,25 +1309,30 @@ static void touch_handler(
         s_dragging = false;
         s_scroll_touching = false;
 
-        const bool fling_started =
-            start_scroll_fling();
+        bool fling_started = false;
 
-        if (fling_started) {
-          /*
-           * A fast swipe continues through real detents.
-           * The small preview displacement must not remain.
-           */
-          s_scroll_drag_preview_y = 0;
+        /*
+         * Wurde der Gipfel bereits während des Fingerkontakts
+         * überschritten, rollt die Kugel schon ins nächste Tal.
+         * Dann darf kein zusätzlicher Schwung gespeichert werden.
+         */
+        if (scroll_spring_active()) {
+          cancel_scroll_fling();
         } else {
-          /*
-           * A short pull that did not cross the threshold
-           * visibly snaps back to the current detent.
-           */
-          bounce_scroll_drag_preview_back();
+          fling_started = start_scroll_fling();
+        }
+
+        if (
+          !fling_started &&
+          !scroll_spring_active()
+        ) {
+          return_to_current_valley();
+        }
+
+        if (!fling_started) {
           s_recent_drag_velocity_q8 = 0;
         }
 
-        s_scroll_drag_accumulator = 0;
         mark_canvas_dirty();
       }
       break;
@@ -1199,7 +1379,8 @@ static void reset_ui_state(GRect bounds) {
   s_snap_index = 0;
   s_scroll_drag_accumulator = 0;
   s_scroll_drag_preview_y = 0;
-  s_scroll_roll_offset_y = 0;
+  s_scroll_spring_offset_q8 = 0;
+  s_scroll_spring_velocity_q8 = 0;
   s_scroll_fling_velocity_q8 = 0;
   s_scroll_fling_position_q8 = 0;
   s_recent_drag_velocity_q8 = 0;
@@ -1257,7 +1438,7 @@ static void window_disappear(Window *window) {
   cancel_timer(&s_ui_timer);
   cancel_timer(&s_confirmation_timer);
   cancel_scroll_fling();
-  cancel_scroll_roll();
+  cancel_scroll_spring();
 
 #if defined(PBL_TOUCH)
   s_dragging = false;
@@ -1269,7 +1450,7 @@ static void window_unload(Window *window) {
   cancel_timer(&s_ui_timer);
   cancel_timer(&s_confirmation_timer);
   cancel_scroll_fling();
-  cancel_scroll_roll();
+  cancel_scroll_spring();
   destroy_frame();
 
   if (s_sheet) {
