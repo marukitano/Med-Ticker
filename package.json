@@ -18,7 +18,10 @@
       "MED_SCHEDULE": 4,
       "MED_DAY": 5,
       "MED_SYMBOL": 6,
-      "MED_ENABLED": 7
+      "MED_ENABLED": 7,
+      "MED_INDEX": 8,
+      "MED_COUNT": 9,
+      "MED_COMMAND": 10
     },
     "projectType": "native",
     "resources": {
@@ -42,5 +45,5 @@
       "configurable"
     ]
   },
-  "version": "0.1.4"
+  "version": "0.1.5"
 }

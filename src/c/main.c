@@ -90,10 +90,14 @@
 #define TAKEN_HINT_MIN_RADIUS 5
 
 #define THEME_PERSIST_KEY 200
-#define MEDICATION_PERSIST_KEY 201
+#define LEGACY_MEDICATION_PERSIST_KEY 201
+#define MEDICATION_LIST_PERSIST_KEY 202
+#define MEDICATION_COUNT_PERSIST_KEY 203
 #define SETTINGS_MESSAGE_BUFFER_SIZE 256
 #define MEDICATION_NAME_LENGTH 32
 #define MEDICATION_LABEL_LENGTH 48
+#define MAX_MEDICATIONS 8
+#define MAX_LIST_ROWS (MAX_MEDICATIONS + 1)
 
 typedef enum {
   MEDICATION_TIME_MORNING,
@@ -162,21 +166,24 @@ static const MedicationSettings s_default_medication = {
   .enabled = 1
 };
 
-static MedicationSettings s_medication;
-static char s_primary_medication_label[
-  MEDICATION_LABEL_LENGTH
-] = "Xarelto 20 mg";
+static MedicationSettings s_medications[
+  MAX_MEDICATIONS
+];
+static uint8_t s_medication_count;
 
-static const char *const s_rows[] = {
-  s_primary_medication_label,
-  "Metformin 1000 mg",
-  "Pantoprazol 40 mg",
-  "genommen?"
-};
+static MedicationSettings s_pending_medications[
+  MAX_MEDICATIONS
+];
+static uint8_t s_pending_count;
+static uint16_t s_pending_received_mask;
 
-enum {
-  LIST_ROW_COUNT = ARRAY_LENGTH(s_rows)
-};
+static char s_row_labels[
+  MAX_LIST_ROWS
+][MEDICATION_LABEL_LENGTH];
+static const char *s_rows[MAX_LIST_ROWS];
+static uint8_t s_list_row_count = 1;
+
+#define LIST_ROW_COUNT ((int)s_list_row_count)
 
 static Window *s_window;
 static Layer *s_canvas_layer;
@@ -276,6 +283,7 @@ static GColor theme_hint_color(void) {
 }
 
 static void update_band_animation_target(void);
+static void reset_ui_state(GRect bounds);
 
 static void mark_scene_dirty(void) {
   update_band_animation_target();
@@ -322,6 +330,12 @@ static void apply_theme(
   }
 }
 
+typedef enum {
+  SETTINGS_COMMAND_RESET,
+  SETTINGS_COMMAND_ITEM,
+  SETTINGS_COMMAND_COMMIT
+} SettingsCommand;
+
 static bool medication_settings_valid(
     const MedicationSettings *settings
 ) {
@@ -362,77 +376,273 @@ static bool medication_settings_valid(
       settings->day <= 31;
 }
 
-static void rebuild_primary_medication_label(void) {
-  if (!s_medication.enabled) {
+static void format_medication_label(
+    const MedicationSettings *medication,
+    char *label,
+    size_t label_size
+) {
+  if (medication->quantity > 1) {
     snprintf(
-      s_primary_medication_label,
-      sizeof(s_primary_medication_label),
-      "%s (aus)",
-      s_medication.name
-    );
-    return;
-  }
-
-  if (s_medication.quantity > 1) {
-    snprintf(
-      s_primary_medication_label,
-      sizeof(s_primary_medication_label),
+      label,
+      label_size,
       "%s x%u",
-      s_medication.name,
-      (unsigned int)s_medication.quantity
+      medication->name,
+      (unsigned int)medication->quantity
     );
     return;
   }
 
   snprintf(
-    s_primary_medication_label,
-    sizeof(s_primary_medication_label),
+    label,
+    label_size,
     "%s",
-    s_medication.name
+    medication->name
   );
 }
 
-static void apply_medication_settings(
-    const MedicationSettings *settings,
+static void rebuild_medication_rows(void) {
+  s_list_row_count = 0;
+
+  for (
+    uint8_t index = 0;
+    index < s_medication_count;
+    index++
+  ) {
+    if (!s_medications[index].enabled) {
+      continue;
+    }
+
+    format_medication_label(
+      &s_medications[index],
+      s_row_labels[s_list_row_count],
+      sizeof(s_row_labels[s_list_row_count])
+    );
+
+    s_rows[s_list_row_count] =
+        s_row_labels[s_list_row_count];
+
+    s_list_row_count++;
+  }
+
+  snprintf(
+    s_row_labels[s_list_row_count],
+    sizeof(s_row_labels[s_list_row_count]),
+    "genommen?"
+  );
+
+  s_rows[s_list_row_count] =
+      s_row_labels[s_list_row_count];
+
+  s_list_row_count++;
+}
+
+static bool medication_list_valid(
+    const MedicationSettings *medications,
+    uint8_t count
+) {
+  if (count > MAX_MEDICATIONS) {
+    return false;
+  }
+
+  for (
+    uint8_t index = 0;
+    index < count;
+    index++
+  ) {
+    if (
+      !medication_settings_valid(
+        &medications[index]
+      )
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+static void persist_medication_list(void) {
+  persist_write_int(
+    MEDICATION_COUNT_PERSIST_KEY,
+    s_medication_count
+  );
+
+  if (s_medication_count == 0) {
+    persist_delete(
+      MEDICATION_LIST_PERSIST_KEY
+    );
+    return;
+  }
+
+  persist_write_data(
+    MEDICATION_LIST_PERSIST_KEY,
+    s_medications,
+    sizeof(MedicationSettings) *
+        s_medication_count
+  );
+}
+
+static void apply_medication_list(
+    const MedicationSettings *medications,
+    uint8_t count,
     bool save
 ) {
-  s_medication = *settings;
-  rebuild_primary_medication_label();
+  if (
+    !medication_list_valid(
+      medications,
+      count
+    )
+  ) {
+    return;
+  }
+
+  memset(
+    s_medications,
+    0,
+    sizeof(s_medications)
+  );
+
+  if (count > 0) {
+    memcpy(
+      s_medications,
+      medications,
+      sizeof(MedicationSettings) * count
+    );
+  }
+
+  s_medication_count = count;
+  rebuild_medication_rows();
 
   if (save) {
-    persist_write_data(
-      MEDICATION_PERSIST_KEY,
-      &s_medication,
-      sizeof(s_medication)
+    persist_medication_list();
+  }
+
+  if (s_canvas_layer) {
+    reset_ui_state(
+      layer_get_bounds(s_canvas_layer)
     );
   }
 
   mark_scene_dirty();
 }
 
-static void load_medication_settings(void) {
-  s_medication = s_default_medication;
+static bool load_current_medication_list(void) {
+  if (
+    !persist_exists(
+      MEDICATION_COUNT_PERSIST_KEY
+    )
+  ) {
+    return false;
+  }
+
+  const int stored_count =
+      persist_read_int(
+        MEDICATION_COUNT_PERSIST_KEY
+      );
 
   if (
-    persist_exists(MEDICATION_PERSIST_KEY) &&
-    persist_get_size(MEDICATION_PERSIST_KEY) ==
-        (int)sizeof(MedicationSettings)
+    stored_count < 0 ||
+    stored_count > MAX_MEDICATIONS
+  ) {
+    return false;
+  }
+
+  if (stored_count == 0) {
+    s_medication_count = 0;
+    rebuild_medication_rows();
+    return true;
+  }
+
+  const int expected_size =
+      (int)(
+        sizeof(MedicationSettings) *
+        stored_count
+      );
+
+  if (
+    !persist_exists(
+      MEDICATION_LIST_PERSIST_KEY
+    ) ||
+    persist_get_size(
+      MEDICATION_LIST_PERSIST_KEY
+    ) != expected_size
+  ) {
+    return false;
+  }
+
+  MedicationSettings stored[
+    MAX_MEDICATIONS
+  ];
+
+  memset(stored, 0, sizeof(stored));
+
+  if (
+    persist_read_data(
+      MEDICATION_LIST_PERSIST_KEY,
+      stored,
+      expected_size
+    ) != expected_size ||
+    !medication_list_valid(
+      stored,
+      (uint8_t)stored_count
+    )
+  ) {
+    return false;
+  }
+
+  memcpy(
+    s_medications,
+    stored,
+    expected_size
+  );
+
+  s_medication_count =
+      (uint8_t)stored_count;
+
+  rebuild_medication_rows();
+  return true;
+}
+
+static void load_medication_settings(void) {
+  memset(
+    s_medications,
+    0,
+    sizeof(s_medications)
+  );
+
+  if (load_current_medication_list()) {
+    return;
+  }
+
+  MedicationSettings migrated =
+      s_default_medication;
+
+  if (
+    persist_exists(
+      LEGACY_MEDICATION_PERSIST_KEY
+    ) &&
+    persist_get_size(
+      LEGACY_MEDICATION_PERSIST_KEY
+    ) == (int)sizeof(MedicationSettings)
   ) {
     MedicationSettings stored;
 
     if (
       persist_read_data(
-        MEDICATION_PERSIST_KEY,
+        LEGACY_MEDICATION_PERSIST_KEY,
         &stored,
         sizeof(stored)
       ) == (int)sizeof(stored) &&
       medication_settings_valid(&stored)
     ) {
-      s_medication = stored;
+      migrated = stored;
     }
   }
 
-  rebuild_primary_medication_label();
+  s_medications[0] = migrated;
+  s_medication_count = 1;
+  rebuild_medication_rows();
+  persist_medication_list();
 }
 
 static bool tuple_read_int32(
@@ -592,6 +802,30 @@ static bool read_medication_from_message(
   return true;
 }
 
+static uint16_t expected_pending_mask(
+    uint8_t count
+) {
+  if (count == 0) {
+    return 0;
+  }
+
+  return
+      (uint16_t)((1u << count) - 1u);
+}
+
+static void reset_pending_medications(
+    uint8_t count
+) {
+  memset(
+    s_pending_medications,
+    0,
+    sizeof(s_pending_medications)
+  );
+
+  s_pending_count = count;
+  s_pending_received_mask = 0;
+}
+
 static void settings_inbox_received(
     DictionaryIterator *iterator,
     void *context
@@ -618,33 +852,107 @@ static void settings_inbox_received(
     );
   }
 
+  Tuple *command_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_COMMAND
+  );
+
+  int32_t command;
+
   if (
-    !dict_find(
-      iterator,
-      MESSAGE_KEY_MED_NAME
+    !tuple_read_int32(
+      command_tuple,
+      &command
     )
   ) {
     return;
   }
 
-  MedicationSettings medication;
+  Tuple *count_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_COUNT
+  );
+
+  int32_t count;
 
   if (
-    read_medication_from_message(
-      iterator,
-      &medication
-    )
+    !tuple_read_int32(
+      count_tuple,
+      &count
+    ) ||
+    count < 0 ||
+    count > MAX_MEDICATIONS
   ) {
-    apply_medication_settings(
-      &medication,
-      true
-    );
-  } else {
-    APP_LOG(
-      APP_LOG_LEVEL_WARNING,
-      "Invalid medication settings"
-    );
+    return;
   }
+
+  if (command == SETTINGS_COMMAND_RESET) {
+    reset_pending_medications(
+      (uint8_t)count
+    );
+    return;
+  }
+
+  if (
+    count != s_pending_count
+  ) {
+    return;
+  }
+
+  if (command == SETTINGS_COMMAND_ITEM) {
+    Tuple *index_tuple = dict_find(
+      iterator,
+      MESSAGE_KEY_MED_INDEX
+    );
+
+    int32_t index;
+
+    if (
+      !tuple_read_int32(
+        index_tuple,
+        &index
+      ) ||
+      index < 0 ||
+      index >= count
+    ) {
+      return;
+    }
+
+    MedicationSettings medication;
+
+    if (
+      !read_medication_from_message(
+        iterator,
+        &medication
+      )
+    ) {
+      return;
+    }
+
+    s_pending_medications[index] =
+        medication;
+
+    s_pending_received_mask |=
+        (uint16_t)(1u << index);
+
+    return;
+  }
+
+  if (
+    command != SETTINGS_COMMAND_COMMIT ||
+    s_pending_received_mask !=
+        expected_pending_mask(
+          s_pending_count
+        )
+  ) {
+    return;
+  }
+
+  apply_medication_list(
+    s_pending_medications,
+    s_pending_count,
+    true
+  );
 }
 
 static void settings_init(void) {
@@ -653,6 +961,7 @@ static void settings_init(void) {
       persist_read_int(THEME_PERSIST_KEY) == 1;
 
   load_medication_settings();
+  reset_pending_medications(0);
 
   app_message_register_inbox_received(
     settings_inbox_received
