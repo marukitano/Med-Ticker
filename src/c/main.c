@@ -99,10 +99,12 @@
 #define MAX_MEDICATIONS 8
 #define MAX_LIST_ROWS (MAX_MEDICATIONS + 1)
 
-#define DAYPART_MORNING_START_HOUR 5
-#define DAYPART_NOON_START_HOUR 11
-#define DAYPART_EVENING_START_HOUR 16
-#define DAYPART_NIGHT_START_HOUR 21
+#define DAYPART_PERSIST_KEY 204
+#define DAYPART_MINUTES_PER_DAY 1440
+#define DEFAULT_MORNING_START_MINUTE (5 * 60)
+#define DEFAULT_NOON_START_MINUTE (11 * 60)
+#define DEFAULT_EVENING_START_MINUTE (16 * 60)
+#define DEFAULT_NIGHT_START_MINUTE (21 * 60)
 
 typedef enum {
   MEDICATION_TIME_MORNING,
@@ -132,6 +134,13 @@ typedef struct {
   uint8_t symbol;
   uint8_t enabled;
 } MedicationSettings;
+
+typedef struct {
+  uint16_t morning;
+  uint16_t noon;
+  uint16_t evening;
+  uint16_t night;
+} DaypartSettings;
 
 typedef enum {
   CONFIRM_IDLE,
@@ -170,6 +179,15 @@ static const MedicationSettings s_default_medication = {
   .symbol = MEDICATION_SYMBOL_PILL,
   .enabled = 1
 };
+
+static const DaypartSettings s_default_dayparts = {
+  .morning = DEFAULT_MORNING_START_MINUTE,
+  .noon = DEFAULT_NOON_START_MINUTE,
+  .evening = DEFAULT_EVENING_START_MINUTE,
+  .night = DEFAULT_NIGHT_START_MINUTE
+};
+
+static DaypartSettings s_dayparts;
 
 static MedicationSettings s_medications[
   MAX_MEDICATIONS
@@ -291,6 +309,7 @@ static GColor theme_hint_color(void) {
 
 static void update_band_animation_target(void);
 static void reset_ui_state(GRect bounds);
+static void refresh_medication_rows_for_time(void);
 
 static void mark_scene_dirty(void) {
   update_band_animation_target();
@@ -407,26 +426,84 @@ static void format_medication_label(
   );
 }
 
-static MedicationTime medication_time_for_hour(
-    int hour
+static bool daypart_settings_valid(
+    const DaypartSettings *settings
+) {
+  return
+      settings &&
+      settings->morning < settings->noon &&
+      settings->noon < settings->evening &&
+      settings->evening < settings->night &&
+      settings->night < DAYPART_MINUTES_PER_DAY;
+}
+
+static void load_daypart_settings(void) {
+  s_dayparts = s_default_dayparts;
+
+  if (
+    !persist_exists(DAYPART_PERSIST_KEY) ||
+    persist_get_size(DAYPART_PERSIST_KEY) !=
+        (int)sizeof(DaypartSettings)
+  ) {
+    return;
+  }
+
+  DaypartSettings stored;
+
+  if (
+    persist_read_data(
+      DAYPART_PERSIST_KEY,
+      &stored,
+      sizeof(stored)
+    ) == (int)sizeof(stored) &&
+    daypart_settings_valid(&stored)
+  ) {
+    s_dayparts = stored;
+  }
+}
+
+static void apply_daypart_settings(
+    const DaypartSettings *settings,
+    bool save
+) {
+  if (!daypart_settings_valid(settings)) {
+    return;
+  }
+
+  s_dayparts = *settings;
+
+  if (save) {
+    persist_write_data(
+      DAYPART_PERSIST_KEY,
+      &s_dayparts,
+      sizeof(s_dayparts)
+    );
+  }
+
+  s_visible_medication_time_set = false;
+  refresh_medication_rows_for_time();
+}
+
+static MedicationTime medication_time_for_minute(
+    int minute
 ) {
   if (
-    hour >= DAYPART_MORNING_START_HOUR &&
-    hour < DAYPART_NOON_START_HOUR
+    minute >= s_dayparts.morning &&
+    minute < s_dayparts.noon
   ) {
     return MEDICATION_TIME_MORNING;
   }
 
   if (
-    hour >= DAYPART_NOON_START_HOUR &&
-    hour < DAYPART_EVENING_START_HOUR
+    minute >= s_dayparts.noon &&
+    minute < s_dayparts.evening
   ) {
     return MEDICATION_TIME_NOON;
   }
 
   if (
-    hour >= DAYPART_EVENING_START_HOUR &&
-    hour < DAYPART_NIGHT_START_HOUR
+    minute >= s_dayparts.evening &&
+    minute < s_dayparts.night
   ) {
     return MEDICATION_TIME_EVENING;
   }
@@ -442,8 +519,9 @@ static MedicationTime current_medication_time(void) {
     return MEDICATION_TIME_MORNING;
   }
 
-  return medication_time_for_hour(
-    local_time->tm_hour
+  return medication_time_for_minute(
+    local_time->tm_hour * 60 +
+    local_time->tm_min
   );
 }
 
@@ -752,6 +830,79 @@ static bool tuple_read_int32(
   return true;
 }
 
+static bool read_dayparts_from_message(
+    DictionaryIterator *iterator,
+    DaypartSettings *settings
+) {
+  Tuple *morning_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_DAYPART_MORNING
+  );
+
+  Tuple *noon_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_DAYPART_NOON
+  );
+
+  Tuple *evening_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_DAYPART_EVENING
+  );
+
+  Tuple *night_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_DAYPART_NIGHT
+  );
+
+  int32_t morning;
+  int32_t noon;
+  int32_t evening;
+  int32_t night;
+
+  if (
+    !tuple_read_int32(
+      morning_tuple,
+      &morning
+    ) ||
+    !tuple_read_int32(
+      noon_tuple,
+      &noon
+    ) ||
+    !tuple_read_int32(
+      evening_tuple,
+      &evening
+    ) ||
+    !tuple_read_int32(
+      night_tuple,
+      &night
+    ) ||
+    morning < 0 ||
+    noon < 0 ||
+    evening < 0 ||
+    night < 0 ||
+    morning >= DAYPART_MINUTES_PER_DAY ||
+    noon >= DAYPART_MINUTES_PER_DAY ||
+    evening >= DAYPART_MINUTES_PER_DAY ||
+    night >= DAYPART_MINUTES_PER_DAY
+  ) {
+    return false;
+  }
+
+  const DaypartSettings parsed = {
+    .morning = (uint16_t)morning,
+    .noon = (uint16_t)noon,
+    .evening = (uint16_t)evening,
+    .night = (uint16_t)night
+  };
+
+  if (!daypart_settings_valid(&parsed)) {
+    return false;
+  }
+
+  *settings = parsed;
+  return true;
+}
+
 static bool read_medication_from_message(
     DictionaryIterator *iterator,
     MedicationSettings *settings
@@ -940,6 +1091,32 @@ static void settings_inbox_received(
     );
   }
 
+  if (
+    dict_find(
+      iterator,
+      MESSAGE_KEY_DAYPART_MORNING
+    )
+  ) {
+    DaypartSettings dayparts;
+
+    if (
+      read_dayparts_from_message(
+        iterator,
+        &dayparts
+      )
+    ) {
+      apply_daypart_settings(
+        &dayparts,
+        true
+      );
+    } else {
+      APP_LOG(
+        APP_LOG_LEVEL_WARNING,
+        "Invalid daypart settings"
+      );
+    }
+  }
+
   Tuple *command_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_COMMAND
@@ -1048,6 +1225,7 @@ static void settings_init(void) {
       persist_exists(THEME_PERSIST_KEY) &&
       persist_read_int(THEME_PERSIST_KEY) == 1;
 
+  load_daypart_settings();
   load_medication_settings();
   reset_pending_medications(0);
 

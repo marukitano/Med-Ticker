@@ -21,7 +21,11 @@
       "MED_ENABLED": 7,
       "MED_INDEX": 8,
       "MED_COUNT": 9,
-      "MED_COMMAND": 10
+      "MED_COMMAND": 10,
+      "DAYPART_MORNING": 11,
+      "DAYPART_NOON": 12,
+      "DAYPART_EVENING": 13,
+      "DAYPART_NIGHT": 14
     },
     "projectType": "native",
     "resources": {
@@ -45,5 +49,5 @@
       "configurable"
     ]
   },
-  "version": "0.1.6"
+  "version": "0.1.7"
 }
