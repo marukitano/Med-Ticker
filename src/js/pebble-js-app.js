@@ -40,6 +40,8 @@ var DEFAULT_MEDICATION = {
   schedule: 0,
   day: 0,
   symbol: 0,
+  shape: 2,
+  color: 255,
   enabled: true
 };
 
@@ -129,6 +131,8 @@ function cloneDefaultMedication() {
     schedule: DEFAULT_MEDICATION.schedule,
     day: DEFAULT_MEDICATION.day,
     symbol: DEFAULT_MEDICATION.symbol,
+    shape: DEFAULT_MEDICATION.shape,
+    color: DEFAULT_MEDICATION.color,
     enabled: DEFAULT_MEDICATION.enabled
   };
 }
@@ -141,6 +145,8 @@ function blankMedication() {
     schedule: 0,
     day: 0,
     symbol: 0,
+    shape: 2,
+    color: 255,
     enabled: true
   };
 }
@@ -215,6 +221,14 @@ function normalizeMedication(value) {
     ? value.symbol
     : DEFAULT_MEDICATION.symbol;
 
+  var shape = integerInRange(value.shape, 0, 3)
+    ? value.shape
+    : DEFAULT_MEDICATION.shape;
+
+  var color = integerInRange(value.color, 192, 255)
+    ? value.color
+    : DEFAULT_MEDICATION.color;
+
   return {
     name: name,
     quantity: quantity,
@@ -222,6 +236,8 @@ function normalizeMedication(value) {
     schedule: schedule,
     day: day,
     symbol: symbol,
+    shape: shape,
+    color: color,
     enabled: value.enabled !== false
   };
 }
@@ -469,6 +485,18 @@ function configurationPage(
     '.save{width:100%;padding:13px;border:0;border-radius:8px;background:#111;color:#fff;font-size:17px;font-weight:bold}',
     '.empty{text-align:center;color:#666;padding:18px 6px}',
     '.note{color:#666;font-size:13px;line-height:1.35;margin-top:12px}',
+    '.icon-fields{margin-top:14px;padding:12px;border:1px solid #d2d2d2;border-radius:9px}',
+    '.icon-preview-row{display:flex;align-items:center;gap:13px;margin-bottom:3px}',
+    '.icon-preview-text{font-size:14px;font-weight:bold}',
+    '.pill-preview{width:54px;height:44px;display:flex;align-items:center;justify-content:center;background:#e8e8e8;border-radius:8px}',
+    '.pill-shape{display:block;border:2px solid rgba(0,0,0,.38);box-shadow:inset 0 1px 2px rgba(255,255,255,.55)}',
+    '.shape-0{width:28px;height:28px;border-radius:50%}',
+    '.shape-1{width:39px;height:24px;border-radius:50%}',
+    '.shape-2{width:42px;height:21px;border-radius:12px}',
+    '.shape-3{width:27px;height:27px;border-radius:4px;transform:rotate(45deg)}',
+    '.color-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:6px;margin-top:8px}',
+    '.color-swatch{aspect-ratio:1;border:2px solid rgba(0,0,0,.28);border-radius:5px;padding:0;min-width:0}',
+    '.color-swatch.selected{outline:3px solid #111;outline-offset:1px}',
     'body.dark{background:#111;color:#f4f4f4;color-scheme:dark}',
     'body.dark section,body.dark .card{background:#202020}',
     'body.dark .toggle{color:#f4f4f4}',
@@ -477,6 +505,9 @@ function configurationPage(
     'body.dark .remove{background:#333;color:#f4f4f4}',
     'body.dark .add{border-color:#ddd;background:#202020;color:#f4f4f4}',
     'body.dark .save{background:#f2f2f2;color:#111}',
+    'body.dark .icon-fields{border-color:#505050}',
+    'body.dark .pill-preview{background:#303030}',
+    'body.dark .color-swatch.selected{outline-color:#fff}',
     '</style>',
     '</head>',
     '<body' + bodyClass + '>',
@@ -540,7 +571,7 @@ function configurationPage(
     'return "<option value=\\""+value+"\\""+(value===current?" selected":"")+">"+label+"</option>";',
     '}',
     'function blankMedication(){',
-    'return {name:"",quantity:1,time:0,schedule:0,day:0,symbol:0,enabled:true};',
+    'return {name:"",quantity:1,time:0,schedule:0,day:0,symbol:0,shape:2,color:255,enabled:true};',
     '}',
     'function numberValue(card,name){',
     'return parseInt(card.querySelector("[data-field=\\""+name+"\\"]").value,10);',
@@ -559,6 +590,8 @@ function configurationPage(
     'schedule:schedule,',
     'day:day,',
     'symbol:numberValue(card,"symbol"),',
+    'shape:numberValue(card,"shape"),',
+    'color:numberValue(card,"color"),',
     'enabled:card.querySelector("[data-field=\\"enabled\\"]").checked',
     '});',
     '}',
@@ -568,6 +601,37 @@ function configurationPage(
     'var schedule=numberValue(card,"schedule");',
     'card.querySelector(".weekday").className=schedule===1?"weekday":"weekday hidden";',
     'card.querySelector(".monthday").className=schedule===2?"monthday":"monthday hidden";',
+    '}',
+    'function pebbleColorHex(value){',
+    'var red=((value>>4)&3)*85;',
+    'var green=((value>>2)&3)*85;',
+    'var blue=(value&3)*85;',
+    'function hex(component){var result=component.toString(16);return result.length<2?"0"+result:result;}',
+    'return "#"+hex(red)+hex(green)+hex(blue);',
+    '}',
+    'function paletteHtml(current){',
+    'var html="";',
+    'for(var value=192;value<=255;value++){',
+    'var selected=value===current?" selected":"";',
+    'html+="<button class=\\"color-swatch"+selected+"\\" type=\\"button\\" data-color=\\""+value+"\\" title=\\"Pebble ARGB8 0x"+value.toString(16).toUpperCase()+"\\" style=\\"background:"+pebbleColorHex(value)+"\\"></button>";',
+    '}',
+    'return html;',
+    '}',
+    'function updateIconFields(card){',
+    'var fields=card.querySelector(".icon-fields");',
+    'var isTablet=numberValue(card,"symbol")===0;',
+    'fields.className=isTablet?"icon-fields":"icon-fields hidden";',
+    'if(!isTablet){return;}',
+    'var shape=numberValue(card,"shape");',
+    'var color=numberValue(card,"color");',
+    'var preview=card.querySelector(".pill-shape");',
+    'preview.className="pill-shape shape-"+shape;',
+    'preview.style.backgroundColor=pebbleColorHex(color);',
+    'var swatches=card.querySelectorAll("[data-color]");',
+    'for(var i=0;i<swatches.length;i++){',
+    'var selected=parseInt(swatches[i].getAttribute("data-color"),10)===color;',
+    'swatches[i].className=selected?"color-swatch selected":"color-swatch";',
+    '}',
     '}',
     'function setCardOpen(card,open){',
     'var body=card.querySelector(".body");',
@@ -609,6 +673,14 @@ function configurationPage(
     'html+="<label>Art<select data-field=\\"symbol\\">";',
     'html+=option(0,"Tablette",med.symbol)+option(1,"Pen / Spritze",med.symbol);',
     'html+="</select></label>";',
+    'html+="<div class=\\"icon-fields\\">";',
+    'html+="<div class=\\"icon-preview-row\\"><span class=\\"pill-preview\\"><span class=\\"pill-shape shape-"+med.shape+"\\"></span></span><span class=\\"icon-preview-text\\">Tabletten-Icon</span></div>";',
+    'html+="<label>Form<select data-field=\\"shape\\">";',
+    'html+=option(0,"Rund",med.shape)+option(1,"Ellipse",med.shape)+option(2,"Pille / Kapsel",med.shape)+option(3,"Rhombus",med.shape);',
+    'html+="</select></label>";',
+    'html+="<input data-field=\\"color\\" type=\\"hidden\\" value=\\""+med.color+"\\">";',
+    'html+="<label>Farbe</label><div class=\\"color-grid\\">"+paletteHtml(med.color)+"</div>";',
+    'html+="</div>";',
     'html+="<label class=\\"check\\"><input data-field=\\"enabled\\" type=\\"checkbox\\""+(med.enabled?" checked":"")+"><span>Aktiv</span></label>";',
     'html+="<button class=\\"remove\\" type=\\"button\\" data-remove=\\""+i+"\\">Medikament löschen</button>";',
     'html+="</div></section>";',
@@ -619,7 +691,14 @@ function configurationPage(
     'for(var c=0;c<cards.length;c++){',
     'var card=cards[c];',
     'updateDayFields(card);',
+    'updateIconFields(card);',
     'card.querySelector("[data-field=\\"schedule\\"]").onchange=(function(item){return function(){updateDayFields(item);};})(card);',
+    'card.querySelector("[data-field=\\"symbol\\"]").onchange=(function(item){return function(){updateIconFields(item);};})(card);',
+    'card.querySelector("[data-field=\\"shape\\"]").onchange=(function(item){return function(){updateIconFields(item);};})(card);',
+    'var colorButtons=card.querySelectorAll("[data-color]");',
+    'for(var colorIndex=0;colorIndex<colorButtons.length;colorIndex++){',
+    'colorButtons[colorIndex].onclick=(function(item){return function(){item.querySelector("[data-field=\\"color\\"]").value=this.getAttribute("data-color");updateIconFields(item);};})(card);',
+    '}',
     'card.querySelector("[data-toggle]").onclick=(function(item){return function(){var hidden=item.querySelector(".body").className.indexOf("hidden")>=0;setCardOpen(item,hidden);};})(card);',
     'if(parseInt(card.getAttribute("data-index"),10)===openIndex){setCardOpen(card,true);}',
     '}',
