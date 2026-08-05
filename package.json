@@ -10,7 +10,9 @@
   "pebble": {
     "displayName": "Pill Reminder",
     "enableMultiJS": false,
-    "messageKeys": {},
+    "messageKeys": {
+      "CONFIG_DATA": 0
+    },
     "projectType": "native",
     "resources": {
       "media": [
@@ -28,7 +30,10 @@
     "uuid": "aa20d4d2-49cc-44ae-9732-c67fced38f43",
     "watchapp": {
       "watchface": false
-    }
+    },
+    "capabilities": [
+      "configurable"
+    ]
   },
-  "version": "0.1.2"
+  "version": "0.2.0"
 }
