@@ -496,6 +496,44 @@ static void set_band_layer_x_q8(
         SCROLL_Q8
       );
 
+  /*
+   * Beim Ausfahren gehört der Balken weiterhin zur
+   * ersten Medikamentenzeile und folgt deshalb ihrer
+   * vertikalen Scrollbewegung.
+   *
+   * In allen anderen Zuständen bleibt er wie bisher
+   * fest in der Bildschirmmitte.
+   */
+  if (
+    !s_band.target_visible &&
+    !layer_get_hidden(
+      s_band_layer
+    )
+  ) {
+    frame.origin.y =
+        (int16_t)(
+          current_pill_y() +
+          s_frame_height +
+          MEDICATION_GAP - 7 +
+          HINT_POSITION_ADJUST_Y +
+          HINT_HEIGHT +
+          15 +
+          MEDICATION_HEADER_HEIGHT
+        );
+  } else if (s_canvas_layer) {
+    const GRect canvas_bounds =
+        layer_get_bounds(
+          s_canvas_layer
+        );
+
+    frame.origin.y =
+        (
+          canvas_bounds.size.h -
+          MEDICATION_ROW_HEIGHT
+        ) /
+        2;
+  }
+
   layer_set_frame(
     s_band_layer,
     frame
@@ -697,26 +735,6 @@ static void update_band_animation_target(void) {
       layer_get_bounds(
         s_canvas_layer
       );
-
-  /*
-   * Die Sichtbarkeitsgrenze gilt nur während der
-   * Ausfahrt zur Pille. Beim Einrasten des ersten
-   * Medikamentes darf sie den Start des Bandes nicht
-   * mehr blockieren.
-   */
-  if (
-    pill_is_visible() &&
-    !s_band.target_visible &&
-    (
-      s_band.animating ||
-      !layer_get_hidden(
-        s_band_layer
-      )
-    )
-  ) {
-    finish_band_exit();
-    return;
-  }
 
   const bool should_exit =
       scrolling_back_to_pill();
