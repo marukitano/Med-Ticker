@@ -97,7 +97,7 @@
 #define MEDICATION_NAME_LENGTH 32
 #define MEDICATION_LABEL_LENGTH 48
 #define MAX_MEDICATIONS 8
-#define MAX_LIST_ROWS (MAX_MEDICATIONS + 1)
+#define MAX_LIST_ROWS (MAX_MEDICATIONS + 2)
 
 #define DAYPART_PERSIST_KEY 204
 #define DAYPART_MINUTES_PER_DAY 1440
@@ -121,9 +121,16 @@ typedef enum {
 
 typedef enum {
   MEDICATION_SYMBOL_PILL,
-  MEDICATION_SYMBOL_PEN,
-  MEDICATION_SYMBOL_TUBE
+  MEDICATION_SYMBOL_PEN
 } MedicationSymbol;
+
+#define LEGACY_MEDICATION_SYMBOL_TUBE 2
+
+typedef enum {
+  MEDICATION_ROW_ITEM,
+  MEDICATION_ROW_CONFIRM_PILLS,
+  MEDICATION_ROW_CONFIRM_PEN
+} MedicationRowKind;
 
 typedef struct {
   char name[MEDICATION_NAME_LENGTH];
@@ -204,9 +211,14 @@ static char s_row_labels[
   MAX_LIST_ROWS
 ][MEDICATION_LABEL_LENGTH];
 static const char *s_rows[MAX_LIST_ROWS];
+static MedicationRowKind s_row_kinds[
+  MAX_LIST_ROWS
+];
 static uint8_t s_list_row_count = 1;
 static MedicationTime s_visible_medication_time;
 static bool s_visible_medication_time_set;
+static bool s_pills_confirmed;
+static bool s_pen_confirmed;
 
 #define LIST_ROW_COUNT ((int)s_list_row_count)
 
@@ -285,6 +297,8 @@ static ScrollTouchState s_touch;
 static int16_t s_confirm_radius;
 static int16_t s_confirm_max_radius;
 static ConfirmationState s_confirmation_state;
+static MedicationSymbol s_confirmation_symbol;
+static bool s_confirmation_symbol_set;
 
 static int16_t s_check_size;
 static CheckState s_check_state;
@@ -377,7 +391,7 @@ static bool medication_settings_valid(
     settings->schedule >
         MEDICATION_SCHEDULE_MONTHLY ||
     settings->symbol >
-        MEDICATION_SYMBOL_TUBE ||
+        MEDICATION_SYMBOL_PEN ||
     settings->enabled > 1
   ) {
     return false;
@@ -400,6 +414,22 @@ static bool medication_settings_valid(
   return
       settings->day >= 1 &&
       settings->day <= 31;
+}
+
+static bool migrate_legacy_medication_symbol(
+    MedicationSettings *settings
+) {
+  if (
+    settings &&
+    settings->symbol ==
+        LEGACY_MEDICATION_SYMBOL_TUBE
+  ) {
+    settings->symbol =
+        MEDICATION_SYMBOL_PILL;
+    return true;
+  }
+
+  return false;
 }
 
 static void format_medication_label(
@@ -525,6 +555,110 @@ static MedicationTime current_medication_time(void) {
   );
 }
 
+static void reset_medication_confirmations(void) {
+  s_pills_confirmed = false;
+  s_pen_confirmed = false;
+}
+
+static bool medication_group_is_confirmed(
+    MedicationSymbol symbol
+) {
+  return
+      symbol == MEDICATION_SYMBOL_PILL
+          ? s_pills_confirmed
+          : s_pen_confirmed;
+}
+
+static void mark_medication_group_confirmed(
+    MedicationSymbol symbol
+) {
+  if (symbol == MEDICATION_SYMBOL_PILL) {
+    s_pills_confirmed = true;
+    return;
+  }
+
+  s_pen_confirmed = true;
+}
+
+static bool medication_matches_group(
+    const MedicationSettings *medication,
+    MedicationTime visible_time,
+    MedicationSymbol symbol
+) {
+  return
+      medication &&
+      medication->enabled &&
+      medication->time ==
+          (uint8_t)visible_time &&
+      medication->symbol ==
+          (uint8_t)symbol;
+}
+
+static bool medication_group_is_due(
+    MedicationSymbol symbol
+) {
+  if (medication_group_is_confirmed(symbol)) {
+    return false;
+  }
+
+  const MedicationTime visible_time =
+      current_medication_time();
+
+  for (
+    uint8_t index = 0;
+    index < s_medication_count;
+    index++
+  ) {
+    if (
+      medication_matches_group(
+        &s_medications[index],
+        visible_time,
+        symbol
+      )
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static bool unconfirmed_medication_group_is_due(void) {
+  return
+      medication_group_is_due(
+        MEDICATION_SYMBOL_PILL
+      ) ||
+      medication_group_is_due(
+        MEDICATION_SYMBOL_PEN
+      );
+}
+
+static void append_confirmation_row(
+    MedicationSymbol symbol
+) {
+  const char *prompt =
+      symbol == MEDICATION_SYMBOL_PILL
+          ? "Tabletten genommen?"
+          : "Pen injiziert?";
+
+  snprintf(
+    s_row_labels[s_list_row_count],
+    sizeof(s_row_labels[s_list_row_count]),
+    "%s",
+    prompt
+  );
+
+  s_rows[s_list_row_count] =
+      s_row_labels[s_list_row_count];
+
+  s_row_kinds[s_list_row_count] =
+      symbol == MEDICATION_SYMBOL_PILL
+          ? MEDICATION_ROW_CONFIRM_PILLS
+          : MEDICATION_ROW_CONFIRM_PEN;
+
+  s_list_row_count++;
+}
+
 static void rebuild_medication_rows(void) {
   const MedicationTime visible_time =
       current_medication_time();
@@ -534,40 +668,54 @@ static void rebuild_medication_rows(void) {
   s_list_row_count = 0;
 
   for (
-    uint8_t index = 0;
-    index < s_medication_count;
-    index++
+    uint8_t group_index = 0;
+    group_index < 2;
+    group_index++
   ) {
-    if (
-      !s_medications[index].enabled ||
-      s_medications[index].time !=
-          (uint8_t)visible_time
-    ) {
+    const MedicationSymbol symbol =
+        (MedicationSymbol)group_index;
+
+    if (medication_group_is_confirmed(symbol)) {
       continue;
     }
 
-    format_medication_label(
-      &s_medications[index],
-      s_row_labels[s_list_row_count],
-      sizeof(s_row_labels[s_list_row_count])
-    );
+    bool group_has_medication = false;
 
-    s_rows[s_list_row_count] =
-        s_row_labels[s_list_row_count];
+    for (
+      uint8_t index = 0;
+      index < s_medication_count;
+      index++
+    ) {
+      if (
+        !medication_matches_group(
+          &s_medications[index],
+          visible_time,
+          symbol
+        )
+      ) {
+        continue;
+      }
 
-    s_list_row_count++;
+      format_medication_label(
+        &s_medications[index],
+        s_row_labels[s_list_row_count],
+        sizeof(s_row_labels[s_list_row_count])
+      );
+
+      s_rows[s_list_row_count] =
+          s_row_labels[s_list_row_count];
+
+      s_row_kinds[s_list_row_count] =
+          MEDICATION_ROW_ITEM;
+
+      s_list_row_count++;
+      group_has_medication = true;
+    }
+
+    if (group_has_medication) {
+      append_confirmation_row(symbol);
+    }
   }
-
-  snprintf(
-    s_row_labels[s_list_row_count],
-    sizeof(s_row_labels[s_list_row_count]),
-    "genommen?"
-  );
-
-  s_rows[s_list_row_count] =
-      s_row_labels[s_list_row_count];
-
-  s_list_row_count++;
 }
 
 static void refresh_medication_rows_for_time(void) {
@@ -581,6 +729,7 @@ static void refresh_medication_rows_for_time(void) {
     return;
   }
 
+  reset_medication_confirmations();
   rebuild_medication_rows();
 
   if (s_canvas_layer) {
@@ -677,6 +826,7 @@ static void apply_medication_list(
   }
 
   s_medication_count = count;
+  reset_medication_confirmations();
   rebuild_medication_rows();
 
   if (save) {
@@ -747,7 +897,28 @@ static bool load_current_medication_list(void) {
       MEDICATION_LIST_PERSIST_KEY,
       stored,
       expected_size
-    ) != expected_size ||
+    ) != expected_size
+  ) {
+    return false;
+  }
+
+  bool migrated_symbol = false;
+
+  for (
+    uint8_t index = 0;
+    index < (uint8_t)stored_count;
+    index++
+  ) {
+    if (
+      migrate_legacy_medication_symbol(
+        &stored[index]
+      )
+    ) {
+      migrated_symbol = true;
+    }
+  }
+
+  if (
     !medication_list_valid(
       stored,
       (uint8_t)stored_count
@@ -765,7 +936,13 @@ static bool load_current_medication_list(void) {
   s_medication_count =
       (uint8_t)stored_count;
 
+  reset_medication_confirmations();
   rebuild_medication_rows();
+
+  if (migrated_symbol) {
+    persist_medication_list();
+  }
+
   return true;
 }
 
@@ -798,10 +975,15 @@ static void load_medication_settings(void) {
         LEGACY_MEDICATION_PERSIST_KEY,
         &stored,
         sizeof(stored)
-      ) == (int)sizeof(stored) &&
-      medication_settings_valid(&stored)
+      ) == (int)sizeof(stored)
     ) {
-      migrated = stored;
+      migrate_legacy_medication_symbol(
+        &stored
+      );
+
+      if (medication_settings_valid(&stored)) {
+        migrated = stored;
+      }
     }
   }
 
@@ -994,7 +1176,7 @@ static bool read_medication_from_message(
     schedule < MEDICATION_SCHEDULE_DAILY ||
     schedule > MEDICATION_SCHEDULE_MONTHLY ||
     symbol < MEDICATION_SYMBOL_PILL ||
-    symbol > MEDICATION_SYMBOL_TUBE ||
+    symbol > MEDICATION_SYMBOL_PEN ||
     enabled < 0 ||
     enabled > 1
   ) {
@@ -1937,10 +2119,49 @@ static void band_arrow_update_proc(
   }
 }
 
-static bool taken_prompt_is_active(void) {
+static bool selected_confirmation_symbol(
+    MedicationSymbol *symbol
+) {
+  if (
+    s_scroll.snap_index <= 0 ||
+    s_scroll.snap_index > LIST_ROW_COUNT
+  ) {
+    return false;
+  }
+
+  const uint8_t row_index =
+      (uint8_t)(s_scroll.snap_index - 1);
+
+  if (
+    s_row_kinds[row_index] ==
+        MEDICATION_ROW_CONFIRM_PILLS
+  ) {
+    if (symbol) {
+      *symbol = MEDICATION_SYMBOL_PILL;
+    }
+
+    return true;
+  }
+
+  if (
+    s_row_kinds[row_index] ==
+        MEDICATION_ROW_CONFIRM_PEN
+  ) {
+    if (symbol) {
+      *symbol = MEDICATION_SYMBOL_PEN;
+    }
+
+    return true;
+  }
+
+  return false;
+}
+
+static bool confirmation_prompt_is_active(
+    MedicationSymbol *symbol
+) {
   return
-      s_scroll.snap_index ==
-          LIST_ROW_COUNT &&
+      selected_confirmation_symbol(symbol) &&
       s_scroll.mode == SCROLL_IDLE &&
       s_band.target_visible &&
       !s_band.animating &&
@@ -1951,7 +2172,7 @@ static bool taken_prompt_is_active(void) {
 }
 
 static void update_taken_button_hint_pulse(void) {
-  if (!taken_prompt_is_active()) {
+  if (!confirmation_prompt_is_active(NULL)) {
     s_taken_hint_phase = -1;
     return;
   }
@@ -1972,7 +2193,7 @@ static void draw_taken_button_hint(
     GRect frame,
     GRect canvas_bounds
 ) {
-  if (!taken_prompt_is_active()) {
+  if (!confirmation_prompt_is_active(NULL)) {
     return;
   }
 
@@ -2094,8 +2315,16 @@ static void start_ui_timer(void) {
   );
 }
 
-static void confirm_medication_taken(void) {
-  /* TODO: Cancel the pending repeat wakeup. */
+static void confirm_medication_group(
+    MedicationSymbol symbol
+) {
+  mark_medication_group_confirmed(symbol);
+
+  /*
+   * TODO: Den späteren Wiederholungs-Wakeup nur
+   * für diese Gruppe abbrechen:
+   * Tabletten oder Pen.
+   */
 }
 
 static bool confirmation_animation_active(void) {
@@ -2123,7 +2352,13 @@ static void update_confirmation_circle(void) {
     s_check_state = CHECK_POPPING_OUT;
 
     cancel_timer(&s_ui_timer);
-    confirm_medication_taken();
+
+    if (s_confirmation_symbol_set) {
+      confirm_medication_group(
+        s_confirmation_symbol
+      );
+    }
+
     return;
   }
 
@@ -2143,6 +2378,7 @@ static void update_confirmation_circle(void) {
   if (s_confirm_radius <= 0) {
     s_confirm_radius = 0;
     s_confirmation_state = CONFIRM_IDLE;
+    s_confirmation_symbol_set = false;
   }
 }
 
@@ -2787,10 +3023,17 @@ static void select_button_down(
     ClickRecognizerRef recognizer,
     void *context
 ) {
-  if (s_confirmation_state != CONFIRM_IDLE) {
+  MedicationSymbol symbol;
+
+  if (
+    s_confirmation_state != CONFIRM_IDLE ||
+    !confirmation_prompt_is_active(&symbol)
+  ) {
     return;
   }
 
+  s_confirmation_symbol = symbol;
+  s_confirmation_symbol_set = true;
   s_confirmation_state = CONFIRM_GROWING;
   schedule_confirmation_timer();
 }
@@ -2804,12 +3047,26 @@ static void select_button_up(
     void *context
 ) {
   if (s_confirmation_state == CONFIRM_COMPLETE) {
+    if (
+      unconfirmed_medication_group_is_due() &&
+      s_canvas_layer
+    ) {
+      rebuild_medication_rows();
+      reset_ui_state(
+        layer_get_bounds(s_canvas_layer)
+      );
+      start_ui_timer();
+      mark_scene_dirty();
+      return;
+    }
+
     exit_app();
     return;
   }
 
   if (s_confirm_radius <= 0) {
     s_confirmation_state = CONFIRM_IDLE;
+    s_confirmation_symbol_set = false;
     return;
   }
 
@@ -3270,6 +3527,7 @@ static void reset_ui_state(GRect bounds) {
       CONFIRM_CENTER_OUTSIDE_X +
       bounds.size.h / 2;
   s_confirmation_state = CONFIRM_IDLE;
+  s_confirmation_symbol_set = false;
 
   s_check_size = 0;
   s_check_state = CHECK_HIDDEN;

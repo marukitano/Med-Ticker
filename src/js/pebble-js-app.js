@@ -211,7 +211,7 @@ function normalizeMedication(value) {
       : 1;
   }
 
-  var symbol = integerInRange(value.symbol, 0, 2)
+  var symbol = integerInRange(value.symbol, 0, 1)
     ? value.symbol
     : DEFAULT_MEDICATION.symbol;
 
@@ -606,8 +606,8 @@ function configurationPage(
     'html+=option(0,"Montag",med.day)+option(1,"Dienstag",med.day)+option(2,"Mittwoch",med.day)+option(3,"Donnerstag",med.day)+option(4,"Freitag",med.day)+option(5,"Samstag",med.day)+option(6,"Sonntag",med.day);',
     'html+="</select></label>";',
     'html+="<label class=\\"monthday\\">Tag im Monat<input data-field=\\"monthday\\" type=\\"number\\" min=\\"1\\" max=\\"31\\" required value=\\""+(med.schedule===2?med.day:1)+"\\"></label>";',
-    'html+="<label>Symbol<select data-field=\\"symbol\\">";',
-    'html+=option(0,"Pille",med.symbol)+option(1,"Pen / Spritze",med.symbol)+option(2,"Tube / Creme",med.symbol);',
+    'html+="<label>Art<select data-field=\\"symbol\\">";',
+    'html+=option(0,"Tablette",med.symbol)+option(1,"Pen / Spritze",med.symbol);',
     'html+="</select></label>";',
     'html+="<label class=\\"check\\"><input data-field=\\"enabled\\" type=\\"checkbox\\""+(med.enabled?" checked":"")+"><span>Aktiv</span></label>";',
     'html+="<button class=\\"remove\\" type=\\"button\\" data-remove=\\""+i+"\\">Medikament löschen</button>";',
