@@ -72,7 +72,6 @@
 #define CHECK_POP_SETTLE_SIZE 80
 #define CHECK_POP_OVERSHOOT_SIZE 140
 
-#define HINT_SPACING 14
 #define HINT_HALF_WIDTH 9
 #define HINT_HEIGHT 10
 #define HINT_POSITION_ADJUST_Y -18
@@ -81,8 +80,6 @@
 #define MEDICATION_HEADER_HEIGHT 28
 #define MEDICATION_ROW_HEIGHT 50
 #define MEDICATION_ROW_GAP 8
-#define MEDICATION_COUNT 3
-#define LIST_ROW_COUNT (MEDICATION_COUNT + 1)
 #define BAND_OVERSHOOT_COVER_PX 32
 #define BAND_ARROW_WIDTH 18
 #define TAKEN_HINT_MIN_RADIUS 5
@@ -115,14 +112,16 @@ static const VibePattern s_impact_vibration_pattern = {
   .num_segments = ARRAY_LENGTH(s_impact_vibration_durations)
 };
 
-static const char *const s_medications[MEDICATION_COUNT] = {
+static const char *const s_rows[] = {
   "Xarelto 20 mg",
   "Metformin 1000 mg",
-  "Pantoprazol 40 mg"
+  "Pantoprazol 40 mg",
+  "genommen?"
 };
 
-static const char *const s_taken_prompt =
-    "genommen?";
+enum {
+  LIST_ROW_COUNT = ARRAY_LENGTH(s_rows)
+};
 
 static Window *s_window;
 static Layer *s_canvas_layer;
@@ -141,7 +140,7 @@ typedef struct {
 static BandAnimationState s_band;
 
 static GBitmap *s_sheet;
-static GBitmap *s_frame;
+static GBitmap *s_frames[FRAME_COUNT];
 
 static AppTimer *s_ui_timer;
 static AppTimer *s_confirmation_timer;
@@ -149,14 +148,12 @@ static AppTimer *s_scroll_physics_timer;
 static AppTimer *s_band_animation_timer;
 
 static GFont s_medication_font;
+static GFont s_header_font;
 
-static int16_t s_frame_index;
 static int16_t s_frame_width;
 static int16_t s_frame_height;
-static uint8_t s_ui_tick;
-static uint8_t s_hint_phase;
-static uint8_t s_taken_hint_phase;
-static bool s_taken_hint_was_active;
+static uint8_t s_animation_tick;
+static int8_t s_taken_hint_phase;
 
 typedef enum {
   SCROLL_IDLE,
@@ -172,7 +169,6 @@ typedef struct {
   int32_t breakaway_anchor_q8;
 
   int8_t snap_index;
-  int8_t edge_return_index;
 
   ScrollMode mode;
   bool breakaway_locked;
@@ -207,25 +203,19 @@ static CheckState s_check_state;
 
 static void update_band_animation_target(void);
 
-static void mark_canvas_dirty(void) {
+static void mark_scene_dirty(void) {
   update_band_animation_target();
 
   if (s_canvas_layer) {
     layer_mark_dirty(s_canvas_layer);
   }
 
-  if (s_band_layer) {
+  if (s_band_layer && !layer_get_hidden(s_band_layer)) {
     layer_mark_dirty(s_band_layer);
   }
 
-  if (s_band_arrow_layer) {
-    layer_mark_dirty(
-      s_band_arrow_layer
-    );
-  }
-
-  if (s_confirmation_layer) {
-    layer_mark_dirty(s_confirmation_layer);
+  if (s_band_arrow_layer && !layer_get_hidden(s_band_arrow_layer)) {
+    layer_mark_dirty(s_band_arrow_layer);
   }
 }
 
@@ -240,6 +230,18 @@ static void cancel_timer(AppTimer **timer) {
 
 static int32_t abs_int32(int32_t value) {
   return value < 0 ? -value : value;
+}
+
+static int32_t clamp_symmetric(int32_t value, int32_t limit) {
+  if (value > limit) {
+    return limit;
+  }
+
+  if (value < -limit) {
+    return -limit;
+  }
+
+  return value;
 }
 
 static uint32_t current_time_ms(void) {
@@ -303,36 +305,18 @@ static int32_t visual_canvas_offset_y(void) {
       SCROLL_Q8;
 }
 
-static void set_canvas_to_snap_index(int index) {
-  s_scroll.snap_index =
-      clamp_snap_index(index);
-
-  mark_canvas_dirty();
-}
-
-
-
-static void destroy_frame(void) {
-  if (!s_frame) {
-    return;
+static void destroy_pill_bitmaps(void) {
+  for (uint8_t index = 0; index < FRAME_COUNT; index++) {
+    if (s_frames[index]) {
+      gbitmap_destroy(s_frames[index]);
+      s_frames[index] = NULL;
+    }
   }
 
-  gbitmap_destroy(s_frame);
-  s_frame = NULL;
-}
-
-static void set_frame(int index) {
-  destroy_frame();
-
-  s_frame = gbitmap_create_as_sub_bitmap(
-    s_sheet,
-    GRect(
-      index * s_frame_width,
-      0,
-      s_frame_width,
-      s_frame_height
-    )
-  );
+  if (s_sheet) {
+    gbitmap_destroy(s_sheet);
+    s_sheet = NULL;
+  }
 }
 
 static void draw_scroll_hint(
@@ -345,7 +329,7 @@ static void draw_scroll_hint(
       s_frame_height +
       MEDICATION_GAP - 7 +
       HINT_POSITION_ADJUST_Y +
-      s_hint_offsets[s_hint_phase];
+      s_hint_offsets[s_animation_tick % ARRAY_LENGTH(s_hint_offsets)];
 
   if (hint_y < -HINT_HEIGHT - 2 ||
       hint_y > bounds.size.h + HINT_HEIGHT + 2) {
@@ -400,28 +384,9 @@ static int32_t current_pill_y(void) {
       visual_canvas_offset_y();
 }
 
-static bool medication_band_can_enter(void) {
-  /*
-   * Das Band startet nicht während der Bewegung.
-   * Erst wenn mindestens der erste Medikamentenpunkt
-   * eingerastet ist und der gesamte Bounce beendet
-   * wurde, darf es von rechts hereinfahren.
-   */
-  return
-      s_scroll.snap_index >= 1;
-}
-
 static bool scrolling_back_to_pill(void) {
 #if defined(PBL_TOUCH)
-  /*
-   * Das Paar 1 <-> 0 bleibt nach dem Snap absichtlich
-   * aktiv, damit derselbe Finger zurückwischen kann.
-   * Das Paar allein bedeutet aber noch nicht, dass
-   * tatsächlich zur Pille gescrollt wird.
-   *
-   * Erst eine reale Fingerbewegung nach unten startet
-   * die Ausfahrt des weißen Bandes.
-   */
+  /* Das gehaltene Paar 1↔0 fährt erst bei echter Abwärtsbewegung aus. */
   if (
     s_touch.dragging &&
     s_touch.pair_selected &&
@@ -436,47 +401,6 @@ static bool scrolling_back_to_pill(void) {
   return
       s_scroll.mode == SCROLL_SNAP &&
       s_scroll.snap_index == 0;
-}
-
-static bool pill_is_visible(void) {
-  if (
-    !s_canvas_layer ||
-    s_frame_height <= 0
-  ) {
-    return false;
-  }
-
-  const GRect bounds =
-      layer_get_bounds(
-        s_canvas_layer
-      );
-
-  const int32_t pill_y =
-      current_pill_y();
-
-  return
-      pill_y < bounds.size.h &&
-      pill_y + s_frame_height > 0;
-}
-
-static int32_t clamp_band_force_q8(
-    int32_t force_q8
-) {
-  if (
-    force_q8 >
-    SCROLL_SNAP_MAX_FORCE_Q8
-  ) {
-    return SCROLL_SNAP_MAX_FORCE_Q8;
-  }
-
-  if (
-    force_q8 <
-    -SCROLL_SNAP_MAX_FORCE_Q8
-  ) {
-    return -SCROLL_SNAP_MAX_FORCE_Q8;
-  }
-
-  return force_q8;
 }
 
 static void set_band_layer_x_q8(
@@ -502,20 +426,8 @@ static void set_band_layer_x_q8(
         SCROLL_Q8
       );
 
-  /*
-   * Beim Ausfahren gehört der Balken weiterhin zur
-   * ersten Medikamentenzeile und folgt deshalb ihrer
-   * vertikalen Scrollbewegung.
-   *
-   * In allen anderen Zuständen bleibt er wie bisher
-   * fest in der Bildschirmmitte.
-   */
-  if (
-    !s_band.target_visible &&
-    !layer_get_hidden(
-      s_band_layer
-    )
-  ) {
+  /* Beim Ausfahren bleibt der Balken an der ersten Zeile. */
+  if (!s_band.target_visible) {
     frame.origin.y =
         (int16_t)(
           current_pill_y() +
@@ -607,10 +519,10 @@ static void band_animation_tick(
       ) /
       SCROLL_SNAP_SPRING_DEN;
 
-  force_q8 =
-      clamp_band_force_q8(
-        force_q8
-      );
+  force_q8 = clamp_symmetric(
+    force_q8,
+    SCROLL_SNAP_MAX_FORCE_Q8
+  );
 
   s_band.velocity_q8 +=
       force_q8;
@@ -692,130 +604,36 @@ static void schedule_band_animation(void) {
       );
 }
 
-static void finish_band_exit(void) {
-  if (
-    !s_band_layer ||
-    !s_canvas_layer
-  ) {
-    return;
-  }
-
-  cancel_timer(
-    &s_band_animation_timer
-  );
-
-  const GRect bounds =
-      layer_get_bounds(
-        s_canvas_layer
-      );
-
-  s_band.target_visible = false;
-  s_band.animating = false;
-  s_band.velocity_q8 = 0;
-
-  s_band.x_q8 =
-      bounds.size.w *
-      SCROLL_Q8;
-
-  s_band.target_x_q8 =
-      s_band.x_q8;
-
-  set_band_layer_x_q8(
-    s_band.x_q8
-  );
-
-  set_band_and_arrow_hidden(
-    true
-  );
-}
-
 static void update_band_animation_target(void) {
+  if (!s_band_layer || !s_canvas_layer) {
+    return;
+  }
+
+  const bool visible =
+      s_scroll.snap_index > 0 &&
+      !scrolling_back_to_pill();
+
+  const int32_t target_x_q8 =
+      visible
+          ? 0
+          : layer_get_bounds(s_canvas_layer).size.w * SCROLL_Q8;
+
   if (
-    !s_band_layer ||
-    !s_canvas_layer
+    s_band.target_visible == visible &&
+    s_band.target_x_q8 == target_x_q8
   ) {
     return;
   }
 
-  const GRect canvas_bounds =
-      layer_get_bounds(
-        s_canvas_layer
-      );
-
-  const bool should_exit =
-      scrolling_back_to_pill();
-
-  const bool should_enter =
-      !should_exit &&
-      medication_band_can_enter();
-
-  if (should_exit) {
-    if (
-      !s_band.target_visible &&
-      s_band.target_x_q8 ==
-          canvas_bounds.size.w *
-          SCROLL_Q8
-    ) {
-      return;
-    }
-
-    s_band.target_visible = false;
-    s_band.target_x_q8 =
-        canvas_bounds.size.w *
-        SCROLL_Q8;
-
-    s_band.animating = true;
-    schedule_band_animation();
-    return;
-  }
-
-  if (!should_enter) {
-    return;
-  }
-
-  if (
-    s_band.target_visible &&
-    s_band.target_x_q8 == 0
-  ) {
-    return;
-  }
-
-  s_band.target_visible = true;
-  s_band.target_x_q8 = 0;
+  s_band.target_visible = visible;
+  s_band.target_x_q8 = target_x_q8;
   s_band.animating = true;
 
-  set_band_and_arrow_hidden(
-    false
-  );
+  if (visible) {
+    set_band_and_arrow_hidden(false);
+  }
 
   schedule_band_animation();
-}
-
-static void draw_medication_text(
-    GContext *ctx,
-    GRect row,
-    const char *text,
-    GColor text_color
-) {
-  graphics_context_set_text_color(
-    ctx,
-    text_color
-  );
-
-  graphics_draw_text(
-    ctx,
-    text,
-    s_medication_font,
-    GRect(
-      row.origin.x + 8,
-      row.origin.y + 3,
-      row.size.w - 16,
-      row.size.h - 3
-    ),
-    GTextOverflowModeTrailingEllipsis,
-    GTextAlignmentCenter,
-    NULL
-  );
 }
 
 static void draw_medications(
@@ -832,36 +650,23 @@ static void draw_medications(
       HINT_HEIGHT +
       15;
 
-  const int32_t rows_y =
-      label_y +
-      MEDICATION_HEADER_HEIGHT;
-
-  const int32_t list_bottom =
-      rows_y +
-      LIST_ROW_COUNT *
-          (
-            MEDICATION_ROW_HEIGHT +
-            MEDICATION_ROW_GAP
-          );
+  const int32_t rows_y = label_y + MEDICATION_HEADER_HEIGHT;
 
   if (
-    list_bottom < 0 ||
+    rows_y +
+        LIST_ROW_COUNT *
+            (MEDICATION_ROW_HEIGHT + MEDICATION_ROW_GAP) < 0 ||
     label_y > bounds.size.h
   ) {
     return;
   }
 
-  graphics_context_set_text_color(
-    ctx,
-    text_color
-  );
+  graphics_context_set_text_color(ctx, text_color);
 
   graphics_draw_text(
     ctx,
     "MEDICATIONS",
-    fonts_get_system_font(
-      FONT_KEY_GOTHIC_18_BOLD
-    ),
+    s_header_font,
     GRect(
       bounds.origin.x + 10,
       (int16_t)label_y,
@@ -873,18 +678,10 @@ static void draw_medications(
     NULL
   );
 
-  for (
-    int index = 0;
-    index < LIST_ROW_COUNT;
-    index++
-  ) {
+  for (int index = 0; index < LIST_ROW_COUNT; index++) {
     const int32_t row_y =
         rows_y +
-        index *
-            (
-              MEDICATION_ROW_HEIGHT +
-              MEDICATION_ROW_GAP
-            );
+        index * (MEDICATION_ROW_HEIGHT + MEDICATION_ROW_GAP);
 
     if (
       row_y + MEDICATION_ROW_HEIGHT < 0 ||
@@ -893,18 +690,19 @@ static void draw_medications(
       continue;
     }
 
-    draw_medication_text(
+    graphics_draw_text(
       ctx,
+      s_rows[index],
+      s_medication_font,
       GRect(
-        bounds.origin.x,
-        (int16_t)row_y,
-        bounds.size.w,
-        MEDICATION_ROW_HEIGHT
+        bounds.origin.x + 8,
+        (int16_t)row_y + 3,
+        bounds.size.w - 16,
+        MEDICATION_ROW_HEIGHT - 3
       ),
-      index < MEDICATION_COUNT
-          ? s_medications[index]
-          : s_taken_prompt,
-      text_color
+      GTextOverflowModeTrailingEllipsis,
+      GTextAlignmentCenter,
+      NULL
     );
   }
 }
@@ -998,47 +796,31 @@ static void draw_confirmation_checkmark(
   draw_round_line(ctx, middle, end);
 }
 
-static int32_t pill_y_for_bounds(
-    GRect bounds
-) {
-  return
-      (
-        (
-          int32_t
-        )bounds.size.h -
-        s_frame_height
-      ) /
-      2 +
-      visual_canvas_offset_y();
-}
-
 static void draw_pill_if_visible(
     GContext *ctx,
     GRect bounds,
     int32_t pill_y
 ) {
+  GBitmap *frame =
+      s_frames[
+        (s_animation_tick / PILL_TICKS_PER_FRAME) % FRAME_COUNT
+      ];
+
   if (
-    !s_frame ||
+    !frame ||
     pill_y <= -s_frame_height ||
     pill_y >= bounds.size.h
   ) {
     return;
   }
 
-  graphics_context_set_compositing_mode(
-    ctx,
-    GCompOpSet
-  );
+  graphics_context_set_compositing_mode(ctx, GCompOpSet);
 
   graphics_draw_bitmap_in_rect(
     ctx,
-    s_frame,
+    frame,
     GRect(
-      (
-        bounds.size.w -
-        s_frame_width
-      ) /
-      2,
+      (bounds.size.w - s_frame_width) / 2,
       (int16_t)pill_y,
       s_frame_width,
       s_frame_height
@@ -1050,46 +832,20 @@ static void canvas_update_proc(
     Layer *layer,
     GContext *ctx
 ) {
-  const GRect bounds =
-      layer_get_bounds(layer);
+  const GRect bounds = layer_get_bounds(layer);
 
-  graphics_context_set_fill_color(
-    ctx,
-    GColorBlack
-  );
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
-  graphics_fill_rect(
-    ctx,
-    bounds,
-    0,
-    GCornerNone
-  );
-
-  if (!s_frame) {
+  if (!s_sheet) {
     return;
   }
 
-  const int32_t pill_y =
-      pill_y_for_bounds(bounds);
+  const int32_t pill_y = current_pill_y();
 
-  draw_pill_if_visible(
-    ctx,
-    bounds,
-    pill_y
-  );
-
-  draw_scroll_hint(
-    ctx,
-    bounds,
-    pill_y
-  );
-
-  draw_medications(
-    ctx,
-    bounds,
-    pill_y,
-    GColorWhite
-  );
+  draw_pill_if_visible(ctx, bounds, pill_y);
+  draw_scroll_hint(ctx, bounds, pill_y);
+  draw_medications(ctx, bounds, pill_y, GColorWhite);
 }
 
 static void band_arrow_update_proc(
@@ -1107,11 +863,6 @@ static void band_arrow_update_proc(
     GColorWhite
   );
 
-  /*
-   * Das Dreieck wird aus horizontalen weißen
-   * Linien aufgebaut. So bleibt es mit dem
-   * vorhandenen Pebble-SDK kompatibel.
-   */
   for (
     int16_t y = 0;
     y < bounds.size.h;
@@ -1159,35 +910,16 @@ static bool taken_prompt_is_active(void) {
 }
 
 static void update_taken_button_hint_pulse(void) {
-  const bool active =
-      taken_prompt_is_active();
-
-  if (!active) {
-    s_taken_hint_was_active = false;
-    s_taken_hint_phase = 0;
+  if (!taken_prompt_is_active()) {
+    s_taken_hint_phase = -1;
     return;
   }
 
-  /*
-   * Beim ersten sichtbaren Frame beginnt der Puls
-   * im kleinen Zustand.
-   */
-  if (!s_taken_hint_was_active) {
-    s_taken_hint_was_active = true;
+  if (s_taken_hint_phase < 0) {
     s_taken_hint_phase = 0;
-    return;
-  }
-
-  /*
-   * Die vorhandene Kurve 0,1,3,5,3,1,0,0 wird
-   * genau einmal durchlaufen. Der letzte Wert ist
-   * wieder der kleine Ruhezustand und bleibt stehen.
-   */
-  if (
+  } else if (
     s_taken_hint_phase + 1 <
-    (int)ARRAY_LENGTH(
-      s_hint_offsets
-    )
+    (int)ARRAY_LENGTH(s_hint_offsets)
   ) {
     s_taken_hint_phase++;
   }
@@ -1203,17 +935,15 @@ static void draw_taken_button_hint(
     return;
   }
 
-  const int16_t radius =
-      TAKEN_HINT_MIN_RADIUS +
-      s_hint_offsets[
-        s_taken_hint_phase
-      ];
+  const uint8_t phase =
+      s_taken_hint_phase < 0
+          ? 0
+          : (uint8_t)s_taken_hint_phase;
 
-  /*
-   * Der Kreismittelpunkt liegt exakt auf dem rechten
-   * Bildschirmrand. Durch das Display-Clipping bleibt
-   * nur die linke Hälfte als Halbkreis sichtbar.
-   */
+  const int16_t radius =
+      TAKEN_HINT_MIN_RADIUS + s_hint_offsets[phase];
+
+  /* Der Mittelpunkt am Displayrand erzeugt den sichtbaren Halbkreis. */
   const int16_t local_screen_edge_x =
       canvas_bounds.size.w -
       frame.origin.x;
@@ -1237,63 +967,29 @@ static void band_update_proc(
     Layer *layer,
     GContext *ctx
 ) {
-  if (
-    !s_frame ||
-    !s_canvas_layer
-  ) {
+  if (!s_canvas_layer) {
     return;
   }
 
-  const GRect layer_bounds =
-      layer_get_bounds(layer);
+  const GRect layer_bounds = layer_get_bounds(layer);
+  const GRect frame = layer_get_frame(layer);
+  const GRect canvas_bounds = layer_get_bounds(s_canvas_layer);
 
-  const GRect frame =
-      layer_get_frame(layer);
-
-  const GRect canvas_bounds =
-      layer_get_bounds(
-        s_canvas_layer
-      );
-
-  /*
-   * Der weiße Balken bewegt sich, der Inhalt nicht.
-   * Die negative Layer-X-Position hält die schwarze
-   * Textkopie exakt über der weißen Originalschrift.
-   * Sichtbar wird nur der vom Balken überdeckte Teil.
-   */
-  const GRect content_bounds =
-      GRect(
-        -frame.origin.x,
-        0,
-        canvas_bounds.size.w,
-        layer_bounds.size.h
-      );
-
-  const int32_t screen_pill_y =
-      pill_y_for_bounds(
-        canvas_bounds
-      );
-
-  const int32_t local_pill_y =
-      screen_pill_y -
-      frame.origin.y;
-
-  graphics_context_set_fill_color(
-    ctx,
-    GColorWhite
-  );
-
-  graphics_fill_rect(
-    ctx,
-    layer_bounds,
+  /* Die versetzte Textkopie invertiert nur den überdeckten Bereich. */
+  const GRect content_bounds = GRect(
+    -frame.origin.x,
     0,
-    GCornerNone
+    canvas_bounds.size.w,
+    layer_bounds.size.h
   );
+
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_rect(ctx, layer_bounds, 0, GCornerNone);
 
   draw_medications(
     ctx,
     content_bounds,
-    local_pill_y,
+    current_pill_y() - frame.origin.y,
     GColorBlack
   );
 
@@ -1330,21 +1026,12 @@ static void ui_timer_callback(void *context) {
     return;
   }
 
-  s_hint_phase =
-      (s_hint_phase + 1) %
-      ARRAY_LENGTH(s_hint_offsets);
+  s_animation_tick =
+      (s_animation_tick + 1) %
+      (FRAME_COUNT * PILL_TICKS_PER_FRAME);
 
   update_taken_button_hint_pulse();
-
-  s_ui_tick++;
-
-  if (s_ui_tick >= PILL_TICKS_PER_FRAME) {
-    s_ui_tick = 0;
-    s_frame_index = (s_frame_index + 1) % FRAME_COUNT;
-    set_frame(s_frame_index);
-  }
-
-  mark_canvas_dirty();
+  mark_scene_dirty();
 
   s_ui_timer = app_timer_register(
     UI_TICK_MS,
@@ -1363,10 +1050,6 @@ static void start_ui_timer(void) {
   );
 }
 
-/*
- * This is the actual confirmation moment.
- * The pending 15-minute repeat wakeup will be cancelled here later.
- */
 static void confirm_medication_taken(void) {
   /* TODO: Cancel the pending repeat wakeup. */
 }
@@ -1457,7 +1140,10 @@ static void confirmation_timer_callback(void *context) {
 
   update_confirmation_circle();
   update_checkmark();
-  mark_canvas_dirty();
+
+  if (s_confirmation_layer) {
+    layer_mark_dirty(s_confirmation_layer);
+  }
 
   if (confirmation_animation_active()) {
     schedule_confirmation_timer();
@@ -1496,21 +1182,6 @@ static int32_t scroll_bottom_limit_q8(void) {
       scroll_anchor_q8(LIST_ROW_COUNT) -
       SCROLL_EDGE_HALF_INTERVAL_PX *
       SCROLL_Q8;
-}
-
-static int32_t clamp_symmetric(
-    int32_t value,
-    int32_t limit
-) {
-  if (value > limit) {
-    return limit;
-  }
-
-  if (value < -limit) {
-    return -limit;
-  }
-
-  return value;
 }
 
 static int nearest_snap_index_for_position_q8(
@@ -1684,10 +1355,6 @@ static int32_t magnet_force_for_position_q8(
   return 0;
 }
 
-static bool scroll_is_active(void) {
-  return s_scroll.mode != SCROLL_IDLE;
-}
-
 static void schedule_scroll_physics(void);
 
 static void start_scroll_snap(
@@ -1739,15 +1406,9 @@ static bool edge_bounce_reached_limit(void) {
     return false;
   }
 
-  if (s_scroll.edge_return_index == 0) {
-    return
-        s_scroll.position_q8 >=
-        scroll_top_limit_q8();
-  }
-
-  return
-      s_scroll.position_q8 <=
-      scroll_bottom_limit_q8();
+  return s_scroll.snap_index == 0
+      ? s_scroll.position_q8 >= scroll_top_limit_q8()
+      : s_scroll.position_q8 <= scroll_bottom_limit_q8();
 }
 
 #if defined(PBL_TOUCH)
@@ -1788,7 +1449,7 @@ static bool touch_reached_virtual_edge(void) {
 static void scroll_physics_tick(void *context) {
   s_scroll_physics_timer = NULL;
 
-  if (!scroll_is_active()) {
+  if (s_scroll.mode == SCROLL_IDLE) {
     return;
   }
 
@@ -1884,16 +1545,12 @@ static void scroll_physics_tick(void *context) {
     const int direction =
         s_touch.pair_direction;
 
-    /*
-     * Exakt derselbe Schritt wie bei der entsprechenden
-     * Hoch-/Runtertaste. Keine eigene Touch-Animation.
-     */
     step_snap_index(
       direction
     );
 
     keep_touch_active_after_step();
-    mark_canvas_dirty();
+    mark_scene_dirty();
     return;
   }
 #endif
@@ -1901,15 +1558,12 @@ static void scroll_physics_tick(void *context) {
   apply_scroll_edge_limits();
 
   if (edge_bounce_reached_limit()) {
-    const int return_index =
-        s_scroll.edge_return_index;
-
     start_scroll_snap(
-      return_index,
+      s_scroll.snap_index,
       false
     );
 
-    mark_canvas_dirty();
+    mark_scene_dirty();
     return;
   }
 
@@ -1922,7 +1576,7 @@ static void scroll_physics_tick(void *context) {
       true
     );
 
-    mark_canvas_dirty();
+    mark_scene_dirty();
     return;
   }
 #endif
@@ -1944,9 +1598,9 @@ static void scroll_physics_tick(void *context) {
     s_scroll.mode = SCROLL_IDLE;
   }
 
-  mark_canvas_dirty();
+  mark_scene_dirty();
 
-  if (scroll_is_active()) {
+  if (s_scroll.mode != SCROLL_IDLE) {
     schedule_scroll_physics();
   }
 }
@@ -1971,7 +1625,7 @@ static void schedule_scroll_physics(void) {
 
     s_scroll.velocity_q8 = 0;
     s_scroll.mode = SCROLL_IDLE;
-    mark_canvas_dirty();
+    mark_scene_dirty();
   }
 }
 
@@ -1995,7 +1649,8 @@ static void start_scroll_snap(
     s_scroll.velocity_q8 = 0;
   }
 
-  set_canvas_to_snap_index(target_index);
+  s_scroll.snap_index = target_index;
+  mark_scene_dirty();
 
   if (
     s_scroll.position_q8 ==
@@ -2022,20 +1677,12 @@ static void start_edge_bounce(int direction) {
   s_scroll.mode = SCROLL_EDGE_BOUNCE;
   s_scroll.breakaway_locked = false;
   s_scroll.velocity_q8 = 0;
-  s_scroll.edge_return_index =
-      s_scroll.snap_index;
 
   s_scroll.target_q8 =
-      scroll_anchor_q8(
-        s_scroll.edge_return_index
-      ) +
-      (
-        direction < 0
-            ? 2
-            : -2
-      ) *
-      SCROLL_EDGE_HALF_INTERVAL_PX *
-      SCROLL_Q8;
+      scroll_anchor_q8(s_scroll.snap_index) +
+      (direction < 0 ? 2 : -2) *
+          SCROLL_EDGE_HALF_INTERVAL_PX *
+          SCROLL_Q8;
 
   schedule_scroll_physics();
 }
@@ -2314,15 +1961,7 @@ static bool touch_step_reached_threshold(void) {
 }
 
 static void keep_touch_active_after_step(void) {
-  /*
-   * Das beim Aufsetzen gewählte Rastpunktpaar bleibt
-   * während der gesamten Geste erhalten.
-   *
-   * Nach einem Schritt werden nur Start und Nachbar
-   * vertauscht. So kann derselbe Finger exakt zum
-   * vorherigen Punkt zurück, aber niemals zu einem
-   * dritten Rastpunkt weiterlaufen.
-   */
+  /* Das beim Aufsetzen gewählte Rastpunktpaar bleibt gesperrt. */
   const int8_t previous_index =
       s_touch.start_index;
 
@@ -2370,22 +2009,12 @@ static void touch_update(
   }
 
   if (s_touch.edge_consumed) {
-    /*
-     * Während der vorhandene Tasten-Snap läuft, wird
-     * die Fingerposition nur nachgeführt. Die Bewegung
-     * darf den laufenden Bounce nicht beeinflussen.
-     */
+    /* Einen laufenden Snap nicht durch Fingerbewegung verändern. */
     if (s_scroll.mode != SCROLL_IDLE &&
         s_scroll.mode != SCROLL_TOUCH) {
       return;
     }
 
-    /*
-     * Nach beendetem Snap übernimmt derselbe Finger
-     * wieder die normale Touch-Feder. Das festgelegte
-     * Paar wurde in keep_touch_active_after_step()
-     * lediglich umgedreht und bleibt damit gesperrt.
-     */
     if (s_scroll.mode == SCROLL_IDLE) {
       s_scroll.mode = SCROLL_TOUCH;
       s_scroll.target_q8 =
@@ -2412,12 +2041,6 @@ static void touch_update(
         (int32_t)delta_y *
         SCROLL_Q8;
 
-    /*
-     * Diese bestehende Begrenzung hält das Ziel exakt
-     * zwischen den beiden beim Aufsetzen gewählten
-     * Rastpunkten. Hinter dem Rand sammelt sich kein
-     * unsichtbarer Fingerweg an.
-     */
     clamp_touch_target_to_pair();
     schedule_scroll_physics();
     return;
@@ -2444,10 +2067,6 @@ static void touch_end(void) {
   s_touch.dragging = false;
   s_scroll.breakaway_locked = false;
 
-  /*
-   * Ein bereits durch 29 px ausgelöster normaler
-   * Tastenschritt läuft beim Abheben unverändert weiter.
-   */
   if (s_touch.edge_consumed) {
     return;
   }
@@ -2517,30 +2136,47 @@ static bool load_pill_sheet(void) {
     return false;
   }
 
-  const GRect sheet_bounds = gbitmap_get_bounds(s_sheet);
+  const GRect bounds = gbitmap_get_bounds(s_sheet);
 
-  if (sheet_bounds.size.w % FRAME_COUNT == 0) {
-    s_frame_width = sheet_bounds.size.w / FRAME_COUNT;
-    s_frame_height = sheet_bounds.size.h;
-    return true;
+  if (bounds.size.w % FRAME_COUNT != 0) {
+    APP_LOG(
+      APP_LOG_LEVEL_ERROR,
+      "Spritesheet width is invalid"
+    );
+    destroy_pill_bitmaps();
+    return false;
   }
 
-  APP_LOG(
-    APP_LOG_LEVEL_ERROR,
-    "Spritesheet width is invalid"
-  );
+  s_frame_width = bounds.size.w / FRAME_COUNT;
+  s_frame_height = bounds.size.h;
 
-  gbitmap_destroy(s_sheet);
-  s_sheet = NULL;
-  return false;
+  for (uint8_t index = 0; index < FRAME_COUNT; index++) {
+    s_frames[index] = gbitmap_create_as_sub_bitmap(
+      s_sheet,
+      GRect(
+        index * s_frame_width,
+        0,
+        s_frame_width,
+        s_frame_height
+      )
+    );
+
+    if (!s_frames[index]) {
+      APP_LOG(
+        APP_LOG_LEVEL_ERROR,
+        "Pill frame could not be created"
+      );
+      destroy_pill_bitmaps();
+      return false;
+    }
+  }
+
+  return true;
 }
 
 static void reset_ui_state(GRect bounds) {
-  s_frame_index = 0;
-  s_ui_tick = 0;
-  s_hint_phase = 0;
-  s_taken_hint_phase = 0;
-  s_taken_hint_was_active = false;
+  s_animation_tick = 0;
+  s_taken_hint_phase = -1;
 
   const int32_t initial_position_q8 =
       CANVAS_START_OFFSET_Y *
@@ -2552,7 +2188,6 @@ static void reset_ui_state(GRect bounds) {
     .breakaway_anchor_q8 =
         initial_position_q8,
     .snap_index = 0,
-    .edge_return_index = 0,
     .mode = SCROLL_IDLE
   };
 
@@ -2602,6 +2237,8 @@ static void window_load(Window *window) {
 
   s_medication_font =
       fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
+  s_header_font =
+      fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
 
   if (!load_pill_sheet()) {
     return;
@@ -2694,7 +2331,6 @@ static void window_load(Window *window) {
   );
 
   reset_ui_state(bounds);
-  set_frame(s_frame_index);
 }
 
 static void window_appear(Window *window) {
@@ -2728,25 +2364,15 @@ static void window_unload(Window *window) {
   cancel_timer(&s_confirmation_timer);
   cancel_timer(&s_band_animation_timer);
   cancel_scroll_physics();
-  destroy_frame();
-
-  if (s_sheet) {
-    gbitmap_destroy(s_sheet);
-    s_sheet = NULL;
-  }
+  destroy_pill_bitmaps();
 
   if (s_confirmation_layer) {
-    layer_destroy(
-      s_confirmation_layer
-    );
-
+    layer_destroy(s_confirmation_layer);
     s_confirmation_layer = NULL;
   }
 
   if (s_band_arrow_layer) {
-    layer_destroy(
-      s_band_arrow_layer
-    );
+    layer_destroy(s_band_arrow_layer);
     s_band_arrow_layer = NULL;
   }
 
