@@ -82,8 +82,10 @@
 #define MEDICATION_ROW_HEIGHT 50
 #define MEDICATION_ROW_GAP 8
 #define MEDICATION_COUNT 3
+#define LIST_ROW_COUNT (MEDICATION_COUNT + 1)
 #define BAND_OVERSHOOT_COVER_PX 32
 #define BAND_ARROW_WIDTH 18
+#define TAKEN_HINT_MIN_RADIUS 5
 
 typedef enum {
   CONFIRM_IDLE,
@@ -119,6 +121,9 @@ static const char *const s_medications[MEDICATION_COUNT] = {
   "Pantoprazol 40 mg"
 };
 
+static const char *const s_taken_prompt =
+    "genommen?";
+
 static Window *s_window;
 static Layer *s_canvas_layer;
 static Layer *s_band_layer;
@@ -150,6 +155,8 @@ static int16_t s_frame_width;
 static int16_t s_frame_height;
 static uint8_t s_ui_tick;
 static uint8_t s_hint_phase;
+static uint8_t s_taken_hint_phase;
+static bool s_taken_hint_was_active;
 
 typedef enum {
   SCROLL_IDLE,
@@ -275,8 +282,8 @@ static int clamp_snap_index(int index) {
     return 0;
   }
 
-  if (index > MEDICATION_COUNT) {
-    return MEDICATION_COUNT;
+  if (index > LIST_ROW_COUNT) {
+    return LIST_ROW_COUNT;
   }
 
   return index;
@@ -401,8 +408,7 @@ static bool medication_band_can_enter(void) {
    * wurde, darf es von rechts hereinfahren.
    */
   return
-      s_scroll.snap_index >= 1 &&
-      s_scroll.mode == SCROLL_IDLE;
+      s_scroll.snap_index >= 1;
 }
 
 static bool scrolling_back_to_pill(void) {
@@ -832,7 +838,7 @@ static void draw_medications(
 
   const int32_t list_bottom =
       rows_y +
-      MEDICATION_COUNT *
+      LIST_ROW_COUNT *
           (
             MEDICATION_ROW_HEIGHT +
             MEDICATION_ROW_GAP
@@ -869,7 +875,7 @@ static void draw_medications(
 
   for (
     int index = 0;
-    index < MEDICATION_COUNT;
+    index < LIST_ROW_COUNT;
     index++
   ) {
     const int32_t row_y =
@@ -895,7 +901,9 @@ static void draw_medications(
         bounds.size.w,
         MEDICATION_ROW_HEIGHT
       ),
-      s_medications[index],
+      index < MEDICATION_COUNT
+          ? s_medications[index]
+          : s_taken_prompt,
       text_color
     );
   }
@@ -1137,6 +1145,94 @@ static void band_arrow_update_proc(
   }
 }
 
+static bool taken_prompt_is_active(void) {
+  return
+      s_scroll.snap_index ==
+          LIST_ROW_COUNT &&
+      s_scroll.mode == SCROLL_IDLE &&
+      s_band.target_visible &&
+      !s_band.animating &&
+      s_band_layer &&
+      !layer_get_hidden(
+        s_band_layer
+      );
+}
+
+static void update_taken_button_hint_pulse(void) {
+  const bool active =
+      taken_prompt_is_active();
+
+  if (!active) {
+    s_taken_hint_was_active = false;
+    s_taken_hint_phase = 0;
+    return;
+  }
+
+  /*
+   * Beim ersten sichtbaren Frame beginnt der Puls
+   * im kleinen Zustand.
+   */
+  if (!s_taken_hint_was_active) {
+    s_taken_hint_was_active = true;
+    s_taken_hint_phase = 0;
+    return;
+  }
+
+  /*
+   * Die vorhandene Kurve 0,1,3,5,3,1,0,0 wird
+   * genau einmal durchlaufen. Der letzte Wert ist
+   * wieder der kleine Ruhezustand und bleibt stehen.
+   */
+  if (
+    s_taken_hint_phase + 1 <
+    (int)ARRAY_LENGTH(
+      s_hint_offsets
+    )
+  ) {
+    s_taken_hint_phase++;
+  }
+}
+
+static void draw_taken_button_hint(
+    GContext *ctx,
+    GRect layer_bounds,
+    GRect frame,
+    GRect canvas_bounds
+) {
+  if (!taken_prompt_is_active()) {
+    return;
+  }
+
+  const int16_t radius =
+      TAKEN_HINT_MIN_RADIUS +
+      s_hint_offsets[
+        s_taken_hint_phase
+      ];
+
+  /*
+   * Der Kreismittelpunkt liegt exakt auf dem rechten
+   * Bildschirmrand. Durch das Display-Clipping bleibt
+   * nur die linke Hälfte als Halbkreis sichtbar.
+   */
+  const int16_t local_screen_edge_x =
+      canvas_bounds.size.w -
+      frame.origin.x;
+
+  graphics_context_set_fill_color(
+    ctx,
+    GColorBlack
+  );
+
+  graphics_fill_circle(
+    ctx,
+    GPoint(
+      local_screen_edge_x,
+      layer_bounds.size.h / 2
+    ),
+    (uint16_t)radius
+  );
+}
+
 static void band_update_proc(
     Layer *layer,
     GContext *ctx
@@ -1201,6 +1297,12 @@ static void band_update_proc(
     GColorBlack
   );
 
+  draw_taken_button_hint(
+    ctx,
+    layer_bounds,
+    frame,
+    canvas_bounds
+  );
 }
 
 static void confirmation_update_proc(
@@ -1231,6 +1333,8 @@ static void ui_timer_callback(void *context) {
   s_hint_phase =
       (s_hint_phase + 1) %
       ARRAY_LENGTH(s_hint_offsets);
+
+  update_taken_button_hint_pulse();
 
   s_ui_tick++;
 
@@ -1389,7 +1493,7 @@ static int32_t scroll_top_limit_q8(void) {
 
 static int32_t scroll_bottom_limit_q8(void) {
   return
-      scroll_anchor_q8(MEDICATION_COUNT) -
+      scroll_anchor_q8(LIST_ROW_COUNT) -
       SCROLL_EDGE_HALF_INTERVAL_PX *
       SCROLL_Q8;
 }
@@ -1433,7 +1537,7 @@ static int nearest_snap_index_for_position_q8(
 
   if (
     position_q8 <= anchor_q8 - escape_q8 &&
-    current < MEDICATION_COUNT
+    current < LIST_ROW_COUNT
   ) {
     return current + 1;
   }
@@ -1537,7 +1641,7 @@ static int32_t magnet_force_for_position_q8(
 
   const int32_t bottom_anchor_q8 =
       scroll_anchor_q8(
-        MEDICATION_COUNT
+        LIST_ROW_COUNT
       );
 
   if (position_q8 >= top_anchor_q8) {
@@ -1556,7 +1660,7 @@ static int32_t magnet_force_for_position_q8(
 
   for (
     int index = 0;
-    index < MEDICATION_COUNT;
+    index < LIST_ROW_COUNT;
     index++
   ) {
     const int32_t upper_anchor_q8 =
@@ -1669,7 +1773,7 @@ static bool touch_reached_virtual_edge(void) {
 
   if (
     s_touch.start_index ==
-        MEDICATION_COUNT &&
+        LIST_ROW_COUNT &&
     s_touch.pair_direction > 0
   ) {
     return
@@ -1951,7 +2055,7 @@ static bool step_snap_index(int direction) {
         ) ||
         (
           s_scroll.snap_index ==
-              MEDICATION_COUNT &&
+              LIST_ROW_COUNT &&
           direction > 0
         );
 
@@ -2435,6 +2539,9 @@ static void reset_ui_state(GRect bounds) {
   s_frame_index = 0;
   s_ui_tick = 0;
   s_hint_phase = 0;
+  s_taken_hint_phase = 0;
+  s_taken_hint_was_active = false;
+
   const int32_t initial_position_q8 =
       CANVAS_START_OFFSET_Y *
       SCROLL_Q8;
