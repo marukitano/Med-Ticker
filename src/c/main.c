@@ -2,6 +2,9 @@
 
 #include "message_keys.auto.h"
 
+#include <stdio.h>
+#include <string.h>
+
 #define FRAME_COUNT 8
 #define UI_TICK_MS 110
 #define PILL_TICKS_PER_FRAME 2
@@ -87,7 +90,39 @@
 #define TAKEN_HINT_MIN_RADIUS 5
 
 #define THEME_PERSIST_KEY 200
-#define THEME_MESSAGE_BUFFER_SIZE 64
+#define MEDICATION_PERSIST_KEY 201
+#define SETTINGS_MESSAGE_BUFFER_SIZE 256
+#define MEDICATION_NAME_LENGTH 32
+#define MEDICATION_LABEL_LENGTH 48
+
+typedef enum {
+  MEDICATION_TIME_MORNING,
+  MEDICATION_TIME_NOON,
+  MEDICATION_TIME_EVENING,
+  MEDICATION_TIME_NIGHT
+} MedicationTime;
+
+typedef enum {
+  MEDICATION_SCHEDULE_DAILY,
+  MEDICATION_SCHEDULE_WEEKLY,
+  MEDICATION_SCHEDULE_MONTHLY
+} MedicationSchedule;
+
+typedef enum {
+  MEDICATION_SYMBOL_PILL,
+  MEDICATION_SYMBOL_PEN,
+  MEDICATION_SYMBOL_TUBE
+} MedicationSymbol;
+
+typedef struct {
+  char name[MEDICATION_NAME_LENGTH];
+  uint8_t quantity;
+  uint8_t time;
+  uint8_t schedule;
+  uint8_t day;
+  uint8_t symbol;
+  uint8_t enabled;
+} MedicationSettings;
 
 typedef enum {
   CONFIRM_IDLE,
@@ -117,8 +152,23 @@ static const VibePattern s_impact_vibration_pattern = {
   .num_segments = ARRAY_LENGTH(s_impact_vibration_durations)
 };
 
+static const MedicationSettings s_default_medication = {
+  .name = "Xarelto 20 mg",
+  .quantity = 1,
+  .time = MEDICATION_TIME_MORNING,
+  .schedule = MEDICATION_SCHEDULE_DAILY,
+  .day = 0,
+  .symbol = MEDICATION_SYMBOL_PILL,
+  .enabled = 1
+};
+
+static MedicationSettings s_medication;
+static char s_primary_medication_label[
+  MEDICATION_LABEL_LENGTH
+] = "Xarelto 20 mg";
+
 static const char *const s_rows[] = {
-  "Xarelto 20 mg",
+  s_primary_medication_label,
   "Metformin 1000 mg",
   "Pantoprazol 40 mg",
   "genommen?"
@@ -272,7 +322,277 @@ static void apply_theme(
   }
 }
 
-static void theme_inbox_received(
+static bool medication_settings_valid(
+    const MedicationSettings *settings
+) {
+  if (
+    !settings ||
+    settings->name[0] == '\0' ||
+    settings->name[
+      MEDICATION_NAME_LENGTH - 1
+    ] != '\0' ||
+    settings->quantity < 1 ||
+    settings->quantity > 20 ||
+    settings->time > MEDICATION_TIME_NIGHT ||
+    settings->schedule >
+        MEDICATION_SCHEDULE_MONTHLY ||
+    settings->symbol >
+        MEDICATION_SYMBOL_TUBE ||
+    settings->enabled > 1
+  ) {
+    return false;
+  }
+
+  if (
+    settings->schedule ==
+        MEDICATION_SCHEDULE_DAILY
+  ) {
+    return settings->day == 0;
+  }
+
+  if (
+    settings->schedule ==
+        MEDICATION_SCHEDULE_WEEKLY
+  ) {
+    return settings->day <= 6;
+  }
+
+  return
+      settings->day >= 1 &&
+      settings->day <= 31;
+}
+
+static void rebuild_primary_medication_label(void) {
+  if (!s_medication.enabled) {
+    snprintf(
+      s_primary_medication_label,
+      sizeof(s_primary_medication_label),
+      "%s (aus)",
+      s_medication.name
+    );
+    return;
+  }
+
+  if (s_medication.quantity > 1) {
+    snprintf(
+      s_primary_medication_label,
+      sizeof(s_primary_medication_label),
+      "%s x%u",
+      s_medication.name,
+      (unsigned int)s_medication.quantity
+    );
+    return;
+  }
+
+  snprintf(
+    s_primary_medication_label,
+    sizeof(s_primary_medication_label),
+    "%s",
+    s_medication.name
+  );
+}
+
+static void apply_medication_settings(
+    const MedicationSettings *settings,
+    bool save
+) {
+  s_medication = *settings;
+  rebuild_primary_medication_label();
+
+  if (save) {
+    persist_write_data(
+      MEDICATION_PERSIST_KEY,
+      &s_medication,
+      sizeof(s_medication)
+    );
+  }
+
+  mark_scene_dirty();
+}
+
+static void load_medication_settings(void) {
+  s_medication = s_default_medication;
+
+  if (
+    persist_exists(MEDICATION_PERSIST_KEY) &&
+    persist_get_size(MEDICATION_PERSIST_KEY) ==
+        (int)sizeof(MedicationSettings)
+  ) {
+    MedicationSettings stored;
+
+    if (
+      persist_read_data(
+        MEDICATION_PERSIST_KEY,
+        &stored,
+        sizeof(stored)
+      ) == (int)sizeof(stored) &&
+      medication_settings_valid(&stored)
+    ) {
+      s_medication = stored;
+    }
+  }
+
+  rebuild_primary_medication_label();
+}
+
+static bool tuple_read_int32(
+    Tuple *tuple,
+    int32_t *value
+) {
+  if (
+    !tuple ||
+    !value ||
+    (
+      tuple->type != TUPLE_INT &&
+      tuple->type != TUPLE_UINT
+    )
+  ) {
+    return false;
+  }
+
+  *value = tuple->value->int32;
+  return true;
+}
+
+static bool read_medication_from_message(
+    DictionaryIterator *iterator,
+    MedicationSettings *settings
+) {
+  Tuple *name_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_NAME
+  );
+
+  Tuple *quantity_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_QUANTITY
+  );
+
+  Tuple *time_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_TIME
+  );
+
+  Tuple *schedule_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_SCHEDULE
+  );
+
+  Tuple *day_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_DAY
+  );
+
+  Tuple *symbol_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_SYMBOL
+  );
+
+  Tuple *enabled_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_ENABLED
+  );
+
+  if (
+    !name_tuple ||
+    name_tuple->type != TUPLE_CSTRING
+  ) {
+    return false;
+  }
+
+  const char *name =
+      name_tuple->value->cstring;
+  const size_t name_length = strlen(name);
+
+  int32_t quantity;
+  int32_t time;
+  int32_t schedule;
+  int32_t day;
+  int32_t symbol;
+  int32_t enabled;
+
+  if (
+    name_length == 0 ||
+    name_length >= MEDICATION_NAME_LENGTH ||
+    !tuple_read_int32(
+      quantity_tuple,
+      &quantity
+    ) ||
+    !tuple_read_int32(
+      time_tuple,
+      &time
+    ) ||
+    !tuple_read_int32(
+      schedule_tuple,
+      &schedule
+    ) ||
+    !tuple_read_int32(
+      day_tuple,
+      &day
+    ) ||
+    !tuple_read_int32(
+      symbol_tuple,
+      &symbol
+    ) ||
+    !tuple_read_int32(
+      enabled_tuple,
+      &enabled
+    ) ||
+    quantity < 1 ||
+    quantity > 20 ||
+    time < MEDICATION_TIME_MORNING ||
+    time > MEDICATION_TIME_NIGHT ||
+    schedule < MEDICATION_SCHEDULE_DAILY ||
+    schedule > MEDICATION_SCHEDULE_MONTHLY ||
+    symbol < MEDICATION_SYMBOL_PILL ||
+    symbol > MEDICATION_SYMBOL_TUBE ||
+    enabled < 0 ||
+    enabled > 1
+  ) {
+    return false;
+  }
+
+  if (
+    (
+      schedule == MEDICATION_SCHEDULE_DAILY &&
+      day != 0
+    ) ||
+    (
+      schedule == MEDICATION_SCHEDULE_WEEKLY &&
+      (day < 0 || day > 6)
+    ) ||
+    (
+      schedule == MEDICATION_SCHEDULE_MONTHLY &&
+      (day < 1 || day > 31)
+    )
+  ) {
+    return false;
+  }
+
+  MedicationSettings parsed = {
+    .quantity = (uint8_t)quantity,
+    .time = (uint8_t)time,
+    .schedule = (uint8_t)schedule,
+    .day = (uint8_t)day,
+    .symbol = (uint8_t)symbol,
+    .enabled = (uint8_t)enabled
+  };
+
+  memcpy(
+    parsed.name,
+    name,
+    name_length + 1
+  );
+
+  if (!medication_settings_valid(&parsed)) {
+    return false;
+  }
+
+  *settings = parsed;
+  return true;
+}
+
+static void settings_inbox_received(
     DictionaryIterator *iterator,
     void *context
 ) {
@@ -283,42 +603,65 @@ static void theme_inbox_received(
     MESSAGE_KEY_THEME
   );
 
+  int32_t theme_value;
+
   if (
-    !theme_tuple ||
-    (
-      theme_tuple->type != TUPLE_INT &&
-      theme_tuple->type != TUPLE_UINT
+    tuple_read_int32(
+      theme_tuple,
+      &theme_value
+    ) &&
+    (theme_value == 0 || theme_value == 1)
+  ) {
+    apply_theme(
+      theme_value == 1,
+      true
+    );
+  }
+
+  if (
+    !dict_find(
+      iterator,
+      MESSAGE_KEY_MED_NAME
     )
   ) {
     return;
   }
 
-  const int32_t value =
-      theme_tuple->value->int32;
+  MedicationSettings medication;
 
-  if (value != 0 && value != 1) {
-    return;
+  if (
+    read_medication_from_message(
+      iterator,
+      &medication
+    )
+  ) {
+    apply_medication_settings(
+      &medication,
+      true
+    );
+  } else {
+    APP_LOG(
+      APP_LOG_LEVEL_WARNING,
+      "Invalid medication settings"
+    );
   }
-
-  apply_theme(
-    value == 1,
-    true
-  );
 }
 
-static void theme_init(void) {
+static void settings_init(void) {
   s_light_theme =
       persist_exists(THEME_PERSIST_KEY) &&
       persist_read_int(THEME_PERSIST_KEY) == 1;
 
+  load_medication_settings();
+
   app_message_register_inbox_received(
-    theme_inbox_received
+    settings_inbox_received
   );
 
   const AppMessageResult result =
       app_message_open(
-        THEME_MESSAGE_BUFFER_SIZE,
-        THEME_MESSAGE_BUFFER_SIZE
+        SETTINGS_MESSAGE_BUFFER_SIZE,
+        64
       );
 
   if (result != APP_MSG_OK) {
@@ -330,7 +673,7 @@ static void theme_init(void) {
   }
 }
 
-static void theme_deinit(void) {
+static void settings_deinit(void) {
   app_message_deregister_callbacks();
 }
 
@@ -2514,7 +2857,7 @@ static void window_unload(Window *window) {
 }
 
 static void init(void) {
-  theme_init();
+  settings_init();
 
   s_window = window_create();
   window_set_background_color(
@@ -2541,7 +2884,7 @@ static void init(void) {
 }
 
 static void deinit(void) {
-  theme_deinit();
+  settings_deinit();
   window_destroy(s_window);
 }
 

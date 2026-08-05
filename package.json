@@ -11,7 +11,14 @@
     "displayName": "Pill Reminder",
     "enableMultiJS": false,
     "messageKeys": {
-      "THEME": 0
+      "THEME": 0,
+      "MED_NAME": 1,
+      "MED_QUANTITY": 2,
+      "MED_TIME": 3,
+      "MED_SCHEDULE": 4,
+      "MED_DAY": 5,
+      "MED_SYMBOL": 6,
+      "MED_ENABLED": 7
     },
     "projectType": "native",
     "resources": {
@@ -35,5 +42,5 @@
       "configurable"
     ]
   },
-  "version": "0.1.3"
+  "version": "0.1.4"
 }
