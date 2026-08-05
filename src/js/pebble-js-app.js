@@ -38,6 +38,7 @@ var DEFAULT_DAYPARTS = {
 
 var DEFAULT_MEDICATION = {
   name: 'Xarelto 20 mg',
+  dosage: '',
   quantity: 1,
   time: 0,
   schedule: 0,
@@ -45,6 +46,7 @@ var DEFAULT_MEDICATION = {
   symbol: 0,
   shape: 2,
   color: 255,
+  color2: -1,
   size: 100,
   imprint: '20',
   iconSet: true,
@@ -132,6 +134,7 @@ function currentDayparts() {
 function cloneDefaultMedication() {
   return {
     name: DEFAULT_MEDICATION.name,
+    dosage: DEFAULT_MEDICATION.dosage,
     quantity: DEFAULT_MEDICATION.quantity,
     time: DEFAULT_MEDICATION.time,
     schedule: DEFAULT_MEDICATION.schedule,
@@ -139,6 +142,7 @@ function cloneDefaultMedication() {
     symbol: DEFAULT_MEDICATION.symbol,
     shape: DEFAULT_MEDICATION.shape,
     color: DEFAULT_MEDICATION.color,
+    color2: DEFAULT_MEDICATION.color2,
     size: DEFAULT_MEDICATION.size,
     imprint: DEFAULT_MEDICATION.imprint,
     iconSet: true,
@@ -149,6 +153,7 @@ function cloneDefaultMedication() {
 function blankMedication() {
   return {
     name: '',
+    dosage: '',
     quantity: 1,
     time: 0,
     schedule: 0,
@@ -156,6 +161,7 @@ function blankMedication() {
     symbol: -1,
     shape: -1,
     color: -1,
+    color2: -1,
     size: 100,
     imprint: '',
     iconSet: false,
@@ -205,6 +211,12 @@ function normalizeMedication(value) {
     name = DEFAULT_MEDICATION.name;
   }
 
+  var dosage = typeof value.dosage === 'string'
+    ? value.dosage.trim()
+    : '';
+
+  dosage = truncateUtf8(dosage, 20);
+
   var quantity = integerInRange(value.quantity, 1, 20)
     ? value.quantity
     : DEFAULT_MEDICATION.quantity;
@@ -242,7 +254,7 @@ function normalizeMedication(value) {
   var shapeValid = integerInRange(
     value.shape,
     0,
-    3
+    4
   );
 
   var shape = shapeValid
@@ -257,6 +269,16 @@ function normalizeMedication(value) {
 
   var color = colorValid
     ? value.color
+    : -1;
+
+  var color2Valid = integerInRange(
+    value.color2,
+    192,
+    255
+  );
+
+  var color2 = color2Valid
+    ? value.color2
     : -1;
 
   var size = integerInRange(
@@ -275,11 +297,16 @@ function normalizeMedication(value) {
       symbolValid &&
       (
         symbol === 1 ||
-        (shapeValid && colorValid)
+        (
+          shapeValid &&
+          colorValid &&
+          (shape !== 4 || color2Valid)
+        )
       );
 
   return {
     name: name,
+    dosage: dosage,
     quantity: quantity,
     time: time,
     schedule: schedule,
@@ -287,6 +314,7 @@ function normalizeMedication(value) {
     symbol: symbol,
     shape: shape,
     color: color,
+    color2: color2,
     size: size,
     imprint: imprint,
     iconSet: iconSet,
@@ -564,6 +592,7 @@ function configurationPage(
     '.shape-1{width:39px;height:24px;border-radius:50%}',
     '.shape-2{width:42px;height:21px;border-radius:12px}',
     '.shape-3{width:27px;height:27px;border-radius:4px;transform:rotate(45deg)}',
+    '.shape-4{width:46px;height:16px;border-radius:9px}',
     '.color-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:6px;margin-top:8px}',
     '.color-swatch{aspect-ratio:1;border:2px solid rgba(0,0,0,.28);border-radius:5px;padding:0;min-width:0}',
     '.color-swatch.selected{outline:3px solid #111;outline-offset:1px}',
@@ -643,7 +672,7 @@ function configurationPage(
     'return "<option value=\\""+value+"\\""+(value===current?" selected":"")+">"+label+"</option>";',
     '}',
     'function blankMedication(){',
-    'return {name:"",quantity:1,time:0,schedule:0,day:0,symbol:-1,shape:-1,color:-1,size:100,imprint:"",iconSet:false,enabled:false};',
+    'return {name:"",dosage:"",quantity:1,time:0,schedule:0,day:0,symbol:-1,shape:-1,color:-1,color2:-1,size:100,imprint:"",iconSet:false,enabled:false};',
     '}',
     'function numberValue(card,name){',
     'return parseInt(card.querySelector("[data-field=\\""+name+"\\"]").value,10);',
@@ -653,17 +682,20 @@ function configurationPage(
     'var result=[];',
     'for(var i=0;i<cards.length;i++){',
     'var card=cards[i];',
+    'var dosage=card.querySelector("[data-field=\\"dosage\\"]").value.trim().slice(0,20);',
     'var schedule=numberValue(card,"schedule");',
     'var day=schedule===1?numberValue(card,"weekday"):(schedule===2?numberValue(card,"monthday"):0);',
     'var symbol=numberValue(card,"symbol");',
     'var shape=numberValue(card,"shape");',
     'var color=numberValue(card,"color");',
+    'var color2=numberValue(card,"color2");',
     'var size=numberValue(card,"size");',
     'var imprint=card.querySelector("[data-field=\\"imprint\\"]").value.trim().slice(0,4);',
-    'var iconSet=symbol===1||(symbol===0&&shape>=0&&shape<=3&&color>=192&&color<=255);',
+    'var iconSet=symbol===1||(symbol===0&&shape>=0&&shape<=4&&color>=192&&color<=255&&(shape!==4||(color2>=192&&color2<=255)));',
     'var enabled=card.querySelector("[data-field=\\"enabled\\"]").checked&&iconSet;',
     'result.push({',
     'name:card.querySelector("[data-field=\\"name\\"]").value.trim(),',
+    'dosage:dosage,',
     'quantity:numberValue(card,"quantity"),',
     'time:numberValue(card,"time"),',
     'schedule:schedule,',
@@ -671,6 +703,7 @@ function configurationPage(
     'symbol:symbol,',
     'shape:shape,',
     'color:color,',
+    'color2:color2,',
     'size:size,',
     'imprint:imprint,',
     'iconSet:iconSet,',
@@ -697,11 +730,11 @@ function configurationPage(
     'var blue=(value&3)*85;',
     'return red*299+green*587+blue*114>145000?"#111":"#fff";',
     '}',
-    'function paletteHtml(current){',
+    'function paletteHtml(current,field){',
     'var html="";',
     'for(var value=192;value<=255;value++){',
     'var selected=value===current?" selected":"";',
-    'html+="<button class=\\"color-swatch"+selected+"\\" type=\\"button\\" data-color=\\""+value+"\\" title=\\"Pebble ARGB8 0x"+value.toString(16).toUpperCase()+"\\" style=\\"background:"+pebbleColorHex(value)+"\\"></button>";',
+    'html+="<button class=\\"color-swatch"+selected+"\\" type=\\"button\\" data-color=\\""+value+"\\" data-color-field=\\""+field+"\\" title=\\"Pebble ARGB8 0x"+value.toString(16).toUpperCase()+"\\" style=\\"background:"+pebbleColorHex(value)+"\\"></button>";',
     '}',
     'return html;',
     '}',
@@ -710,24 +743,36 @@ function configurationPage(
     'var symbol=numberValue(card,"symbol");',
     'var isTablet=symbol===0;',
     'var shape=numberValue(card,"shape");',
+    'var isCapsule=shape===4;',
     'var color=numberValue(card,"color");',
+    'var color2=numberValue(card,"color2");',
+    'var color2Valid=color2>=192&&color2<=255;',
     'var size=numberValue(card,"size");',
     'var imprint=card.querySelector("[data-field=\\"imprint\\"]").value.trim().slice(0,4);',
     'if(size<60||size>140){size=100;}',
-    'var iconSet=symbol===1||(isTablet&&shape>=0&&shape<=3&&color>=192&&color<=255);',
+    'var iconSet=symbol===1||(isTablet&&shape>=0&&shape<=4&&color>=192&&color<=255&&(!isCapsule||color2Valid));',
     'fields.className=isTablet?"icon-fields":"icon-fields hidden";',
     'if(isTablet){',
     'var preview=card.querySelector(".pill-shape");',
-    'preview.className=shape>=0&&shape<=3?"pill-shape shape-"+shape:"pill-shape hidden";',
+    'preview.className=shape>=0&&shape<=4?"pill-shape shape-"+shape:"pill-shape hidden";',
+    'if(isCapsule){',
+    'preview.style.backgroundColor="transparent";',
+    'preview.style.backgroundImage=color>=192&&color<=255&&color2Valid?"linear-gradient(90deg,"+pebbleColorHex(color)+" 0 50%,"+pebbleColorHex(color2)+" 50% 100%)":"none";',
+    '}else{',
+    'preview.style.backgroundImage="none";',
     'preview.style.backgroundColor=color>=192&&color<=255?pebbleColorHex(color):"transparent";',
+    '}',
     'preview.style.transform=(shape===3?"rotate(45deg) ":"")+"scale("+(size/100)+")";',
     'var imprintNode=card.querySelector(".pill-imprint");',
     'imprintNode.textContent=imprint;',
     'imprintNode.style.color=color>=192&&color<=255?pebbleTextColor(color):"#111";',
     'card.querySelector("[data-size-value]").textContent=size+" %";',
+    'card.querySelector(".primary-color-label").textContent=isCapsule?"Farbe 1 *":"Farbe *";',
+    'card.querySelector(".second-color").className=isCapsule?"second-color":"second-color hidden";',
     'var swatches=card.querySelectorAll("[data-color]");',
     'for(var i=0;i<swatches.length;i++){',
-    'var selected=parseInt(swatches[i].getAttribute("data-color"),10)===color;',
+    'var field=swatches[i].getAttribute("data-color-field");',
+    'var selected=parseInt(swatches[i].getAttribute("data-color"),10)===numberValue(card,field);',
     'swatches[i].className=selected?"color-swatch selected":"color-swatch";',
     '}',
     '}',
@@ -743,6 +788,18 @@ function configurationPage(
     'body.className=open?"body":"body hidden";',
     'toggle.className=open?"toggle":"toggle collapsed";',
     '}',
+    'function setExclusiveCardOpen(card,open){',
+    'var cards=document.querySelectorAll(".card");',
+    'for(var i=0;i<cards.length;i++){',
+    'setCardOpen(cards[i],cards[i]===card&&open);',
+    '}',
+    '}',
+    'function scrollCardToTop(card){',
+    'var toggle=card.querySelector(".toggle");',
+    'if(toggle&&typeof toggle.scrollIntoView==="function"){',
+    'setTimeout(function(){toggle.scrollIntoView(true);},0);',
+    '}',
+    '}',
     'function setPanelOpen(panelId,bodyId,open){',
     'var panel=document.getElementById(panelId);',
     'var body=document.getElementById(bodyId);',
@@ -757,15 +814,17 @@ function configurationPage(
     'for(var i=0;i<medications.length;i++){',
     'var med=medications[i];',
     'var title=med.name||"Neues Medikament";',
+    'var dosage=typeof med.dosage==="string"?med.dosage.slice(0,20):"";',
     'var iconReady=med.iconSet===true;',
     'var imprint=typeof med.imprint==="string"?med.imprint.slice(0,4):"";',
-    'var previewClass=med.shape>=0&&med.shape<=3?"pill-shape shape-"+med.shape:"pill-shape hidden";',
+    'var previewClass=med.shape>=0&&med.shape<=4?"pill-shape shape-"+med.shape:"pill-shape hidden";',
     'var sub=timeNames[med.time]+(med.quantity>1?" · x"+med.quantity:"")+(med.enabled?"":" · aus");',
     'html+="<section class=\\"card\\" data-index=\\""+i+"\\">";',
     'html+="<button class=\\"toggle collapsed\\" type=\\"button\\" data-toggle=\\""+i+"\\">";',
     'html+="<span><span class=\\"summary-main\\">"+escapeHtml(title)+"</span><span class=\\"summary-sub\\">"+escapeHtml(sub)+"</span></span><span class=\\"arrow\\">›</span></button>";',
     'html+="<div class=\\"body hidden\\">";',
     'html+="<label>Name<input data-field=\\"name\\" type=\\"text\\" required maxlength=\\"31\\" value=\\""+escapeHtml(med.name)+"\\"></label>";',
+    'html+="<label>Dosierung<input data-field=\\"dosage\\" type=\\"text\\" maxlength=\\"20\\" value=\\""+escapeHtml(dosage)+"\\" placeholder=\\"z. B. 20 mg\\"></label>";',
     'html+="<label>Menge<input data-field=\\"quantity\\" type=\\"number\\" min=\\"1\\" max=\\"20\\" required value=\\""+med.quantity+"\\"></label>";',
     'html+="<label>Zeitpunkt<select data-field=\\"time\\">";',
     'html+=option(0,"Früh",med.time)+option(1,"Mittag",med.time)+option(2,"Abend",med.time)+option(3,"Nacht",med.time);',
@@ -782,14 +841,15 @@ function configurationPage(
     'html+="</select></label>";',
     'html+="<div class=\\"icon-fields\\">";',
     'html+="<label>Form<select data-field=\\"shape\\">";',
-    'html+=option(-1,"Bitte auswählen",med.shape)+option(0,"Rund",med.shape)+option(1,"Ellipse",med.shape)+option(2,"Pille / Kapsel",med.shape)+option(3,"Rhombus",med.shape);',
+    'html+=option(-1,"Bitte auswählen",med.shape)+option(0,"Rund",med.shape)+option(1,"Ellipse",med.shape)+option(2,"Pille",med.shape)+option(4,"Kapsel",med.shape)+option(3,"Rhombus",med.shape);',
     'html+="</select></label>";',
     'html+="<div class=\\"icon-preview-row\\"><span class=\\"pill-preview\\"><span class=\\""+previewClass+"\\"><span class=\\"pill-imprint\\">"+escapeHtml(imprint)+"</span></span></span></div>";',
     'html+="<label class=\\"size-label\\"><span>Grösse</span><span class=\\"size-value\\" data-size-value>"+med.size+" %</span></label>";',
     'html+="<input data-field=\\"size\\" type=\\"range\\" min=\\"60\\" max=\\"140\\" step=\\"5\\" value=\\""+med.size+"\\">";',
     'html+="<label>Beschriftung<input class=\\"imprint-input\\" data-field=\\"imprint\\" type=\\"text\\" maxlength=\\"4\\" value=\\""+escapeHtml(imprint)+"\\" placeholder=\\"z. B. 20\\"></label>";',
     'html+="<input data-field=\\"color\\" type=\\"hidden\\" value=\\""+med.color+"\\">";',
-    'html+="<label>Farbe *</label><div class=\\"color-grid\\">"+paletteHtml(med.color)+"</div>";',
+    'html+="<label class=\\"primary-color-label\\">Farbe *</label><div class=\\"color-grid\\">"+paletteHtml(med.color,"color")+"</div>";',
+    'html+="<div class=\\"second-color hidden\\"><input data-field=\\"color2\\" type=\\"hidden\\" value=\\""+med.color2+"\\"><label>Farbe 2 *</label><div class=\\"color-grid\\">"+paletteHtml(med.color2,"color2")+"</div></div>";',
     'html+="</div>";',
     'html+="<label class=\\""+(iconReady?"check":"check disabled")+"\\"><input data-field=\\"enabled\\" type=\\"checkbox\\""+(med.enabled?" checked":"")+(iconReady?"":" disabled")+"><span>Aktiv</span></label>";',
     'html+="<div class=\\""+(iconReady?"note icon-warning hidden":"note icon-warning")+"\\">Bitte zuerst ein vollständiges Icon auswählen. Erst danach kann das Medikament aktiviert werden.</div>";',
@@ -810,9 +870,9 @@ function configurationPage(
     'card.querySelector("[data-field=\\"imprint\\"]").oninput=(function(item){return function(){updateIconFields(item);};})(card);',
     'var colorButtons=card.querySelectorAll("[data-color]");',
     'for(var colorIndex=0;colorIndex<colorButtons.length;colorIndex++){',
-    'colorButtons[colorIndex].onclick=(function(item){return function(){item.querySelector("[data-field=\\"color\\"]").value=this.getAttribute("data-color");updateIconFields(item);};})(card);',
+    'colorButtons[colorIndex].onclick=(function(item){return function(){var field=this.getAttribute("data-color-field");item.querySelector("[data-field=\\""+field+"\\"]").value=this.getAttribute("data-color");updateIconFields(item);};})(card);',
     '}',
-    'card.querySelector("[data-toggle]").onclick=(function(item){return function(){var hidden=item.querySelector(".body").className.indexOf("hidden")>=0;setCardOpen(item,hidden);};})(card);',
+    'card.querySelector("[data-toggle]").onclick=(function(item){return function(){var hidden=item.querySelector(".body").className.indexOf("hidden")>=0;setExclusiveCardOpen(item,hidden);if(hidden){scrollCardToTop(item);}};})(card);',
     'if(parseInt(card.getAttribute("data-index"),10)===openIndex){setCardOpen(card,true);}',
     '}',
     'var removeButtons=document.querySelectorAll("[data-remove]");',
