@@ -585,7 +585,7 @@ function configurationPage(
     '.size-value{font-weight:normal;font-variant-numeric:tabular-nums}',
     'input[type=range]{box-sizing:border-box;width:100%;margin-top:9px}',
     '.pill-preview{width:92px;height:76px;display:flex;align-items:center;justify-content:center}',
-    '.pill-shape{display:flex;align-items:center;justify-content:center;border:2px solid rgba(0,0,0,.38);box-shadow:inset 0 1px 2px rgba(255,255,255,.55)}',
+    '.pill-shape{display:flex;align-items:center;justify-content:center;border:2px solid #555;background-clip:padding-box;box-shadow:none}',
     '.pill-imprint{display:block;max-width:88%;overflow:hidden;font-size:10px;font-weight:bold;line-height:1;white-space:nowrap;text-align:center}',
     '.imprint-input{text-align:center;letter-spacing:.08em}',
     '.shape-0{width:28px;height:28px;border-radius:50%}',
