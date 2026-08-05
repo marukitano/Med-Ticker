@@ -29,7 +29,4 @@ def build(ctx):
         })
 
     ctx.set_group('bundle')
-    ctx.pbl_bundle(
-        binaries=binaries,
-        js=ctx.path.ant_glob('src/pkjs/**/*.js')
-    )
+    ctx.pbl_bundle(binaries=binaries)

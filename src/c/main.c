@@ -1,7 +1,5 @@
 #include <pebble.h>
 
-#include "medication_config.h"
-
 #define FRAME_COUNT 8
 #define UI_TICK_MS 110
 #define PILL_TICKS_PER_FRAME 2
@@ -2390,8 +2388,6 @@ static void window_unload(Window *window) {
 }
 
 static void init(void) {
-  medication_config_init();
-
   s_window = window_create();
   window_set_background_color(s_window, GColorBlack);
 
@@ -2414,7 +2410,6 @@ static void init(void) {
 }
 
 static void deinit(void) {
-  medication_config_deinit();
   window_destroy(s_window);
 }
 
