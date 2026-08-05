@@ -85,6 +85,10 @@
 #define MEDICATION_HEADER_HEIGHT 28
 #define MEDICATION_ROW_HEIGHT 50
 #define MEDICATION_ROW_GAP 8
+#define MEDICATION_ICON_SIZE 30
+#define MEDICATION_ICON_LEFT 10
+#define MEDICATION_ICON_TEXT_X 46
+#define MEDICATION_ICON_TEXT_RIGHT 8
 #define BAND_OVERSHOOT_COVER_PX 32
 #define BAND_ARROW_WIDTH 18
 #define TAKEN_HINT_MIN_RADIUS 5
@@ -93,7 +97,7 @@
 #define LEGACY_MEDICATION_PERSIST_KEY 201
 #define MEDICATION_LIST_PERSIST_KEY 202
 #define MEDICATION_COUNT_PERSIST_KEY 203
-#define SETTINGS_MESSAGE_BUFFER_SIZE 256
+#define SETTINGS_MESSAGE_BUFFER_SIZE 320
 #define MEDICATION_NAME_LENGTH 32
 #define MEDICATION_LABEL_LENGTH 48
 #define MAX_MEDICATIONS 8
@@ -140,6 +144,19 @@ typedef struct {
   uint8_t day;
   uint8_t symbol;
   uint8_t enabled;
+} LegacyMedicationSettingsV1;
+
+typedef struct {
+  char name[MEDICATION_NAME_LENGTH];
+  uint8_t quantity;
+  uint8_t time;
+  uint8_t schedule;
+  uint8_t day;
+  uint8_t symbol;
+  uint8_t shape;
+  uint8_t color;
+  uint8_t icon_set;
+  uint8_t enabled;
 } MedicationSettings;
 
 typedef struct {
@@ -184,6 +201,9 @@ static const MedicationSettings s_default_medication = {
   .schedule = MEDICATION_SCHEDULE_DAILY,
   .day = 0,
   .symbol = MEDICATION_SYMBOL_PILL,
+  .shape = 2,
+  .color = 255,
+  .icon_set = 1,
   .enabled = 1
 };
 
@@ -212,6 +232,9 @@ static char s_row_labels[
 ][MEDICATION_LABEL_LENGTH];
 static const char *s_rows[MAX_LIST_ROWS];
 static MedicationRowKind s_row_kinds[
+  MAX_LIST_ROWS
+];
+static int8_t s_row_medication_indices[
   MAX_LIST_ROWS
 ];
 static uint8_t s_list_row_count = 1;
@@ -392,7 +415,11 @@ static bool medication_settings_valid(
         MEDICATION_SCHEDULE_MONTHLY ||
     settings->symbol >
         MEDICATION_SYMBOL_PEN ||
-    settings->enabled > 1
+    settings->shape > 3 ||
+    settings->color < 192 ||
+    settings->icon_set > 1 ||
+    settings->enabled > 1 ||
+    (settings->enabled && !settings->icon_set)
   ) {
     return false;
   }
@@ -414,6 +441,36 @@ static bool medication_settings_valid(
   return
       settings->day >= 1 &&
       settings->day <= 31;
+}
+
+
+static MedicationSettings medication_from_legacy(
+    const LegacyMedicationSettingsV1 *legacy
+) {
+  MedicationSettings medication =
+      s_default_medication;
+
+  if (!legacy) {
+    return medication;
+  }
+
+  memcpy(
+    medication.name,
+    legacy->name,
+    sizeof(medication.name)
+  );
+
+  medication.quantity = legacy->quantity;
+  medication.time = legacy->time;
+  medication.schedule = legacy->schedule;
+  medication.day = legacy->day;
+  medication.symbol = legacy->symbol;
+  medication.enabled = legacy->enabled;
+  medication.shape = 2;
+  medication.color = 255;
+  medication.icon_set = 1;
+
+  return medication;
 }
 
 static bool migrate_legacy_medication_symbol(
@@ -656,6 +713,8 @@ static void append_confirmation_row(
           ? MEDICATION_ROW_CONFIRM_PILLS
           : MEDICATION_ROW_CONFIRM_PEN;
 
+  s_row_medication_indices[s_list_row_count] = -1;
+
   s_list_row_count++;
 }
 
@@ -666,6 +725,12 @@ static void rebuild_medication_rows(void) {
   s_visible_medication_time = visible_time;
   s_visible_medication_time_set = true;
   s_list_row_count = 0;
+
+  memset(
+    s_row_medication_indices,
+    -1,
+    sizeof(s_row_medication_indices)
+  );
 
   for (
     uint8_t group_index = 0;
@@ -707,6 +772,9 @@ static void rebuild_medication_rows(void) {
 
       s_row_kinds[s_list_row_count] =
           MEDICATION_ROW_ITEM;
+
+      s_row_medication_indices[s_list_row_count] =
+          (int8_t)index;
 
       s_list_row_count++;
       group_has_medication = true;
@@ -869,22 +937,30 @@ static bool load_current_medication_list(void) {
     return true;
   }
 
-  const int expected_size =
+  if (
+    !persist_exists(
+      MEDICATION_LIST_PERSIST_KEY
+    )
+  ) {
+    return false;
+  }
+
+  const int stored_size =
+      persist_get_size(
+        MEDICATION_LIST_PERSIST_KEY
+      );
+
+  const int current_size =
       (int)(
         sizeof(MedicationSettings) *
         stored_count
       );
 
-  if (
-    !persist_exists(
-      MEDICATION_LIST_PERSIST_KEY
-    ) ||
-    persist_get_size(
-      MEDICATION_LIST_PERSIST_KEY
-    ) != expected_size
-  ) {
-    return false;
-  }
+  const int legacy_size =
+      (int)(
+        sizeof(LegacyMedicationSettingsV1) *
+        stored_count
+      );
 
   MedicationSettings stored[
     MAX_MEDICATIONS
@@ -892,17 +968,50 @@ static bool load_current_medication_list(void) {
 
   memset(stored, 0, sizeof(stored));
 
-  if (
-    persist_read_data(
-      MEDICATION_LIST_PERSIST_KEY,
-      stored,
-      expected_size
-    ) != expected_size
-  ) {
+  bool needs_persist = false;
+
+  if (stored_size == current_size) {
+    if (
+      persist_read_data(
+        MEDICATION_LIST_PERSIST_KEY,
+        stored,
+        current_size
+      ) != current_size
+    ) {
+      return false;
+    }
+  } else if (stored_size == legacy_size) {
+    LegacyMedicationSettingsV1 legacy[
+      MAX_MEDICATIONS
+    ];
+
+    memset(legacy, 0, sizeof(legacy));
+
+    if (
+      persist_read_data(
+        MEDICATION_LIST_PERSIST_KEY,
+        legacy,
+        legacy_size
+      ) != legacy_size
+    ) {
+      return false;
+    }
+
+    for (
+      uint8_t index = 0;
+      index < (uint8_t)stored_count;
+      index++
+    ) {
+      stored[index] =
+          medication_from_legacy(
+            &legacy[index]
+          );
+    }
+
+    needs_persist = true;
+  } else {
     return false;
   }
-
-  bool migrated_symbol = false;
 
   for (
     uint8_t index = 0;
@@ -914,7 +1023,7 @@ static bool load_current_medication_list(void) {
         &stored[index]
       )
     ) {
-      migrated_symbol = true;
+      needs_persist = true;
     }
   }
 
@@ -930,7 +1039,8 @@ static bool load_current_medication_list(void) {
   memcpy(
     s_medications,
     stored,
-    expected_size
+    sizeof(MedicationSettings) *
+        stored_count
   );
 
   s_medication_count =
@@ -939,7 +1049,7 @@ static bool load_current_medication_list(void) {
   reset_medication_confirmations();
   rebuild_medication_rows();
 
-  if (migrated_symbol) {
+  if (needs_persist) {
     persist_medication_list();
   }
 
@@ -963,20 +1073,47 @@ static void load_medication_settings(void) {
   if (
     persist_exists(
       LEGACY_MEDICATION_PERSIST_KEY
-    ) &&
-    persist_get_size(
-      LEGACY_MEDICATION_PERSIST_KEY
-    ) == (int)sizeof(MedicationSettings)
+    )
   ) {
-    MedicationSettings stored;
+    const int legacy_size =
+        persist_get_size(
+          LEGACY_MEDICATION_PERSIST_KEY
+        );
+
+    MedicationSettings stored =
+        s_default_medication;
+
+    bool read_successfully = false;
 
     if (
-      persist_read_data(
-        LEGACY_MEDICATION_PERSIST_KEY,
-        &stored,
-        sizeof(stored)
-      ) == (int)sizeof(stored)
+      legacy_size ==
+          (int)sizeof(MedicationSettings)
     ) {
+      read_successfully =
+          persist_read_data(
+            LEGACY_MEDICATION_PERSIST_KEY,
+            &stored,
+            sizeof(stored)
+          ) == (int)sizeof(stored);
+    } else if (
+      legacy_size ==
+          (int)sizeof(LegacyMedicationSettingsV1)
+    ) {
+      LegacyMedicationSettingsV1 legacy;
+
+      if (
+        persist_read_data(
+          LEGACY_MEDICATION_PERSIST_KEY,
+          &legacy,
+          sizeof(legacy)
+        ) == (int)sizeof(legacy)
+      ) {
+        stored = medication_from_legacy(&legacy);
+        read_successfully = true;
+      }
+    }
+
+    if (read_successfully) {
       migrate_legacy_medication_symbol(
         &stored
       );
@@ -1119,6 +1256,21 @@ static bool read_medication_from_message(
     MESSAGE_KEY_MED_SYMBOL
   );
 
+  Tuple *shape_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_SHAPE
+  );
+
+  Tuple *color_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_COLOR
+  );
+
+  Tuple *icon_set_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_ICON_SET
+  );
+
   Tuple *enabled_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_ENABLED
@@ -1140,6 +1292,9 @@ static bool read_medication_from_message(
   int32_t schedule;
   int32_t day;
   int32_t symbol;
+  int32_t shape;
+  int32_t color;
+  int32_t icon_set;
   int32_t enabled;
 
   if (
@@ -1166,6 +1321,18 @@ static bool read_medication_from_message(
       &symbol
     ) ||
     !tuple_read_int32(
+      shape_tuple,
+      &shape
+    ) ||
+    !tuple_read_int32(
+      color_tuple,
+      &color
+    ) ||
+    !tuple_read_int32(
+      icon_set_tuple,
+      &icon_set
+    ) ||
+    !tuple_read_int32(
       enabled_tuple,
       &enabled
     ) ||
@@ -1177,8 +1344,15 @@ static bool read_medication_from_message(
     schedule > MEDICATION_SCHEDULE_MONTHLY ||
     symbol < MEDICATION_SYMBOL_PILL ||
     symbol > MEDICATION_SYMBOL_PEN ||
+    shape < 0 ||
+    shape > 3 ||
+    color < 192 ||
+    color > 255 ||
+    icon_set < 0 ||
+    icon_set > 1 ||
     enabled < 0 ||
-    enabled > 1
+    enabled > 1 ||
+    (enabled && !icon_set)
   ) {
     return false;
   }
@@ -1206,6 +1380,9 @@ static bool read_medication_from_message(
     .schedule = (uint8_t)schedule,
     .day = (uint8_t)day,
     .symbol = (uint8_t)symbol,
+    .shape = (uint8_t)shape,
+    .color = (uint8_t)color,
+    .icon_set = (uint8_t)icon_set,
     .enabled = (uint8_t)enabled
   };
 
@@ -1851,6 +2028,295 @@ static void update_band_animation_target(void) {
   schedule_band_animation();
 }
 
+static void draw_icon_rounded_rect(
+    GContext *ctx,
+    GRect rect,
+    uint16_t radius,
+    GColor fill_color,
+    GColor outline_color
+) {
+  graphics_context_set_fill_color(
+    ctx,
+    outline_color
+  );
+  graphics_fill_rect(
+    ctx,
+    rect,
+    radius,
+    GCornersAll
+  );
+
+  if (
+    rect.size.w <= 4 ||
+    rect.size.h <= 4
+  ) {
+    return;
+  }
+
+  const GRect inner = GRect(
+    rect.origin.x + 2,
+    rect.origin.y + 2,
+    rect.size.w - 4,
+    rect.size.h - 4
+  );
+
+  graphics_context_set_fill_color(
+    ctx,
+    fill_color
+  );
+  graphics_fill_rect(
+    ctx,
+    inner,
+    radius > 2 ? radius - 2 : 0,
+    GCornersAll
+  );
+}
+
+static void draw_tablet_icon(
+    GContext *ctx,
+    GRect frame,
+    const MedicationSettings *medication,
+    GColor outline_color
+) {
+  const GColor fill_color = {
+    .argb = medication->color
+  };
+
+  const int16_t center_x =
+      frame.origin.x + frame.size.w / 2;
+  const int16_t center_y =
+      frame.origin.y + frame.size.h / 2;
+
+  switch (medication->shape) {
+    case 0:
+      graphics_context_set_fill_color(
+        ctx,
+        outline_color
+      );
+      graphics_fill_circle(
+        ctx,
+        GPoint(center_x, center_y),
+        10
+      );
+
+      graphics_context_set_fill_color(
+        ctx,
+        fill_color
+      );
+      graphics_fill_circle(
+        ctx,
+        GPoint(center_x, center_y),
+        8
+      );
+      break;
+
+    case 1:
+      draw_icon_rounded_rect(
+        ctx,
+        GRect(
+          center_x - 13,
+          center_y - 9,
+          26,
+          18
+        ),
+        9,
+        fill_color,
+        outline_color
+      );
+      break;
+
+    case 2:
+      draw_icon_rounded_rect(
+        ctx,
+        GRect(
+          center_x - 15,
+          center_y - 7,
+          30,
+          14
+        ),
+        7,
+        fill_color,
+        outline_color
+      );
+
+      graphics_context_set_stroke_color(
+        ctx,
+        outline_color
+      );
+      graphics_context_set_stroke_width(
+        ctx,
+        2
+      );
+      graphics_draw_line(
+        ctx,
+        GPoint(center_x, center_y - 5),
+        GPoint(center_x, center_y + 5)
+      );
+      break;
+
+    case 3: {
+      GPoint points[] = {
+        GPoint(0, -11),
+        GPoint(11, 0),
+        GPoint(0, 11),
+        GPoint(-11, 0)
+      };
+
+      const GPathInfo path_info = {
+        .num_points = ARRAY_LENGTH(points),
+        .points = points
+      };
+
+      GPath *path =
+          gpath_create(&path_info);
+
+      if (!path) {
+        return;
+      }
+
+      gpath_move_to(
+        path,
+        GPoint(center_x, center_y)
+      );
+
+      graphics_context_set_fill_color(
+        ctx,
+        fill_color
+      );
+      graphics_context_set_stroke_color(
+        ctx,
+        outline_color
+      );
+      graphics_context_set_stroke_width(
+        ctx,
+        2
+      );
+
+      gpath_draw_filled(ctx, path);
+      gpath_draw_outline(ctx, path);
+      gpath_destroy(path);
+      break;
+    }
+  }
+
+  graphics_context_set_stroke_width(ctx, 1);
+}
+
+static void draw_pen_icon(
+    GContext *ctx,
+    GRect frame,
+    const MedicationSettings *medication,
+    GColor outline_color
+) {
+  const GColor fill_color = {
+    .argb = medication->color
+  };
+
+  const GPoint barrel_start = GPoint(
+    frame.origin.x + 7,
+    frame.origin.y + frame.size.h - 7
+  );
+
+  const GPoint barrel_end = GPoint(
+    frame.origin.x + frame.size.w - 9,
+    frame.origin.y + 8
+  );
+
+  graphics_context_set_stroke_color(
+    ctx,
+    outline_color
+  );
+  graphics_context_set_stroke_width(
+    ctx,
+    8
+  );
+  graphics_draw_line(
+    ctx,
+    barrel_start,
+    barrel_end
+  );
+
+  graphics_context_set_stroke_color(
+    ctx,
+    fill_color
+  );
+  graphics_context_set_stroke_width(
+    ctx,
+    5
+  );
+  graphics_draw_line(
+    ctx,
+    barrel_start,
+    barrel_end
+  );
+
+  graphics_context_set_stroke_color(
+    ctx,
+    outline_color
+  );
+  graphics_context_set_stroke_width(
+    ctx,
+    2
+  );
+
+  graphics_draw_line(
+    ctx,
+    GPoint(
+      barrel_start.x - 4,
+      barrel_start.y - 4
+    ),
+    GPoint(
+      barrel_start.x + 3,
+      barrel_start.y + 3
+    )
+  );
+
+  graphics_draw_line(
+    ctx,
+    barrel_end,
+    GPoint(
+      frame.origin.x + frame.size.w - 2,
+      frame.origin.y + 1
+    )
+  );
+
+  graphics_context_set_stroke_width(ctx, 1);
+}
+
+static void draw_medication_icon(
+    GContext *ctx,
+    GRect frame,
+    const MedicationSettings *medication,
+    GColor outline_color
+) {
+  if (
+    !medication ||
+    !medication->icon_set
+  ) {
+    return;
+  }
+
+  if (
+    medication->symbol ==
+        MEDICATION_SYMBOL_PEN
+  ) {
+    draw_pen_icon(
+      ctx,
+      frame,
+      medication,
+      outline_color
+    );
+    return;
+  }
+
+  draw_tablet_icon(
+    ctx,
+    frame,
+    medication,
+    outline_color
+  );
+}
+
 static void draw_medications(
     GContext *ctx,
     GRect bounds,
@@ -1905,18 +2371,67 @@ static void draw_medications(
       continue;
     }
 
+    GRect text_frame = GRect(
+      bounds.origin.x + 8,
+      (int16_t)row_y + 3,
+      bounds.size.w - 16,
+      MEDICATION_ROW_HEIGHT - 3
+    );
+
+    GTextAlignment alignment =
+        GTextAlignmentCenter;
+
+    if (
+      s_row_kinds[index] ==
+          MEDICATION_ROW_ITEM
+    ) {
+      const int8_t medication_index =
+          s_row_medication_indices[index];
+
+      if (
+        medication_index >= 0 &&
+        medication_index <
+            (int8_t)s_medication_count
+      ) {
+        draw_medication_icon(
+          ctx,
+          GRect(
+            bounds.origin.x +
+                MEDICATION_ICON_LEFT,
+            (int16_t)row_y +
+                (
+                  MEDICATION_ROW_HEIGHT -
+                  MEDICATION_ICON_SIZE
+                ) /
+                2,
+            MEDICATION_ICON_SIZE,
+            MEDICATION_ICON_SIZE
+          ),
+          &s_medications[medication_index],
+          text_color
+        );
+
+        text_frame = GRect(
+          bounds.origin.x +
+              MEDICATION_ICON_TEXT_X,
+          (int16_t)row_y + 3,
+          bounds.size.w -
+              MEDICATION_ICON_TEXT_X -
+              MEDICATION_ICON_TEXT_RIGHT,
+          MEDICATION_ROW_HEIGHT - 3
+        );
+
+        alignment = GTextAlignmentLeft;
+      }
+    }
+
     graphics_draw_text(
       ctx,
       s_rows[index],
       s_medication_font,
-      GRect(
-        bounds.origin.x + 8,
-        (int16_t)row_y + 3,
-        bounds.size.w - 16,
-        MEDICATION_ROW_HEIGHT - 3
-      ),
+      text_frame,
       GTextOverflowModeTrailingEllipsis,
-      GTextAlignmentCenter,
+      alignment,
       NULL
     );
   }

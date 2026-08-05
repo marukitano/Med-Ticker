@@ -21,6 +21,9 @@ var DAYPART_MORNING_KEY = 11;
 var DAYPART_NOON_KEY = 12;
 var DAYPART_EVENING_KEY = 13;
 var DAYPART_NIGHT_KEY = 14;
+var MED_SHAPE_KEY = 15;
+var MED_COLOR_KEY = 16;
+var MED_ICON_SET_KEY = 17;
 
 var COMMAND_RESET = 0;
 var COMMAND_ITEM = 1;
@@ -42,6 +45,7 @@ var DEFAULT_MEDICATION = {
   symbol: 0,
   shape: 2,
   color: 255,
+  iconSet: true,
   enabled: true
 };
 
@@ -133,6 +137,7 @@ function cloneDefaultMedication() {
     symbol: DEFAULT_MEDICATION.symbol,
     shape: DEFAULT_MEDICATION.shape,
     color: DEFAULT_MEDICATION.color,
+    iconSet: true,
     enabled: DEFAULT_MEDICATION.enabled
   };
 }
@@ -144,10 +149,11 @@ function blankMedication() {
     time: 0,
     schedule: 0,
     day: 0,
-    symbol: 0,
-    shape: 2,
-    color: 255,
-    enabled: true
+    symbol: -1,
+    shape: -1,
+    color: -1,
+    iconSet: false,
+    enabled: false
   };
 }
 
@@ -217,17 +223,42 @@ function normalizeMedication(value) {
       : 1;
   }
 
-  var symbol = integerInRange(value.symbol, 0, 1)
+  var symbolValid = integerInRange(
+    value.symbol,
+    0,
+    1
+  );
+
+  var symbol = symbolValid
     ? value.symbol
-    : DEFAULT_MEDICATION.symbol;
+    : -1;
 
-  var shape = integerInRange(value.shape, 0, 3)
+  var shapeValid = integerInRange(
+    value.shape,
+    0,
+    3
+  );
+
+  var shape = shapeValid
     ? value.shape
-    : DEFAULT_MEDICATION.shape;
+    : -1;
 
-  var color = integerInRange(value.color, 192, 255)
+  var colorValid = integerInRange(
+    value.color,
+    192,
+    255
+  );
+
+  var color = colorValid
     ? value.color
-    : DEFAULT_MEDICATION.color;
+    : -1;
+
+  var iconSet =
+      symbolValid &&
+      (
+        symbol === 1 ||
+        (shapeValid && colorValid)
+      );
 
   return {
     name: name,
@@ -238,7 +269,8 @@ function normalizeMedication(value) {
     symbol: symbol,
     shape: shape,
     color: color,
-    enabled: value.enabled !== false
+    iconSet: iconSet,
+    enabled: value.enabled !== false && iconSet
   };
 }
 
@@ -355,10 +387,24 @@ function sendMedicationAt(
   message[MED_QUANTITY_KEY] = medication.quantity;
   message[MED_TIME_KEY] = medication.time;
   message[MED_SCHEDULE_KEY] = medication.schedule;
+  var iconSet = medication.iconSet === true;
+
   message[MED_DAY_KEY] = medication.day;
-  message[MED_SYMBOL_KEY] = medication.symbol;
+  message[MED_SYMBOL_KEY] = iconSet &&
+      integerInRange(medication.symbol, 0, 1)
+      ? medication.symbol
+      : 0;
+  message[MED_SHAPE_KEY] = iconSet &&
+      integerInRange(medication.shape, 0, 3)
+      ? medication.shape
+      : DEFAULT_MEDICATION.shape;
+  message[MED_COLOR_KEY] = iconSet &&
+      integerInRange(medication.color, 192, 255)
+      ? medication.color
+      : DEFAULT_MEDICATION.color;
+  message[MED_ICON_SET_KEY] = iconSet ? 1 : 0;
   message[MED_ENABLED_KEY] =
-      medication.enabled ? 1 : 0;
+      medication.enabled && iconSet ? 1 : 0;
 
   sendMessage(message, function() {
     sendMedicationAt(
@@ -497,6 +543,8 @@ function configurationPage(
     '.color-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:6px;margin-top:8px}',
     '.color-swatch{aspect-ratio:1;border:2px solid rgba(0,0,0,.28);border-radius:5px;padding:0;min-width:0}',
     '.color-swatch.selected{outline:3px solid #111;outline-offset:1px}',
+    '.icon-warning{color:#b00020;font-weight:bold}',
+    '.check.disabled{opacity:.55}',
     'body.dark{background:#111;color:#f4f4f4;color-scheme:dark}',
     'body.dark section,body.dark .card{background:#202020}',
     'body.dark .toggle{color:#f4f4f4}',
@@ -508,6 +556,7 @@ function configurationPage(
     'body.dark .icon-fields{border-color:#505050}',
     'body.dark .pill-preview{background:#303030}',
     'body.dark .color-swatch.selected{outline-color:#fff}',
+    'body.dark .icon-warning{color:#ff8a9a}',
     '</style>',
     '</head>',
     '<body' + bodyClass + '>',
@@ -571,7 +620,7 @@ function configurationPage(
     'return "<option value=\\""+value+"\\""+(value===current?" selected":"")+">"+label+"</option>";',
     '}',
     'function blankMedication(){',
-    'return {name:"",quantity:1,time:0,schedule:0,day:0,symbol:0,shape:2,color:255,enabled:true};',
+    'return {name:"",quantity:1,time:0,schedule:0,day:0,symbol:-1,shape:-1,color:-1,iconSet:false,enabled:false};',
     '}',
     'function numberValue(card,name){',
     'return parseInt(card.querySelector("[data-field=\\""+name+"\\"]").value,10);',
@@ -583,16 +632,22 @@ function configurationPage(
     'var card=cards[i];',
     'var schedule=numberValue(card,"schedule");',
     'var day=schedule===1?numberValue(card,"weekday"):(schedule===2?numberValue(card,"monthday"):0);',
+    'var symbol=numberValue(card,"symbol");',
+    'var shape=numberValue(card,"shape");',
+    'var color=numberValue(card,"color");',
+    'var iconSet=symbol===1||(symbol===0&&shape>=0&&shape<=3&&color>=192&&color<=255);',
+    'var enabled=card.querySelector("[data-field=\"enabled\"]").checked&&iconSet;',
     'result.push({',
-    'name:card.querySelector("[data-field=\\"name\\"]").value.trim(),',
+    'name:card.querySelector("[data-field=\"name\"]").value.trim(),',
     'quantity:numberValue(card,"quantity"),',
     'time:numberValue(card,"time"),',
     'schedule:schedule,',
     'day:day,',
-    'symbol:numberValue(card,"symbol"),',
-    'shape:numberValue(card,"shape"),',
-    'color:numberValue(card,"color"),',
-    'enabled:card.querySelector("[data-field=\\"enabled\\"]").checked',
+    'symbol:symbol,',
+    'shape:shape,',
+    'color:color,',
+    'iconSet:iconSet,',
+    'enabled:enabled',
     '});',
     '}',
     'return result;',
@@ -619,19 +674,27 @@ function configurationPage(
     '}',
     'function updateIconFields(card){',
     'var fields=card.querySelector(".icon-fields");',
-    'var isTablet=numberValue(card,"symbol")===0;',
-    'fields.className=isTablet?"icon-fields":"icon-fields hidden";',
-    'if(!isTablet){return;}',
+    'var symbol=numberValue(card,"symbol");',
+    'var isTablet=symbol===0;',
     'var shape=numberValue(card,"shape");',
     'var color=numberValue(card,"color");',
+    'var iconSet=symbol===1||(isTablet&&shape>=0&&shape<=3&&color>=192&&color<=255);',
+    'fields.className=isTablet?"icon-fields":"icon-fields hidden";',
+    'if(isTablet){',
     'var preview=card.querySelector(".pill-shape");',
-    'preview.className="pill-shape shape-"+shape;',
-    'preview.style.backgroundColor=pebbleColorHex(color);',
+    'preview.className=shape>=0&&shape<=3?"pill-shape shape-"+shape:"pill-shape hidden";',
+    'preview.style.backgroundColor=color>=192&&color<=255?pebbleColorHex(color):"transparent";',
     'var swatches=card.querySelectorAll("[data-color]");',
     'for(var i=0;i<swatches.length;i++){',
     'var selected=parseInt(swatches[i].getAttribute("data-color"),10)===color;',
     'swatches[i].className=selected?"color-swatch selected":"color-swatch";',
     '}',
+    '}',
+    'var active=card.querySelector("[data-field=\"enabled\"]");',
+    'if(!iconSet){active.checked=false;}',
+    'active.disabled=!iconSet;',
+    'active.parentNode.className=iconSet?"check":"check disabled";',
+    'card.querySelector(".icon-warning").className=iconSet?"note icon-warning hidden":"note icon-warning";',
     '}',
     'function setCardOpen(card,open){',
     'var body=card.querySelector(".body");',
@@ -653,6 +716,8 @@ function configurationPage(
     'for(var i=0;i<medications.length;i++){',
     'var med=medications[i];',
     'var title=med.name||"Neues Medikament";',
+    'var iconReady=med.iconSet===true;',
+    'var previewClass=med.shape>=0&&med.shape<=3?"pill-shape shape-"+med.shape:"pill-shape hidden";',
     'var sub=timeNames[med.time]+(med.quantity>1?" · x"+med.quantity:"")+(med.enabled?"":" · aus");',
     'html+="<section class=\\"card\\" data-index=\\""+i+"\\">";',
     'html+="<button class=\\"toggle collapsed\\" type=\\"button\\" data-toggle=\\""+i+"\\">";',
@@ -671,17 +736,18 @@ function configurationPage(
     'html+="</select></label>";',
     'html+="<label class=\\"monthday\\">Tag im Monat<input data-field=\\"monthday\\" type=\\"number\\" min=\\"1\\" max=\\"31\\" required value=\\""+(med.schedule===2?med.day:1)+"\\"></label>";',
     'html+="<label>Art<select data-field=\\"symbol\\">";',
-    'html+=option(0,"Tablette",med.symbol)+option(1,"Pen / Spritze",med.symbol);',
+    'html+=option(-1,"Bitte auswählen",med.symbol)+option(0,"Tablette",med.symbol)+option(1,"Pen / Spritze",med.symbol);',
     'html+="</select></label>";',
     'html+="<div class=\\"icon-fields\\">";',
-    'html+="<div class=\\"icon-preview-row\\"><span class=\\"pill-preview\\"><span class=\\"pill-shape shape-"+med.shape+"\\"></span></span><span class=\\"icon-preview-text\\">Tabletten-Icon</span></div>";',
+    'html+="<div class=\"icon-preview-row\"><span class=\"pill-preview\"><span class=\""+previewClass+"\"></span></span><span class=\"icon-preview-text\">Tabletten-Icon *</span></div>";',
     'html+="<label>Form<select data-field=\\"shape\\">";',
-    'html+=option(0,"Rund",med.shape)+option(1,"Ellipse",med.shape)+option(2,"Pille / Kapsel",med.shape)+option(3,"Rhombus",med.shape);',
+    'html+=option(-1,"Bitte auswählen",med.shape)+option(0,"Rund",med.shape)+option(1,"Ellipse",med.shape)+option(2,"Pille / Kapsel",med.shape)+option(3,"Rhombus",med.shape);',
     'html+="</select></label>";',
     'html+="<input data-field=\\"color\\" type=\\"hidden\\" value=\\""+med.color+"\\">";',
-    'html+="<label>Farbe</label><div class=\\"color-grid\\">"+paletteHtml(med.color)+"</div>";',
+    'html+="<label>Farbe *</label><div class=\"color-grid\">"+paletteHtml(med.color)+"</div>";',
     'html+="</div>";',
-    'html+="<label class=\\"check\\"><input data-field=\\"enabled\\" type=\\"checkbox\\""+(med.enabled?" checked":"")+"><span>Aktiv</span></label>";',
+    'html+="<label class=\""+(iconReady?"check":"check disabled")+"\"><input data-field=\"enabled\" type=\"checkbox\""+(med.enabled?" checked":"")+(iconReady?"":" disabled")+"><span>Aktiv</span></label>";',
+    'html+="<div class=\""+(iconReady?"note icon-warning hidden":"note icon-warning")+"\">Bitte zuerst ein vollständiges Icon auswählen. Erst danach kann das Medikament aktiviert werden.</div>";',
     'html+="<button class=\\"remove\\" type=\\"button\\" data-remove=\\""+i+"\\">Medikament löschen</button>";',
     'html+="</div></section>";',
     '}',
@@ -742,6 +808,9 @@ function configurationPage(
     'return;',
     '}',
     'medications=readMedications();',
+    'for(var medicationIndex=0;medicationIndex<medications.length;medicationIndex++){',
+    'if(medications[medicationIndex].enabled&&!medications[medicationIndex].iconSet){alert("Ein aktives Medikament benötigt ein vollständiges Icon.");return;}',
+    '}',
     'var result={theme:document.getElementById("theme").value,dayparts:values,medications:medications};',
     'document.location="pebblejs://close#"+encodeURIComponent(JSON.stringify(result));',
     '};',

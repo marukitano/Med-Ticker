@@ -25,7 +25,10 @@
       "DAYPART_MORNING": 11,
       "DAYPART_NOON": 12,
       "DAYPART_EVENING": 13,
-      "DAYPART_NIGHT": 14
+      "DAYPART_NIGHT": 14,
+      "MED_SHAPE": 15,
+      "MED_COLOR": 16,
+      "MED_ICON_SET": 17
     },
     "projectType": "native",
     "resources": {
@@ -49,5 +52,5 @@
       "configurable"
     ]
   },
-  "version": "0.1.9"
+  "version": "0.1.10"
 }
