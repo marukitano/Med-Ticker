@@ -83,6 +83,7 @@
 #define MEDICATION_ROW_GAP 8
 #define MEDICATION_COUNT 3
 #define BAND_OVERSHOOT_COVER_PX 32
+#define BAND_ARROW_WIDTH 18
 
 typedef enum {
   CONFIRM_IDLE,
@@ -121,6 +122,7 @@ static const char *const s_medications[MEDICATION_COUNT] = {
 static Window *s_window;
 static Layer *s_canvas_layer;
 static Layer *s_band_layer;
+static Layer *s_band_arrow_layer;
 static Layer *s_confirmation_layer;
 
 typedef struct {
@@ -207,6 +209,12 @@ static void mark_canvas_dirty(void) {
 
   if (s_band_layer) {
     layer_mark_dirty(s_band_layer);
+  }
+
+  if (s_band_arrow_layer) {
+    layer_mark_dirty(
+      s_band_arrow_layer
+    );
   }
 
   if (s_confirmation_layer) {
@@ -492,6 +500,43 @@ static void set_band_layer_x_q8(
     s_band_layer,
     frame
   );
+
+  if (s_band_arrow_layer) {
+    GRect arrow_frame =
+        layer_get_frame(
+          s_band_arrow_layer
+        );
+
+    arrow_frame.origin.x =
+        frame.origin.x -
+        BAND_ARROW_WIDTH;
+
+    arrow_frame.origin.y =
+        frame.origin.y;
+
+    layer_set_frame(
+      s_band_arrow_layer,
+      arrow_frame
+    );
+  }
+}
+
+static void set_band_and_arrow_hidden(
+    bool hidden
+) {
+  if (s_band_layer) {
+    layer_set_hidden(
+      s_band_layer,
+      hidden
+    );
+  }
+
+  if (s_band_arrow_layer) {
+    layer_set_hidden(
+      s_band_arrow_layer,
+      hidden
+    );
+  }
 }
 
 static void schedule_band_animation(void);
@@ -572,8 +617,7 @@ static void band_animation_tick(
     );
 
     if (!s_band.target_visible) {
-      layer_set_hidden(
-        s_band_layer,
+      set_band_and_arrow_hidden(
         true
       );
     }
@@ -636,8 +680,7 @@ static void finish_band_exit(void) {
     s_band.x_q8
   );
 
-  layer_set_hidden(
-    s_band_layer,
+  set_band_and_arrow_hidden(
     true
   );
 }
@@ -717,8 +760,7 @@ static void update_band_animation_target(void) {
   s_band.target_x_q8 = 0;
   s_band.animating = true;
 
-  layer_set_hidden(
-    s_band_layer,
+  set_band_and_arrow_hidden(
     false
   );
 
@@ -797,7 +839,7 @@ static void draw_medications(
       FONT_KEY_GOTHIC_18_BOLD
     ),
     GRect(
-      10,
+      bounds.origin.x + 10,
       (int16_t)label_y,
       bounds.size.w - 20,
       MEDICATION_HEADER_HEIGHT
@@ -830,7 +872,7 @@ static void draw_medications(
     draw_medication_text(
       ctx,
       GRect(
-        0,
+        bounds.origin.x,
         (int16_t)row_y,
         bounds.size.w,
         MEDICATION_ROW_HEIGHT
@@ -1024,6 +1066,59 @@ static void canvas_update_proc(
   );
 }
 
+static void band_arrow_update_proc(
+    Layer *layer,
+    GContext *ctx
+) {
+  const GRect bounds =
+      layer_get_bounds(layer);
+
+  const int16_t center_y =
+      bounds.size.h / 2;
+
+  graphics_context_set_stroke_color(
+    ctx,
+    GColorWhite
+  );
+
+  /*
+   * Das Dreieck wird aus horizontalen weißen
+   * Linien aufgebaut. So bleibt es mit dem
+   * vorhandenen Pebble-SDK kompatibel.
+   */
+  for (
+    int16_t y = 0;
+    y < bounds.size.h;
+    y++
+  ) {
+    const int16_t distance =
+        y <= center_y
+            ? center_y - y
+            : y - center_y;
+
+    const int16_t start_x =
+        (
+          (
+            int32_t
+          )distance *
+          (bounds.size.w - 1)
+        ) /
+        center_y;
+
+    graphics_draw_line(
+      ctx,
+      GPoint(
+        start_x,
+        y
+      ),
+      GPoint(
+        bounds.size.w - 1,
+        y
+      )
+    );
+  }
+}
+
 static void band_update_proc(
     Layer *layer,
     GContext *ctx
@@ -1046,9 +1141,15 @@ static void band_update_proc(
         s_canvas_layer
       );
 
+  /*
+   * Der weiße Balken bewegt sich, der Inhalt nicht.
+   * Die negative Layer-X-Position hält die schwarze
+   * Textkopie exakt über der weißen Originalschrift.
+   * Sichtbar wird nur der vom Balken überdeckte Teil.
+   */
   const GRect content_bounds =
       GRect(
-        0,
+        -frame.origin.x,
         0,
         canvas_bounds.size.w,
         layer_bounds.size.h
@@ -1082,17 +1183,6 @@ static void band_update_proc(
     GColorBlack
   );
 
-  draw_pill_if_visible(
-    ctx,
-    content_bounds,
-    local_pill_y
-  );
-
-  draw_scroll_hint(
-    ctx,
-    content_bounds,
-    local_pill_y
-  );
 }
 
 static void confirmation_update_proc(
@@ -2365,8 +2455,7 @@ static void reset_ui_state(GRect bounds) {
       s_band.x_q8
     );
 
-    layer_set_hidden(
-      s_band_layer,
+    set_band_and_arrow_hidden(
       true
     );
   }
@@ -2420,8 +2509,7 @@ static void window_load(Window *window) {
     true
   );
 
-  layer_set_hidden(
-    s_band_layer,
+  set_band_and_arrow_hidden(
     true
   );
 
@@ -2433,6 +2521,38 @@ static void window_load(Window *window) {
   layer_add_child(
     root,
     s_band_layer
+  );
+
+  s_band_arrow_layer =
+      layer_create(
+        GRect(
+          bounds.size.w -
+              BAND_ARROW_WIDTH,
+          (
+            bounds.size.h -
+            MEDICATION_ROW_HEIGHT
+          ) / 2,
+          BAND_ARROW_WIDTH,
+          MEDICATION_ROW_HEIGHT
+        )
+      );
+
+  if (!s_band_arrow_layer) {
+    layer_destroy(
+      s_band_layer
+    );
+    s_band_layer = NULL;
+    return;
+  }
+
+  layer_set_update_proc(
+    s_band_arrow_layer,
+    band_arrow_update_proc
+  );
+
+  layer_add_child(
+    root,
+    s_band_arrow_layer
   );
 
   s_confirmation_layer =
@@ -2496,6 +2616,13 @@ static void window_unload(Window *window) {
     );
 
     s_confirmation_layer = NULL;
+  }
+
+  if (s_band_arrow_layer) {
+    layer_destroy(
+      s_band_arrow_layer
+    );
+    s_band_arrow_layer = NULL;
   }
 
   if (s_band_layer) {
