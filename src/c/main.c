@@ -99,6 +99,11 @@
 #define MAX_MEDICATIONS 8
 #define MAX_LIST_ROWS (MAX_MEDICATIONS + 1)
 
+#define DAYPART_MORNING_START_HOUR 5
+#define DAYPART_NOON_START_HOUR 11
+#define DAYPART_EVENING_START_HOUR 16
+#define DAYPART_NIGHT_START_HOUR 21
+
 typedef enum {
   MEDICATION_TIME_MORNING,
   MEDICATION_TIME_NOON,
@@ -182,6 +187,8 @@ static char s_row_labels[
 ][MEDICATION_LABEL_LENGTH];
 static const char *s_rows[MAX_LIST_ROWS];
 static uint8_t s_list_row_count = 1;
+static MedicationTime s_visible_medication_time;
+static bool s_visible_medication_time_set;
 
 #define LIST_ROW_COUNT ((int)s_list_row_count)
 
@@ -400,7 +407,52 @@ static void format_medication_label(
   );
 }
 
+static MedicationTime medication_time_for_hour(
+    int hour
+) {
+  if (
+    hour >= DAYPART_MORNING_START_HOUR &&
+    hour < DAYPART_NOON_START_HOUR
+  ) {
+    return MEDICATION_TIME_MORNING;
+  }
+
+  if (
+    hour >= DAYPART_NOON_START_HOUR &&
+    hour < DAYPART_EVENING_START_HOUR
+  ) {
+    return MEDICATION_TIME_NOON;
+  }
+
+  if (
+    hour >= DAYPART_EVENING_START_HOUR &&
+    hour < DAYPART_NIGHT_START_HOUR
+  ) {
+    return MEDICATION_TIME_EVENING;
+  }
+
+  return MEDICATION_TIME_NIGHT;
+}
+
+static MedicationTime current_medication_time(void) {
+  const time_t now = time(NULL);
+  struct tm *local_time = localtime(&now);
+
+  if (!local_time) {
+    return MEDICATION_TIME_MORNING;
+  }
+
+  return medication_time_for_hour(
+    local_time->tm_hour
+  );
+}
+
 static void rebuild_medication_rows(void) {
+  const MedicationTime visible_time =
+      current_medication_time();
+
+  s_visible_medication_time = visible_time;
+  s_visible_medication_time_set = true;
   s_list_row_count = 0;
 
   for (
@@ -408,7 +460,11 @@ static void rebuild_medication_rows(void) {
     index < s_medication_count;
     index++
   ) {
-    if (!s_medications[index].enabled) {
+    if (
+      !s_medications[index].enabled ||
+      s_medications[index].time !=
+          (uint8_t)visible_time
+    ) {
       continue;
     }
 
@@ -434,6 +490,38 @@ static void rebuild_medication_rows(void) {
       s_row_labels[s_list_row_count];
 
   s_list_row_count++;
+}
+
+static void refresh_medication_rows_for_time(void) {
+  const MedicationTime visible_time =
+      current_medication_time();
+
+  if (
+    s_visible_medication_time_set &&
+    visible_time == s_visible_medication_time
+  ) {
+    return;
+  }
+
+  rebuild_medication_rows();
+
+  if (s_canvas_layer) {
+    reset_ui_state(
+      layer_get_bounds(s_canvas_layer)
+    );
+  }
+
+  mark_scene_dirty();
+}
+
+static void daypart_tick_handler(
+    struct tm *tick_time,
+    TimeUnits units_changed
+) {
+  (void)tick_time;
+  (void)units_changed;
+
+  refresh_medication_rows_for_time();
 }
 
 static bool medication_list_valid(
@@ -3112,6 +3200,10 @@ static void window_load(Window *window) {
 }
 
 static void window_appear(Window *window) {
+  (void)window;
+
+  refresh_medication_rows_for_time();
+
   if (s_canvas_layer) {
     start_ui_timer();
   }
@@ -3168,6 +3260,11 @@ static void window_unload(Window *window) {
 static void init(void) {
   settings_init();
 
+  tick_timer_service_subscribe(
+    MINUTE_UNIT,
+    daypart_tick_handler
+  );
+
   s_window = window_create();
   window_set_background_color(
     s_window,
@@ -3193,6 +3290,7 @@ static void init(void) {
 }
 
 static void deinit(void) {
+  tick_timer_service_unsubscribe();
   settings_deinit();
   window_destroy(s_window);
 }
