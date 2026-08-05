@@ -45,6 +45,8 @@ var DEFAULT_MEDICATION = {
   symbol: 0,
   shape: 2,
   color: 255,
+  size: 100,
+  imprint: '20',
   iconSet: true,
   enabled: true
 };
@@ -137,6 +139,8 @@ function cloneDefaultMedication() {
     symbol: DEFAULT_MEDICATION.symbol,
     shape: DEFAULT_MEDICATION.shape,
     color: DEFAULT_MEDICATION.color,
+    size: DEFAULT_MEDICATION.size,
+    imprint: DEFAULT_MEDICATION.imprint,
     iconSet: true,
     enabled: DEFAULT_MEDICATION.enabled
   };
@@ -152,6 +156,8 @@ function blankMedication() {
     symbol: -1,
     shape: -1,
     color: -1,
+    size: 100,
+    imprint: '',
     iconSet: false,
     enabled: false
   };
@@ -253,6 +259,18 @@ function normalizeMedication(value) {
     ? value.color
     : -1;
 
+  var size = integerInRange(
+    value.size,
+    60,
+    140
+  )
+    ? value.size
+    : DEFAULT_MEDICATION.size;
+
+  var imprint = typeof value.imprint === 'string'
+    ? value.imprint.trim().slice(0, 4)
+    : '';
+
   var iconSet =
       symbolValid &&
       (
@@ -269,6 +287,8 @@ function normalizeMedication(value) {
     symbol: symbol,
     shape: shape,
     color: color,
+    size: size,
+    imprint: imprint,
     iconSet: iconSet,
     enabled: value.enabled !== false && iconSet
   };
@@ -532,10 +552,14 @@ function configurationPage(
     '.empty{text-align:center;color:#666;padding:18px 6px}',
     '.note{color:#666;font-size:13px;line-height:1.35;margin-top:12px}',
     '.icon-fields{margin-top:14px;padding:12px;border:1px solid #d2d2d2;border-radius:9px}',
-    '.icon-preview-row{display:flex;align-items:center;gap:13px;margin-bottom:3px}',
-    '.icon-preview-text{font-size:14px;font-weight:bold}',
-    '.pill-preview{width:54px;height:44px;display:flex;align-items:center;justify-content:center;background:#e8e8e8;border-radius:8px}',
-    '.pill-shape{display:block;border:2px solid rgba(0,0,0,.38);box-shadow:inset 0 1px 2px rgba(255,255,255,.55)}',
+    '.icon-preview-row{display:flex;align-items:center;justify-content:center;margin-bottom:6px}',
+    '.size-label{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:0}',
+    '.size-value{font-weight:normal;font-variant-numeric:tabular-nums}',
+    'input[type=range]{box-sizing:border-box;width:100%;margin-top:9px}',
+    '.pill-preview{width:92px;height:76px;display:flex;align-items:center;justify-content:center;background:#e8e8e8;border-radius:8px}',
+    '.pill-shape{display:flex;align-items:center;justify-content:center;border:2px solid rgba(0,0,0,.38);box-shadow:inset 0 1px 2px rgba(255,255,255,.55)}',
+    '.pill-imprint{display:block;max-width:88%;overflow:hidden;font-size:10px;font-weight:bold;line-height:1;white-space:nowrap;text-align:center}',
+    '.imprint-input{text-align:center;letter-spacing:.08em}',
     '.shape-0{width:28px;height:28px;border-radius:50%}',
     '.shape-1{width:39px;height:24px;border-radius:50%}',
     '.shape-2{width:42px;height:21px;border-radius:12px}',
@@ -620,7 +644,7 @@ function configurationPage(
     'return "<option value=\\""+value+"\\""+(value===current?" selected":"")+">"+label+"</option>";',
     '}',
     'function blankMedication(){',
-    'return {name:"",quantity:1,time:0,schedule:0,day:0,symbol:-1,shape:-1,color:-1,iconSet:false,enabled:false};',
+    'return {name:"",quantity:1,time:0,schedule:0,day:0,symbol:-1,shape:-1,color:-1,size:100,imprint:"",iconSet:false,enabled:false};',
     '}',
     'function numberValue(card,name){',
     'return parseInt(card.querySelector("[data-field=\\""+name+"\\"]").value,10);',
@@ -635,6 +659,8 @@ function configurationPage(
     'var symbol=numberValue(card,"symbol");',
     'var shape=numberValue(card,"shape");',
     'var color=numberValue(card,"color");',
+    'var size=numberValue(card,"size");',
+    'var imprint=card.querySelector("[data-field=\\"imprint\\"]").value.trim().slice(0,4);',
     'var iconSet=symbol===1||(symbol===0&&shape>=0&&shape<=3&&color>=192&&color<=255);',
     'var enabled=card.querySelector("[data-field=\\"enabled\\"]").checked&&iconSet;',
     'result.push({',
@@ -646,6 +672,8 @@ function configurationPage(
     'symbol:symbol,',
     'shape:shape,',
     'color:color,',
+    'size:size,',
+    'imprint:imprint,',
     'iconSet:iconSet,',
     'enabled:enabled',
     '});',
@@ -664,6 +692,12 @@ function configurationPage(
     'function hex(component){var result=component.toString(16);return result.length<2?"0"+result:result;}',
     'return "#"+hex(red)+hex(green)+hex(blue);',
     '}',
+    'function pebbleTextColor(value){',
+    'var red=((value>>4)&3)*85;',
+    'var green=((value>>2)&3)*85;',
+    'var blue=(value&3)*85;',
+    'return red*299+green*587+blue*114>145000?"#111":"#fff";',
+    '}',
     'function paletteHtml(current){',
     'var html="";',
     'for(var value=192;value<=255;value++){',
@@ -678,12 +712,20 @@ function configurationPage(
     'var isTablet=symbol===0;',
     'var shape=numberValue(card,"shape");',
     'var color=numberValue(card,"color");',
+    'var size=numberValue(card,"size");',
+    'var imprint=card.querySelector("[data-field=\\"imprint\\"]").value.trim().slice(0,4);',
+    'if(size<60||size>140){size=100;}',
     'var iconSet=symbol===1||(isTablet&&shape>=0&&shape<=3&&color>=192&&color<=255);',
     'fields.className=isTablet?"icon-fields":"icon-fields hidden";',
     'if(isTablet){',
     'var preview=card.querySelector(".pill-shape");',
     'preview.className=shape>=0&&shape<=3?"pill-shape shape-"+shape:"pill-shape hidden";',
     'preview.style.backgroundColor=color>=192&&color<=255?pebbleColorHex(color):"transparent";',
+    'preview.style.transform=(shape===3?"rotate(45deg) ":"")+"scale("+(size/100)+")";',
+    'var imprintNode=card.querySelector(".pill-imprint");',
+    'imprintNode.textContent=imprint;',
+    'imprintNode.style.color=color>=192&&color<=255?pebbleTextColor(color):"#111";',
+    'card.querySelector("[data-size-value]").textContent=size+" %";',
     'var swatches=card.querySelectorAll("[data-color]");',
     'for(var i=0;i<swatches.length;i++){',
     'var selected=parseInt(swatches[i].getAttribute("data-color"),10)===color;',
@@ -717,6 +759,7 @@ function configurationPage(
     'var med=medications[i];',
     'var title=med.name||"Neues Medikament";',
     'var iconReady=med.iconSet===true;',
+    'var imprint=typeof med.imprint==="string"?med.imprint.slice(0,4):"";',
     'var previewClass=med.shape>=0&&med.shape<=3?"pill-shape shape-"+med.shape:"pill-shape hidden";',
     'var sub=timeNames[med.time]+(med.quantity>1?" · x"+med.quantity:"")+(med.enabled?"":" · aus");',
     'html+="<section class=\\"card\\" data-index=\\""+i+"\\">";',
@@ -739,12 +782,15 @@ function configurationPage(
     'html+=option(-1,"Bitte auswählen",med.symbol)+option(0,"Tablette",med.symbol)+option(1,"Pen / Spritze",med.symbol);',
     'html+="</select></label>";',
     'html+="<div class=\\"icon-fields\\">";',
-    'html+="<div class=\\"icon-preview-row\\"><span class=\\"pill-preview\\"><span class=\\""+previewClass+"\\"></span></span><span class=\\"icon-preview-text\\">Tabletten-Icon *</span></div>";',
+    'html+="<div class=\\"icon-preview-row\\"><span class=\\"pill-preview\\"><span class=\\""+previewClass+"\\"><span class=\\"pill-imprint\\">"+escapeHtml(imprint)+"</span></span></span></div>";',
+    'html+="<label class=\\"size-label\\"><span>Grösse</span><span class=\\"size-value\\" data-size-value>"+med.size+" %</span></label>";',
+    'html+="<input data-field=\\"size\\" type=\\"range\\" min=\\"60\\" max=\\"140\\" step=\\"5\\" value=\\""+med.size+"\\">";',
     'html+="<label>Form<select data-field=\\"shape\\">";',
     'html+=option(-1,"Bitte auswählen",med.shape)+option(0,"Rund",med.shape)+option(1,"Ellipse",med.shape)+option(2,"Pille / Kapsel",med.shape)+option(3,"Rhombus",med.shape);',
     'html+="</select></label>";',
     'html+="<input data-field=\\"color\\" type=\\"hidden\\" value=\\""+med.color+"\\">";',
     'html+="<label>Farbe *</label><div class=\\"color-grid\\">"+paletteHtml(med.color)+"</div>";',
+    'html+="<label>Beschriftung<input class=\\"imprint-input\\" data-field=\\"imprint\\" type=\\"text\\" maxlength=\\"4\\" value=\\""+escapeHtml(imprint)+"\\" placeholder=\\"z. B. 20\\"></label>";',
     'html+="</div>";',
     'html+="<label class=\\""+(iconReady?"check":"check disabled")+"\\"><input data-field=\\"enabled\\" type=\\"checkbox\\""+(med.enabled?" checked":"")+(iconReady?"":" disabled")+"><span>Aktiv</span></label>";',
     'html+="<div class=\\""+(iconReady?"note icon-warning hidden":"note icon-warning")+"\\">Bitte zuerst ein vollständiges Icon auswählen. Erst danach kann das Medikament aktiviert werden.</div>";',
@@ -761,6 +807,8 @@ function configurationPage(
     'card.querySelector("[data-field=\\"schedule\\"]").onchange=(function(item){return function(){updateDayFields(item);};})(card);',
     'card.querySelector("[data-field=\\"symbol\\"]").onchange=(function(item){return function(){updateIconFields(item);};})(card);',
     'card.querySelector("[data-field=\\"shape\\"]").onchange=(function(item){return function(){updateIconFields(item);};})(card);',
+    'card.querySelector("[data-field=\\"size\\"]").oninput=(function(item){return function(){updateIconFields(item);};})(card);',
+    'card.querySelector("[data-field=\\"imprint\\"]").oninput=(function(item){return function(){updateIconFields(item);};})(card);',
     'var colorButtons=card.querySelectorAll("[data-color]");',
     'for(var colorIndex=0;colorIndex<colorButtons.length;colorIndex++){',
     'colorButtons[colorIndex].onclick=(function(item){return function(){item.querySelector("[data-field=\\"color\\"]").value=this.getAttribute("data-color");updateIconFields(item);};})(card);',
