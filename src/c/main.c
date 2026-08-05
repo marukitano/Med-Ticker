@@ -399,11 +399,23 @@ static bool medication_band_can_enter(void) {
 
 static bool scrolling_back_to_pill(void) {
 #if defined(PBL_TOUCH)
-  if (s_touch.dragging) {
-    return
-        s_touch.pair_selected &&
-        s_touch.start_index == 1 &&
-        s_touch.neighbor_index == 0;
+  /*
+   * Das Paar 1 <-> 0 bleibt nach dem Snap absichtlich
+   * aktiv, damit derselbe Finger zurückwischen kann.
+   * Das Paar allein bedeutet aber noch nicht, dass
+   * tatsächlich zur Pille gescrollt wird.
+   *
+   * Erst eine reale Fingerbewegung nach unten startet
+   * die Ausfahrt des weißen Bandes.
+   */
+  if (
+    s_touch.dragging &&
+    s_touch.pair_selected &&
+    s_touch.start_index == 1 &&
+    s_touch.neighbor_index == 0 &&
+    s_touch.total_delta_y > 0
+  ) {
+    return true;
   }
 #endif
 
@@ -1472,8 +1484,11 @@ static void start_scroll_snap(
 );
 
 #if defined(PBL_TOUCH)
-static bool pill_transition_reached_threshold(void);
+static bool touch_step_reached_threshold(void);
+static void keep_touch_active_after_step(void);
 #endif
+
+static bool step_snap_index(int direction);
 
 static void cancel_scroll_physics(void) {
   cancel_timer(&s_scroll_physics_timer);
@@ -1653,20 +1668,19 @@ static void scroll_physics_tick(void *context) {
       s_scroll.velocity_q8;
 
 #if defined(PBL_TOUCH)
-  if (pill_transition_reached_threshold()) {
-    const int target_index =
-        s_touch.neighbor_index;
+  if (touch_step_reached_threshold()) {
+    const int direction =
+        s_touch.pair_direction;
 
     /*
-     * Fingerphase endet an der 29-px-Grenze.
-     * Die gemeinsame Snap-Feder übernimmt sofort
-     * den restlichen Weg zum direkten Nachbarn.
+     * Exakt derselbe Schritt wie bei der entsprechenden
+     * Hoch-/Runtertaste. Keine eigene Touch-Animation.
      */
-    start_scroll_snap(
-      target_index,
-      false
+    step_snap_index(
+      direction
     );
 
+    keep_touch_active_after_step();
     mark_canvas_dirty();
     return;
   }
@@ -1997,22 +2011,6 @@ static void choose_touch_pair(void) {
   s_touch.pair_selected = true;
 }
 
-static bool touch_pair_is_pill_transition(void) {
-  if (!s_touch.pair_selected) {
-    return false;
-  }
-
-  return
-      (
-        s_touch.start_index == 0 &&
-        s_touch.neighbor_index == 1
-      ) ||
-      (
-        s_touch.start_index == 1 &&
-        s_touch.neighbor_index == 0
-      );
-}
-
 static void clamp_touch_target_to_pair(void) {
   if (!s_touch.pair_selected) {
     return;
@@ -2027,31 +2025,10 @@ static void clamp_touch_target_to_pair(void) {
     s_touch.neighbor_index !=
     s_touch.start_index
   ) {
-    int32_t neighbor_q8 =
+    const int32_t neighbor_q8 =
         scroll_anchor_q8(
           s_touch.neighbor_index
         );
-
-    /*
-     * Der echte Abstand zwischen Pille und erster
-     * Medikamentenzeile ist viel größer als alle
-     * weiteren Abstände.
-     *
-     * Für das Fingerziel behandeln wir diesen Übergang
-     * trotzdem wie einen normalen 58-px-Rastabstand.
-     * Dadurch sammelt sich beim langen Ziehen kein
-     * unsichtbarer Weg an und man kann in derselben
-     * Geste sofort wieder zurückziehen.
-     */
-    if (touch_pair_is_pill_transition()) {
-      neighbor_q8 =
-          start_q8 -
-          (
-            int32_t
-          )s_touch.pair_direction *
-          SCROLL_SNAP_REFERENCE_PX *
-          SCROLL_Q8;
-    }
 
     const int32_t upper_q8 =
         start_q8 > neighbor_q8
@@ -2089,11 +2066,13 @@ static void clamp_touch_target_to_pair(void) {
   }
 }
 
-static bool pill_transition_reached_threshold(void) {
+static bool touch_step_reached_threshold(void) {
   if (
     s_scroll.mode != SCROLL_TOUCH ||
     !s_touch.dragging ||
-    !touch_pair_is_pill_transition()
+    !s_touch.pair_selected ||
+    s_touch.neighbor_index ==
+        s_touch.start_index
   ) {
     return false;
   }
@@ -2111,11 +2090,6 @@ static bool pill_transition_reached_threshold(void) {
       SCROLL_EDGE_HALF_INTERVAL_PX *
       SCROLL_Q8;
 
-  /*
-   * Der Snap beginnt sofort beim Erreichen der
-   * sichtbaren 29-px-Grenze. Der Finger muss dafür
-   * nicht losgelassen werden.
-   */
   if (s_touch.pair_direction > 0) {
     return
         s_scroll.position_q8 <=
@@ -2127,13 +2101,49 @@ static bool pill_transition_reached_threshold(void) {
       threshold_q8;
 }
 
+static void keep_touch_active_after_step(void) {
+  /*
+   * Das beim Aufsetzen gewählte Rastpunktpaar bleibt
+   * während der gesamten Geste erhalten.
+   *
+   * Nach einem Schritt werden nur Start und Nachbar
+   * vertauscht. So kann derselbe Finger exakt zum
+   * vorherigen Punkt zurück, aber niemals zu einem
+   * dritten Rastpunkt weiterlaufen.
+   */
+  const int8_t previous_index =
+      s_touch.start_index;
+
+  const int8_t current_index =
+      clamp_snap_index(
+        s_scroll.snap_index
+      );
+
+  s_touch.dragging = true;
+  s_touch.edge_consumed = true;
+  s_touch.total_delta_y = 0;
+  s_touch.start_time_ms =
+      current_time_ms();
+
+  s_touch.start_index =
+      current_index;
+
+  s_touch.neighbor_index =
+      previous_index;
+
+  s_touch.pair_direction =
+      previous_index >
+          current_index
+          ? 1
+          : -1;
+
+  s_touch.pair_selected = true;
+}
+
 static void touch_update(
     const TouchEvent *event
 ) {
-  if (
-    !s_touch.dragging ||
-    s_touch.edge_consumed
-  ) {
+  if (!s_touch.dragging) {
     return;
   }
 
@@ -2142,11 +2152,67 @@ static void touch_update(
       s_touch.last_y;
 
   s_touch.last_y = event->y;
-  s_touch.total_delta_y += delta_y;
 
   if (delta_y == 0) {
     return;
   }
+
+  if (s_touch.edge_consumed) {
+    /*
+     * Während der vorhandene Tasten-Snap läuft, wird
+     * die Fingerposition nur nachgeführt. Die Bewegung
+     * darf den laufenden Bounce nicht beeinflussen.
+     */
+    if (s_scroll.mode != SCROLL_IDLE &&
+        s_scroll.mode != SCROLL_TOUCH) {
+      return;
+    }
+
+    /*
+     * Nach beendetem Snap übernimmt derselbe Finger
+     * wieder die normale Touch-Feder. Das festgelegte
+     * Paar wurde in keep_touch_active_after_step()
+     * lediglich umgedreht und bleibt damit gesperrt.
+     */
+    if (s_scroll.mode == SCROLL_IDLE) {
+      s_scroll.mode = SCROLL_TOUCH;
+      s_scroll.target_q8 =
+          s_scroll.position_q8;
+
+      s_scroll.breakaway_anchor_q8 =
+          scroll_anchor_q8(
+            s_touch.start_index
+          );
+
+      s_scroll.breakaway_locked =
+          abs_int32(
+            s_scroll.position_q8 -
+            s_scroll.breakaway_anchor_q8
+          ) <= SCROLL_Q8;
+
+      s_scroll.velocity_q8 = 0;
+    }
+
+    s_touch.total_delta_y +=
+        delta_y;
+
+    s_scroll.target_q8 +=
+        (int32_t)delta_y *
+        SCROLL_Q8;
+
+    /*
+     * Diese bestehende Begrenzung hält das Ziel exakt
+     * zwischen den beiden beim Aufsetzen gewählten
+     * Rastpunkten. Hinter dem Rand sammelt sich kein
+     * unsichtbarer Fingerweg an.
+     */
+    clamp_touch_target_to_pair();
+    schedule_scroll_physics();
+    return;
+  }
+
+  s_touch.total_delta_y +=
+      delta_y;
 
   choose_touch_pair();
 
@@ -2166,15 +2232,11 @@ static void touch_end(void) {
   s_touch.dragging = false;
   s_scroll.breakaway_locked = false;
 
-  if (
-    s_touch.edge_consumed &&
-    s_touch.neighbor_index ==
-        s_touch.start_index
-  ) {
-    start_scroll_snap(
-      s_touch.start_index,
-      false
-    );
+  /*
+   * Ein bereits durch 29 px ausgelöster normaler
+   * Tastenschritt läuft beim Abheben unverändert weiter.
+   */
+  if (s_touch.edge_consumed) {
     return;
   }
 
