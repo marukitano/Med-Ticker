@@ -1,5 +1,7 @@
 #include <pebble.h>
 
+#include "message_keys.auto.h"
+
 #define FRAME_COUNT 8
 #define UI_TICK_MS 110
 #define PILL_TICKS_PER_FRAME 2
@@ -84,6 +86,9 @@
 #define BAND_ARROW_WIDTH 18
 #define TAKEN_HINT_MIN_RADIUS 5
 
+#define THEME_PERSIST_KEY 200
+#define THEME_MESSAGE_BUFFER_SIZE 64
+
 typedef enum {
   CONFIRM_IDLE,
   CONFIRM_GROWING,
@@ -154,6 +159,7 @@ static int16_t s_frame_width;
 static int16_t s_frame_height;
 static uint8_t s_animation_tick;
 static int8_t s_taken_hint_phase;
+static bool s_light_theme;
 
 typedef enum {
   SCROLL_IDLE,
@@ -201,6 +207,24 @@ static ConfirmationState s_confirmation_state;
 static int16_t s_check_size;
 static CheckState s_check_state;
 
+static GColor theme_background_color(void) {
+  return s_light_theme
+      ? GColorWhite
+      : GColorBlack;
+}
+
+static GColor theme_foreground_color(void) {
+  return s_light_theme
+      ? GColorBlack
+      : GColorWhite;
+}
+
+static GColor theme_hint_color(void) {
+  return s_light_theme
+      ? GColorDarkGray
+      : GColorLightGray;
+}
+
 static void update_band_animation_target(void);
 
 static void mark_scene_dirty(void) {
@@ -217,6 +241,97 @@ static void mark_scene_dirty(void) {
   if (s_band_arrow_layer && !layer_get_hidden(s_band_arrow_layer)) {
     layer_mark_dirty(s_band_arrow_layer);
   }
+}
+
+static void apply_theme(
+    bool light_theme,
+    bool save
+) {
+  s_light_theme = light_theme;
+
+  if (save) {
+    persist_write_int(
+      THEME_PERSIST_KEY,
+      light_theme ? 1 : 0
+    );
+  }
+
+  if (s_window) {
+    window_set_background_color(
+      s_window,
+      theme_background_color()
+    );
+  }
+
+  mark_scene_dirty();
+
+  if (s_confirmation_layer) {
+    layer_mark_dirty(
+      s_confirmation_layer
+    );
+  }
+}
+
+static void theme_inbox_received(
+    DictionaryIterator *iterator,
+    void *context
+) {
+  (void)context;
+
+  Tuple *theme_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_THEME
+  );
+
+  if (
+    !theme_tuple ||
+    (
+      theme_tuple->type != TUPLE_INT &&
+      theme_tuple->type != TUPLE_UINT
+    )
+  ) {
+    return;
+  }
+
+  const int32_t value =
+      theme_tuple->value->int32;
+
+  if (value != 0 && value != 1) {
+    return;
+  }
+
+  apply_theme(
+    value == 1,
+    true
+  );
+}
+
+static void theme_init(void) {
+  s_light_theme =
+      persist_exists(THEME_PERSIST_KEY) &&
+      persist_read_int(THEME_PERSIST_KEY) == 1;
+
+  app_message_register_inbox_received(
+    theme_inbox_received
+  );
+
+  const AppMessageResult result =
+      app_message_open(
+        THEME_MESSAGE_BUFFER_SIZE,
+        THEME_MESSAGE_BUFFER_SIZE
+      );
+
+  if (result != APP_MSG_OK) {
+    APP_LOG(
+      APP_LOG_LEVEL_ERROR,
+      "AppMessage open failed: %d",
+      (int)result
+    );
+  }
+}
+
+static void theme_deinit(void) {
+  app_message_deregister_callbacks();
 }
 
 static void cancel_timer(AppTimer **timer) {
@@ -339,7 +454,7 @@ static void draw_scroll_hint(
   const int16_t x = bounds.size.w / 2;
   const int16_t y = (int16_t)hint_y;
 
-  graphics_context_set_stroke_color(ctx, GColorLightGray);
+  graphics_context_set_stroke_color(ctx, theme_hint_color());
 
   graphics_draw_line(
     ctx,
@@ -834,7 +949,10 @@ static void canvas_update_proc(
 ) {
   const GRect bounds = layer_get_bounds(layer);
 
-  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_context_set_fill_color(
+    ctx,
+    theme_background_color()
+  );
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
   if (!s_sheet) {
@@ -845,7 +963,12 @@ static void canvas_update_proc(
 
   draw_pill_if_visible(ctx, bounds, pill_y);
   draw_scroll_hint(ctx, bounds, pill_y);
-  draw_medications(ctx, bounds, pill_y, GColorWhite);
+  draw_medications(
+    ctx,
+    bounds,
+    pill_y,
+    theme_foreground_color()
+  );
 }
 
 static void band_arrow_update_proc(
@@ -860,7 +983,7 @@ static void band_arrow_update_proc(
 
   graphics_context_set_stroke_color(
     ctx,
-    GColorWhite
+    theme_foreground_color()
   );
 
   for (
@@ -950,7 +1073,7 @@ static void draw_taken_button_hint(
 
   graphics_context_set_fill_color(
     ctx,
-    GColorBlack
+    theme_background_color()
   );
 
   graphics_fill_circle(
@@ -983,14 +1106,17 @@ static void band_update_proc(
     layer_bounds.size.h
   );
 
-  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_context_set_fill_color(
+    ctx,
+    theme_foreground_color()
+  );
   graphics_fill_rect(ctx, layer_bounds, 0, GCornerNone);
 
   draw_medications(
     ctx,
     content_bounds,
     current_pill_y() - frame.origin.y,
-    GColorBlack
+    theme_background_color()
   );
 
   draw_taken_button_hint(
@@ -2388,8 +2514,13 @@ static void window_unload(Window *window) {
 }
 
 static void init(void) {
+  theme_init();
+
   s_window = window_create();
-  window_set_background_color(s_window, GColorBlack);
+  window_set_background_color(
+    s_window,
+    theme_background_color()
+  );
 
   window_set_click_config_provider(
     s_window,
@@ -2410,6 +2541,7 @@ static void init(void) {
 }
 
 static void deinit(void) {
+  theme_deinit();
   window_destroy(s_window);
 }
 

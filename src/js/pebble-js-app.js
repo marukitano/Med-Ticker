@@ -1,7 +1,26 @@
 var STORAGE_KEY = 'pill-reminder-theme';
+var THEME_KEY = 0;
 
 function currentTheme() {
   return localStorage.getItem(STORAGE_KEY) || 'dark';
+}
+
+function sendTheme(theme) {
+  var message = {};
+  message[THEME_KEY] = theme === 'light' ? 1 : 0;
+
+  Pebble.sendAppMessage(
+    message,
+    function() {
+      console.log('Theme sent: ' + theme);
+    },
+    function(error) {
+      console.log(
+        'Theme could not be sent: ' +
+        JSON.stringify(error)
+      );
+    }
+  );
 }
 
 function configurationPage(theme) {
@@ -47,6 +66,10 @@ function configurationPage(theme) {
   ].join('');
 }
 
+Pebble.addEventListener('ready', function() {
+  sendTheme(currentTheme());
+});
+
 Pebble.addEventListener('showConfiguration', function() {
   var page = configurationPage(currentTheme());
 
@@ -74,6 +97,8 @@ Pebble.addEventListener('webviewclosed', function(event) {
         STORAGE_KEY,
         settings.theme
       );
+
+      sendTheme(settings.theme);
     }
   } catch (error) {
     console.log(

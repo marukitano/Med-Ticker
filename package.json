@@ -10,7 +10,9 @@
   "pebble": {
     "displayName": "Pill Reminder",
     "enableMultiJS": false,
-    "messageKeys": {},
+    "messageKeys": {
+      "THEME": 0
+    },
     "projectType": "native",
     "resources": {
       "media": [
@@ -33,5 +35,5 @@
       "configurable"
     ]
   },
-  "version": "0.1.2"
+  "version": "0.1.3"
 }
