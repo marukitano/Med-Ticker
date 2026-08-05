@@ -1471,6 +1471,10 @@ static void start_scroll_snap(
     bool keep_velocity
 );
 
+#if defined(PBL_TOUCH)
+static bool pill_transition_reached_threshold(void);
+#endif
+
 static void cancel_scroll_physics(void) {
   cancel_timer(&s_scroll_physics_timer);
 
@@ -1647,6 +1651,26 @@ static void scroll_physics_tick(void *context) {
 
   s_scroll.position_q8 +=
       s_scroll.velocity_q8;
+
+#if defined(PBL_TOUCH)
+  if (pill_transition_reached_threshold()) {
+    const int target_index =
+        s_touch.neighbor_index;
+
+    /*
+     * Fingerphase endet an der 29-px-Grenze.
+     * Die gemeinsame Snap-Feder übernimmt sofort
+     * den restlichen Weg zum direkten Nachbarn.
+     */
+    start_scroll_snap(
+      target_index,
+      false
+    );
+
+    mark_canvas_dirty();
+    return;
+  }
+#endif
 
   apply_scroll_edge_limits();
 
@@ -1973,6 +1997,22 @@ static void choose_touch_pair(void) {
   s_touch.pair_selected = true;
 }
 
+static bool touch_pair_is_pill_transition(void) {
+  if (!s_touch.pair_selected) {
+    return false;
+  }
+
+  return
+      (
+        s_touch.start_index == 0 &&
+        s_touch.neighbor_index == 1
+      ) ||
+      (
+        s_touch.start_index == 1 &&
+        s_touch.neighbor_index == 0
+      );
+}
+
 static void clamp_touch_target_to_pair(void) {
   if (!s_touch.pair_selected) {
     return;
@@ -1987,10 +2027,31 @@ static void clamp_touch_target_to_pair(void) {
     s_touch.neighbor_index !=
     s_touch.start_index
   ) {
-    const int32_t neighbor_q8 =
+    int32_t neighbor_q8 =
         scroll_anchor_q8(
           s_touch.neighbor_index
         );
+
+    /*
+     * Der echte Abstand zwischen Pille und erster
+     * Medikamentenzeile ist viel größer als alle
+     * weiteren Abstände.
+     *
+     * Für das Fingerziel behandeln wir diesen Übergang
+     * trotzdem wie einen normalen 58-px-Rastabstand.
+     * Dadurch sammelt sich beim langen Ziehen kein
+     * unsichtbarer Weg an und man kann in derselben
+     * Geste sofort wieder zurückziehen.
+     */
+    if (touch_pair_is_pill_transition()) {
+      neighbor_q8 =
+          start_q8 -
+          (
+            int32_t
+          )s_touch.pair_direction *
+          SCROLL_SNAP_REFERENCE_PX *
+          SCROLL_Q8;
+    }
 
     const int32_t upper_q8 =
         start_q8 > neighbor_q8
@@ -2026,6 +2087,44 @@ static void clamp_touch_target_to_pair(void) {
   ) {
     s_scroll.target_q8 = start_q8;
   }
+}
+
+static bool pill_transition_reached_threshold(void) {
+  if (
+    s_scroll.mode != SCROLL_TOUCH ||
+    !s_touch.dragging ||
+    !touch_pair_is_pill_transition()
+  ) {
+    return false;
+  }
+
+  const int32_t start_q8 =
+      scroll_anchor_q8(
+        s_touch.start_index
+      );
+
+  const int32_t threshold_q8 =
+      start_q8 -
+      (
+        int32_t
+      )s_touch.pair_direction *
+      SCROLL_EDGE_HALF_INTERVAL_PX *
+      SCROLL_Q8;
+
+  /*
+   * Der Snap beginnt sofort beim Erreichen der
+   * sichtbaren 29-px-Grenze. Der Finger muss dafür
+   * nicht losgelassen werden.
+   */
+  if (s_touch.pair_direction > 0) {
+    return
+        s_scroll.position_q8 <=
+        threshold_q8;
+  }
+
+  return
+      s_scroll.position_q8 >=
+      threshold_q8;
 }
 
 static void touch_update(
