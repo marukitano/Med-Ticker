@@ -165,8 +165,8 @@
 /* Capsule rigid-body physics. Positions and linear velocities use Q8. */
 #define PILL_RB_FRAME_MS 40
 #define PILL_RB_ALARM_FRAME_MS 40
-#define PILL_RB_ACCEL_DIVISOR 4
-#define PILL_RB_MAX_LINEAR_Q8 (30 * PILL_PHYSICS_Q8)
+#define PILL_RB_ACCEL_DIVISOR 1
+#define PILL_RB_MAX_LINEAR_Q8 (52 * PILL_PHYSICS_Q8)
 #define PILL_RB_MAX_ANGULAR (TRIG_MAX_ANGLE / 12)
 #define PILL_RB_ANGULAR_DAMPING_NUM 253
 #define PILL_RB_ANGULAR_DAMPING_DEN 256
@@ -186,6 +186,10 @@
 #define PILL_RB_SLEEP_ANGULAR (TRIG_MAX_ANGLE / 240)
 #define PILL_RB_SLEEP_FRAMES 5
 #define PILL_RB_SENSOR_WAKE_MG 35
+#define PILL_RB_TILT_DEADZONE_MG 50
+#define PILL_RB_TILT_WAKE_HYSTERESIS_MG 10
+#define PILL_RB_REST_TRAVEL_Q8 (PILL_PHYSICS_Q8)
+#define PILL_RB_REST_ANGLE (TRIG_MAX_ANGLE / 180)
 
 #define PILL_PHYSICS_ROTATION_MIN_TRAVEL_Q8 (PILL_PHYSICS_Q8)
 #define PILL_PHYSICS_ROTATION_DIVISOR 4
@@ -4414,6 +4418,60 @@ static bool pill_rb_solve_wall(
   return true;
 }
 
+static int16_t pill_rb_tilt_magnitude(
+    int16_t x,
+    int16_t y
+) {
+  const int64_t x_squared =
+      (int64_t)x * x;
+  const int64_t y_squared =
+      (int64_t)y * y;
+
+  return (int16_t)pill_rb_integer_sqrt64(
+    (uint64_t)(x_squared + y_squared)
+  );
+}
+
+static void pill_rb_drive_from_tilt(
+    int16_t *drive_x,
+    int16_t *drive_y
+) {
+  if (!drive_x || !drive_y) {
+    return;
+  }
+
+  const int16_t magnitude =
+      pill_rb_tilt_magnitude(
+        s_pill_physics_gravity_x,
+        s_pill_physics_gravity_y
+      );
+
+  if (magnitude <= PILL_RB_TILT_DEADZONE_MG) {
+    *drive_x = 0;
+    *drive_y = 0;
+    return;
+  }
+
+  /*
+   * Radial deadzone: the first 50 mg only overcome static friction.
+   * Above that threshold the remaining tilt becomes acceleration, so there
+   * is no visible jump when the pills break loose.
+   */
+  const int16_t active_magnitude =
+      magnitude - PILL_RB_TILT_DEADZONE_MG;
+
+  *drive_x = (int16_t)(
+    ((int32_t)s_pill_physics_gravity_x *
+     active_magnitude) /
+    magnitude
+  );
+  *drive_y = (int16_t)(
+    ((int32_t)s_pill_physics_gravity_y *
+     active_magnitude) /
+    magnitude
+  );
+}
+
 static void pill_physics_tick(void *context);
 
 static void pill_physics_schedule_tick(uint32_t delay_ms) {
@@ -4479,6 +4537,13 @@ static void pill_physics_tick(void *context) {
       (arena_height - PILL_PHYSICS_EDGE_MARGIN - arena_y) *
       PILL_PHYSICS_Q8;
 
+  int16_t drive_x;
+  int16_t drive_y;
+  pill_rb_drive_from_tilt(
+    &drive_x,
+    &drive_y
+  );
+
   int32_t old_x_q8[PILL_PHYSICS_MAX_BODIES];
   int32_t old_y_q8[PILL_PHYSICS_MAX_BODIES];
   int32_t old_angle[PILL_PHYSICS_MAX_BODIES];
@@ -4495,10 +4560,10 @@ static void pill_physics_tick(void *context) {
     old_angle[index] = body->angle;
 
     body->vx_q8 +=
-        s_pill_physics_gravity_x /
+        drive_x /
         PILL_RB_ACCEL_DIVISOR;
     body->vy_q8 +=
-        s_pill_physics_gravity_y /
+        drive_y /
         PILL_RB_ACCEL_DIVISOR;
 
     body->vx_q8 = pill_rb_clamp_int32(
@@ -4592,7 +4657,8 @@ static void pill_physics_tick(void *context) {
   }
 
   bool visual_changed = false;
-  bool moving = false;
+  int32_t maximum_rest_travel_q8 = 0;
+  int32_t maximum_rest_angle = 0;
   const bool resting_contact_candidate =
       had_contact &&
       s_pill_physics_sensor_quiet_samples >= 3;
@@ -4604,11 +4670,36 @@ static void pill_physics_tick(void *context) {
   ) {
     PillPhysicsBody *body =
         &s_pill_physics_bodies[index];
+    const int32_t travel_x_q8 =
+        body->x_q8 - old_x_q8[index];
+    const int32_t travel_y_q8 =
+        body->y_q8 - old_y_q8[index];
+    const int32_t travel_q8 =
+        abs_int32(travel_x_q8) +
+        abs_int32(travel_y_q8);
+    int32_t angle_delta =
+        body->angle - old_angle[index];
+
+    if (angle_delta > TRIG_MAX_ANGLE / 2) {
+      angle_delta -= TRIG_MAX_ANGLE;
+    } else if (angle_delta < -TRIG_MAX_ANGLE / 2) {
+      angle_delta += TRIG_MAX_ANGLE;
+    }
+
+    const int32_t angle_travel =
+        abs_int32(angle_delta);
+
+    if (travel_q8 > maximum_rest_travel_q8) {
+      maximum_rest_travel_q8 = travel_q8;
+    }
+    if (angle_travel > maximum_rest_angle) {
+      maximum_rest_angle = angle_travel;
+    }
 
     /*
-     * Remove solver noise inside a resting contact dead band. This is only
-     * active while the watch sensor is quiet and at least one contact exists;
-     * a real tilt change wakes the complete simulation again.
+     * Remove only tiny residual solver velocities here. Strong drive into a
+     * wall may still leave a larger attempted velocity, so final sleeping is
+     * based below on the real post-solver movement instead of that velocity.
      */
     if (resting_contact_candidate) {
       if (
@@ -4641,28 +4732,20 @@ static void pill_physics_tick(void *context) {
     ) {
       visual_changed = true;
     }
-
-    if (
-      abs_int32(body->vx_q8) >
-          PILL_RB_SLEEP_LINEAR_Q8 ||
-      abs_int32(body->vy_q8) >
-          PILL_RB_SLEEP_LINEAR_Q8 ||
-      abs_int32(body->angular_velocity) >
-          PILL_RB_SLEEP_ANGULAR
-    ) {
-      moving = true;
-    }
   }
 
   if (visual_changed && s_canvas_layer) {
     layer_mark_dirty(s_canvas_layer);
   }
 
-  if (
-    had_contact &&
-    !moving &&
-    s_pill_physics_sensor_quiet_samples >= 3
-  ) {
+  const bool geometrically_resting =
+      resting_contact_candidate &&
+      maximum_rest_travel_q8 <=
+          PILL_RB_REST_TRAVEL_Q8 &&
+      maximum_rest_angle <=
+          PILL_RB_REST_ANGLE;
+
+  if (geometrically_resting) {
     if (s_pill_physics_quiet_frames < 255) {
       s_pill_physics_quiet_frames++;
     }
@@ -4706,6 +4789,11 @@ static void pill_physics_accel_handler(
 
   const int16_t target_x = sample.x;
   const int16_t target_y = (int16_t)-sample.y;
+  const int16_t old_magnitude =
+      pill_rb_tilt_magnitude(
+        s_pill_physics_gravity_x,
+        s_pill_physics_gravity_y
+      );
 
   s_pill_physics_gravity_x = (int16_t)(
     (s_pill_physics_gravity_x + target_x * 5) / 6
@@ -4714,7 +4802,35 @@ static void pill_physics_accel_handler(
     (s_pill_physics_gravity_y + target_y * 5) / 6
   );
 
+  const int16_t new_magnitude =
+      pill_rb_tilt_magnitude(
+        s_pill_physics_gravity_x,
+        s_pill_physics_gravity_y
+      );
+  /*
+   * Hysteresis prevents filtered sensor noise around 50 mg from repeatedly
+   * waking and sleeping a settled pile. Drive still starts at the 50 mg
+   * deadzone; only the wake event uses the wider 40/60 mg band.
+   */
+  const bool entered_drive_band =
+      old_magnitude <=
+          PILL_RB_TILT_DEADZONE_MG +
+          PILL_RB_TILT_WAKE_HYSTERESIS_MG &&
+      new_magnitude >
+          PILL_RB_TILT_DEADZONE_MG +
+          PILL_RB_TILT_WAKE_HYSTERESIS_MG;
+  const bool left_drive_band =
+      old_magnitude >=
+          PILL_RB_TILT_DEADZONE_MG -
+          PILL_RB_TILT_WAKE_HYSTERESIS_MG &&
+      new_magnitude <
+          PILL_RB_TILT_DEADZONE_MG -
+          PILL_RB_TILT_WAKE_HYSTERESIS_MG;
+  const bool deadzone_crossed =
+      entered_drive_band ||
+      left_drive_band;
   const bool meaningful_change =
+      deadzone_crossed ||
       abs_int32(
         (int32_t)s_pill_physics_gravity_x -
         s_pill_physics_last_target_x
