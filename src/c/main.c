@@ -4870,11 +4870,12 @@ static void medication_appearance_geometry(
   switch (appearance ? appearance->shape : 0) {
     case 1:
       /*
-       * Rounded oval: keep the current width, but make the overall
-       * body noticeably flatter. The phone percentage is still
+       * Same height and curvature, but about 50 % more total width.
+       * Width changes from 2 * (8 + 13) = 42 px to
+       * 2 * (19 + 13) = 64 px. The phone percentage is still
        * applied afterwards as before.
        */
-      local_line_half = 8;
+      local_line_half = 19;
       local_radius = 13;
       break;
     case 2:
@@ -5170,18 +5171,188 @@ static int16_t medication_appearance_brightness(GColor color) {
   return red * 30 + green * 59 + blue * 11;
 }
 
+#define PILL_IMPRINT_GLYPH_WIDTH 5
+#define PILL_IMPRINT_GLYPH_HEIGHT 7
+#define PILL_IMPRINT_GLYPH_GAP 1
+#define PILL_IMPRINT_MAX_SCALE 4
+
+static const uint8_t s_pill_imprint_digits[10][7] = {
+  { 14, 17, 19, 21, 25, 17, 14 },
+  { 4, 12, 4, 4, 4, 4, 14 },
+  { 14, 17, 1, 2, 4, 8, 31 },
+  { 30, 1, 1, 14, 1, 1, 30 },
+  { 2, 6, 10, 18, 31, 2, 2 },
+  { 31, 16, 16, 30, 1, 1, 30 },
+  { 14, 16, 16, 30, 17, 17, 14 },
+  { 31, 1, 2, 4, 8, 8, 8 },
+  { 14, 17, 17, 14, 17, 17, 14 },
+  { 14, 17, 17, 15, 1, 1, 14 }
+};
+
+static const uint8_t s_pill_imprint_letters[26][7] = {
+  { 14, 17, 17, 31, 17, 17, 17 },
+  { 30, 17, 17, 30, 17, 17, 30 },
+  { 14, 17, 16, 16, 16, 17, 14 },
+  { 30, 17, 17, 17, 17, 17, 30 },
+  { 31, 16, 16, 30, 16, 16, 31 },
+  { 31, 16, 16, 30, 16, 16, 16 },
+  { 14, 17, 16, 23, 17, 17, 15 },
+  { 17, 17, 17, 31, 17, 17, 17 },
+  { 14, 4, 4, 4, 4, 4, 14 },
+  { 7, 2, 2, 2, 2, 18, 12 },
+  { 17, 18, 20, 24, 20, 18, 17 },
+  { 16, 16, 16, 16, 16, 16, 31 },
+  { 17, 27, 21, 21, 17, 17, 17 },
+  { 17, 25, 21, 19, 17, 17, 17 },
+  { 14, 17, 17, 17, 17, 17, 14 },
+  { 30, 17, 17, 30, 16, 16, 16 },
+  { 14, 17, 17, 17, 21, 18, 13 },
+  { 30, 17, 17, 30, 20, 18, 17 },
+  { 15, 16, 16, 14, 1, 1, 30 },
+  { 31, 4, 4, 4, 4, 4, 4 },
+  { 17, 17, 17, 17, 17, 17, 14 },
+  { 17, 17, 17, 17, 17, 10, 4 },
+  { 17, 17, 17, 21, 21, 21, 10 },
+  { 17, 17, 10, 4, 10, 17, 17 },
+  { 17, 17, 10, 4, 4, 4, 4 },
+  { 31, 1, 2, 4, 8, 16, 31 }
+};
+
+static const uint8_t s_pill_imprint_unknown[7] = {
+  14, 17, 1, 2, 4, 0, 4
+};
+static const uint8_t s_pill_imprint_bar[7] = {
+  4, 4, 4, 4, 4, 4, 4
+};
+static const uint8_t s_pill_imprint_dash[7] = {
+  0, 0, 0, 31, 0, 0, 0
+};
+static const uint8_t s_pill_imprint_slash[7] = {
+  1, 2, 2, 4, 8, 8, 16
+};
+static const uint8_t s_pill_imprint_plus[7] = {
+  0, 4, 4, 31, 4, 4, 0
+};
+static const uint8_t s_pill_imprint_dot[7] = {
+  0, 0, 0, 0, 0, 6, 6
+};
+static const uint8_t s_pill_imprint_space[7] = {
+  0, 0, 0, 0, 0, 0, 0
+};
+
+static const uint8_t *pill_physics_imprint_glyph(
+    char character
+) {
+  if (character >= '0' && character <= '9') {
+    return s_pill_imprint_digits[character - '0'];
+  }
+
+  if (character >= 'a' && character <= 'z') {
+    character = (char)(character - 'a' + 'A');
+  }
+
+  if (character >= 'A' && character <= 'Z') {
+    return s_pill_imprint_letters[character - 'A'];
+  }
+
+  switch (character) {
+    case '|':
+      return s_pill_imprint_bar;
+    case '-':
+      return s_pill_imprint_dash;
+    case '/':
+      return s_pill_imprint_slash;
+    case '+':
+      return s_pill_imprint_plus;
+    case '.':
+      return s_pill_imprint_dot;
+    case ' ':
+      return s_pill_imprint_space;
+    default:
+      return s_pill_imprint_unknown;
+  }
+}
+
+static GPoint pill_physics_imprint_rotated_point(
+    GPoint center,
+    int32_t angle,
+    int16_t local_x,
+    int16_t local_y
+) {
+  const int32_t cosine = cos_lookup(angle);
+  const int32_t sine = sin_lookup(angle);
+
+  return GPoint(
+    center.x + (int16_t)(
+      ((int32_t)local_x * cosine -
+       (int32_t)local_y * sine) /
+      TRIG_MAX_RATIO
+    ),
+    center.y + (int16_t)(
+      ((int32_t)local_x * sine +
+       (int32_t)local_y * cosine) /
+      TRIG_MAX_RATIO
+    )
+  );
+}
+
 static void draw_physics_appearance_imprint(
     GContext *ctx,
     GPoint center,
+    int32_t angle,
     const MedicationAppearance *appearance,
-    int16_t body_width
+    int16_t body_width,
+    int16_t body_height
 ) {
   if (
     !appearance ||
-    appearance->imprint[0] == '\0'
+    appearance->imprint[0] == '\0' ||
+    body_width < 8 ||
+    body_height < 8
   ) {
     return;
   }
+
+  uint8_t character_count = 0;
+  while (
+    character_count < sizeof(appearance->imprint) &&
+    appearance->imprint[character_count] != '\0'
+  ) {
+    character_count++;
+  }
+
+  if (character_count == 0) {
+    return;
+  }
+
+  const int16_t unscaled_width = (int16_t)(
+    character_count * PILL_IMPRINT_GLYPH_WIDTH +
+    (character_count - 1) * PILL_IMPRINT_GLYPH_GAP
+  );
+
+  int16_t scale_from_width =
+      (body_width - 4) / unscaled_width;
+  int16_t scale_from_height =
+      (body_height - 4) / PILL_IMPRINT_GLYPH_HEIGHT;
+  int16_t scale =
+      scale_from_width < scale_from_height
+          ? scale_from_width
+          : scale_from_height;
+
+  if (scale < 1) {
+    scale = 1;
+  } else if (scale > PILL_IMPRINT_MAX_SCALE) {
+    scale = PILL_IMPRINT_MAX_SCALE;
+  }
+
+  const int16_t text_width =
+      unscaled_width * scale;
+  const int16_t text_height =
+      PILL_IMPRINT_GLYPH_HEIGHT * scale;
+  const int16_t text_left =
+      (int16_t)(-text_width / 2);
+  const int16_t text_top =
+      (int16_t)(-text_height / 2);
 
   const GColor first_color = {
     .argb = appearance->primary_color
@@ -5198,24 +5369,83 @@ static void draw_physics_appearance_imprint(
     );
   }
 
-  const int16_t width =
-      body_width < 24
-          ? 24
-          : (body_width > 72 ? 72 : body_width);
+  /*
+   * Imprints are deliberately grey rather than black/white:
+   * dark grey on bright tablets, light grey on dark tablets.
+   */
+  graphics_context_set_fill_color(
+    ctx,
+    brightness >= 165 ? GColorDarkGray : GColorLightGray
+  );
 
-  graphics_context_set_text_color(
-    ctx,
-    brightness >= 165 ? GColorBlack : GColorWhite
-  );
-  graphics_draw_text(
-    ctx,
-    appearance->imprint,
-    fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
-    GRect(center.x - width / 2, center.y - 9, width, 18),
-    GTextOverflowModeTrailingEllipsis,
-    GTextAlignmentCenter,
-    NULL
-  );
+  for (
+    uint8_t character_index = 0;
+    character_index < character_count;
+    character_index++
+  ) {
+    const uint8_t *glyph =
+        pill_physics_imprint_glyph(
+          appearance->imprint[character_index]
+        );
+    const int16_t character_x = (int16_t)(
+      text_left +
+      character_index *
+          (PILL_IMPRINT_GLYPH_WIDTH + PILL_IMPRINT_GLYPH_GAP) *
+          scale
+    );
+
+    for (
+      uint8_t row = 0;
+      row < PILL_IMPRINT_GLYPH_HEIGHT;
+      row++
+    ) {
+      for (
+        uint8_t column = 0;
+        column < PILL_IMPRINT_GLYPH_WIDTH;
+        column++
+      ) {
+        if (
+          !(glyph[row] &
+            (1 << (PILL_IMPRINT_GLYPH_WIDTH - 1 - column)))
+        ) {
+          continue;
+        }
+
+        const int16_t local_x = (int16_t)(
+          character_x + column * scale + scale / 2
+        );
+        const int16_t local_y = (int16_t)(
+          text_top + row * scale + scale / 2
+        );
+        const GPoint pixel_center =
+            pill_physics_imprint_rotated_point(
+              center,
+              angle,
+              local_x,
+              local_y
+            );
+        const int16_t pixel_half = scale / 2;
+
+        /*
+         * Filled pixel blocks are reliable even for short glyph strokes.
+         * Their positions rotate with the pill; unlike graphics_draw_text(),
+         * the complete imprint therefore follows body->angle.
+         */
+        graphics_fill_rect(
+          ctx,
+          GRect(
+            pixel_center.x - pixel_half,
+            pixel_center.y - pixel_half,
+            scale,
+            scale
+          ),
+          0,
+          GCornerNone
+        );
+      }
+    }
+  }
+
 }
 
 #define PHYSICS_ROUNDED_OVAL_QUADRANT_STEPS 8
@@ -5229,7 +5459,7 @@ static void draw_physics_appearance_imprint(
  * - 82 % at the left/right ends makes them much rounder.
  * - 76 % along the top/bottom keeps those arcs noticeably flatter.
  */
-#define PHYSICS_ROUNDED_OVAL_END_CONTROL_NUM 62
+#define PHYSICS_ROUNDED_OVAL_END_CONTROL_NUM 81
 #define PHYSICS_ROUNDED_OVAL_TOP_CONTROL_NUM 57
 #define PHYSICS_ROUNDED_OVAL_CONTROL_DEN 100
 
@@ -5565,12 +5795,18 @@ static void draw_physics_pill_body(
       diamond_half > 0
           ? diamond_half * 2
           : (line_half + radius) * 2;
+  const int16_t body_height =
+      diamond_half > 0
+          ? diamond_half * 2
+          : radius * 2;
 
   draw_physics_appearance_imprint(
     ctx,
     center,
+    body->angle,
     appearance,
-    body_width
+    body_width,
+    body_height
   );
 }
 
