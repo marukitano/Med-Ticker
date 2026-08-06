@@ -15,16 +15,14 @@
 #include "medication_ui.h"
 
 static GColor theme_foreground_color(void);
-static GColor theme_hint_color(void);
 static void destroy_pill_bitmaps(void);
-static void draw_scroll_hint(
-    GContext *ctx,
-    GRect bounds,
-    int32_t pill_y
-);
 static void canvas_update_proc(
     Layer *layer,
     GContext *ctx
+);
+static void cover_scrolled_alert_area(
+    GContext *ctx,
+    GRect bounds
 );
 static void band_arrow_update_proc(
     Layer *layer,
@@ -62,12 +60,6 @@ static GColor theme_foreground_color(void) {
   return s_light_theme
       ? GColorBlack
       : GColorWhite;
-}
-
-static GColor theme_hint_color(void) {
-  return s_light_theme
-      ? GColorDarkGray
-      : GColorLightGray;
 }
 
 void mark_scene_dirty(void) {
@@ -129,51 +121,7 @@ static void destroy_pill_bitmaps(void) {
   }
 }
 
-static void draw_scroll_hint(
-    GContext *ctx,
-    GRect bounds,
-    int32_t pill_y
-) {
-  const int32_t hint_y =
-      pill_y +
-      s_frame_height +
-      MEDICATION_GAP - 7 +
-      HINT_POSITION_ADJUST_Y +
-      s_hint_offsets[s_animation_tick % ARRAY_LENGTH(s_hint_offsets)];
-
-  if (hint_y < -HINT_HEIGHT - 2 ||
-      hint_y > bounds.size.h + HINT_HEIGHT + 2) {
-    return;
-  }
-
-  const int16_t x = bounds.size.w / 2;
-  const int16_t y = (int16_t)hint_y;
-
-  graphics_context_set_stroke_color(ctx, theme_hint_color());
-
-  graphics_draw_line(
-    ctx,
-    GPoint(x - HINT_HALF_WIDTH, y),
-    GPoint(x, y + HINT_HEIGHT)
-  );
-  graphics_draw_line(
-    ctx,
-    GPoint(x - HINT_HALF_WIDTH, y + 1),
-    GPoint(x, y + HINT_HEIGHT + 1)
-  );
-  graphics_draw_line(
-    ctx,
-    GPoint(x, y + HINT_HEIGHT),
-    GPoint(x + HINT_HALF_WIDTH, y)
-  );
-  graphics_draw_line(
-    ctx,
-    GPoint(x, y + HINT_HEIGHT + 1),
-    GPoint(x + HINT_HALF_WIDTH, y + 1)
-  );
-}
-
-int32_t current_pill_y(void) {
+int32_t pill_arena_origin_y(void) {
   if (!s_canvas_layer) {
     return 0;
   }
@@ -191,7 +139,47 @@ int32_t current_pill_y(void) {
         s_frame_height
       ) /
       2 +
+      CANVAS_START_OFFSET_Y;
+}
+
+int32_t current_pill_y(void) {
+  return
+      pill_arena_origin_y() +
       visual_canvas_offset_y();
+}
+
+static void cover_scrolled_alert_area(
+    GContext *ctx,
+    GRect bounds
+) {
+  const int32_t alert_bottom =
+      (int32_t)bounds.size.h +
+      visual_canvas_offset_y();
+
+  if (alert_bottom >= bounds.size.h) {
+    return;
+  }
+
+  const int16_t cover_y =
+      alert_bottom > 0
+          ? (int16_t)alert_bottom
+          : 0;
+
+  graphics_context_set_fill_color(
+    ctx,
+    theme_background_color()
+  );
+  graphics_fill_rect(
+    ctx,
+    GRect(
+      bounds.origin.x,
+      cover_y,
+      bounds.size.w,
+      bounds.size.h - cover_y
+    ),
+    0,
+    GCornerNone
+  );
 }
 
 static void canvas_update_proc(
@@ -213,7 +201,7 @@ static void canvas_update_proc(
   const int32_t pill_y = current_pill_y();
 
   draw_physics_pills(ctx, bounds, pill_y);
-  draw_scroll_hint(ctx, bounds, pill_y);
+  cover_scrolled_alert_area(ctx, bounds);
   draw_medications(
     ctx,
     bounds,

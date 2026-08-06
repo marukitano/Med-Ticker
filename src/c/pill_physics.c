@@ -824,7 +824,7 @@ static void pill_rb_initialize_body(
     const GRect bounds = layer_get_bounds(s_canvas_layer);
     arena_width = bounds.size.w;
     arena_height = bounds.size.h;
-    arena_y = (int16_t)current_pill_y();
+    arena_y = (int16_t)pill_arena_origin_y();
   }
 
   const uint8_t column = body_index % 3;
@@ -1688,7 +1688,7 @@ static void pill_physics_tick(void *context) {
     const GRect bounds = layer_get_bounds(s_canvas_layer);
     arena_width = bounds.size.w;
     arena_height = bounds.size.h;
-    arena_y = (int16_t)current_pill_y();
+    arena_y = (int16_t)pill_arena_origin_y();
   }
 
   const int32_t minimum_x_q8 =
