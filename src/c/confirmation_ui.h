@@ -1,0 +1,30 @@
+#pragma once
+
+#include "app_types.h"
+
+/* Medication confirmation and settings-transfer animation. */
+void back_button_handler(
+    ClickRecognizerRef recognizer,
+    void *context
+);
+void confirmation_update_proc(
+    Layer *layer,
+    GContext *ctx
+);
+void draw_taken_button_hint(
+    GContext *ctx,
+    GRect layer_bounds,
+    GRect frame,
+    GRect canvas_bounds
+);
+void schedule_transfer_close(void);
+void select_button_down(
+    ClickRecognizerRef recognizer,
+    void *context
+);
+void select_button_up(
+    ClickRecognizerRef recognizer,
+    void *context
+);
+void show_transfer_screen(void);
+void update_taken_button_hint_pulse(void);

@@ -27,16 +27,24 @@ interaction, so an accidental button press does not mark medication as taken.
 ## Repository layout
 
 ```text
-package.json                 Pebble manifest and AppMessage keys
-resources/                   Runtime images and alarm audio
-src/c/main.c                 Watch application
-src/js/pebble-js-app.js      Phone configuration and settings transfer
-wscript                      Pebble SDK build definition
+package.json                       Pebble manifest and AppMessage keys
+resources/                         Runtime images and alarm audio
+src/c/main.c                       Application lifecycle wiring
+src/c/watch_settings.c             AppMessage settings and persistence
+src/c/medication_model.c           Dayparts, groups and visible medication rows
+src/c/medication_alarm.c           Wakeups, reminder timing, audio and vibration
+src/c/pill_physics.c               Accelerometer movement and collisions
+src/c/pill_renderer.c              Medication and pill rendering
+src/c/scroll_controller.c          Button/touch scrolling and band animation
+src/c/confirmation_ui.c            Confirmation and transfer animations
+src/c/medication_ui.c              Window and screen orchestration
+src/c/app_state.c                  Internal compatibility state
+src/js/pebble-js-app.js            Phone configuration and settings transfer
+wscript                            Pebble SDK build definition
 ```
 
-The watch application is currently still a large single translation unit. The
-first cleanup pass deliberately removes dead code without splitting that file,
-so behaviour can be verified before architecture changes are introduced.
+Each watch-side `.c` file is compiled as its own translation unit. There are no
+implementation `.inc` files and no source-file inclusion tricks.
 
 ## Build
 
@@ -62,5 +70,20 @@ build/Pill-Reminder.pbw
 ## Development notes
 
 Settings are sent as a reset/item/commit transaction. Keep the numeric
-AppMessage keys in `package.json`, `src/c/main.c`, and
+AppMessage keys in `package.json`, `src/c/watch_settings.c`, and
 `src/js/pebble-js-app.js` synchronized when adding fields.
+
+
+## Watch-side architecture
+
+`main.c` only starts and stops the modules around `app_event_loop()`.
+
+The phone-side configuration remains unchanged in `src/js/pebble-js-app.js`.
+On the watch, settings and medication data enter through `watch_settings`, then
+flow to the medication model, alarm, physics and UI modules through declared C
+interfaces.
+
+`app_state.c` is an internal compatibility layer for state that was formerly
+file-local in the monolithic implementation. It is intentionally not included
+from any public module header. Future cleanup can move those fields behind the
+owning module APIs one group at a time without making `main.c` large again.

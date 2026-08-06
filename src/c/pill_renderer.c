@@ -1,0 +1,1673 @@
+#include <pebble.h>
+
+#include <stdio.h>
+#include <string.h>
+
+#include "app_state.h"
+#include "app_util.h"
+#include "medication_model.h"
+#include "watch_settings.h"
+#include "medication_alarm.h"
+#include "pill_physics.h"
+#include "pill_renderer.h"
+#include "scroll_controller.h"
+#include "confirmation_ui.h"
+#include "medication_ui.h"
+
+#define PILL_IMPRINT_GLYPH_WIDTH 5
+#define PILL_IMPRINT_GLYPH_HEIGHT 7
+#define PILL_IMPRINT_GLYPH_GAP 1
+#define PILL_IMPRINT_MAX_SCALE 4
+
+static const uint8_t s_pill_imprint_digits[10][7] = {
+  { 14, 17, 19, 21, 25, 17, 14 },
+  { 4, 12, 4, 4, 4, 4, 14 },
+  { 14, 17, 1, 2, 4, 8, 31 },
+  { 30, 1, 1, 14, 1, 1, 30 },
+  { 2, 6, 10, 18, 31, 2, 2 },
+  { 31, 16, 16, 30, 1, 1, 30 },
+  { 14, 16, 16, 30, 17, 17, 14 },
+  { 31, 1, 2, 4, 8, 8, 8 },
+  { 14, 17, 17, 14, 17, 17, 14 },
+  { 14, 17, 17, 15, 1, 1, 14 }
+};
+
+static const uint8_t s_pill_imprint_letters[26][7] = {
+  { 14, 17, 17, 31, 17, 17, 17 },
+  { 30, 17, 17, 30, 17, 17, 30 },
+  { 14, 17, 16, 16, 16, 17, 14 },
+  { 30, 17, 17, 17, 17, 17, 30 },
+  { 31, 16, 16, 30, 16, 16, 31 },
+  { 31, 16, 16, 30, 16, 16, 16 },
+  { 14, 17, 16, 23, 17, 17, 15 },
+  { 17, 17, 17, 31, 17, 17, 17 },
+  { 14, 4, 4, 4, 4, 4, 14 },
+  { 7, 2, 2, 2, 2, 18, 12 },
+  { 17, 18, 20, 24, 20, 18, 17 },
+  { 16, 16, 16, 16, 16, 16, 31 },
+  { 17, 27, 21, 21, 17, 17, 17 },
+  { 17, 25, 21, 19, 17, 17, 17 },
+  { 14, 17, 17, 17, 17, 17, 14 },
+  { 30, 17, 17, 30, 16, 16, 16 },
+  { 14, 17, 17, 17, 21, 18, 13 },
+  { 30, 17, 17, 30, 20, 18, 17 },
+  { 15, 16, 16, 14, 1, 1, 30 },
+  { 31, 4, 4, 4, 4, 4, 4 },
+  { 17, 17, 17, 17, 17, 17, 14 },
+  { 17, 17, 17, 17, 17, 10, 4 },
+  { 17, 17, 17, 21, 21, 21, 10 },
+  { 17, 17, 10, 4, 10, 17, 17 },
+  { 17, 17, 10, 4, 4, 4, 4 },
+  { 31, 1, 2, 4, 8, 16, 31 }
+};
+
+static const uint8_t s_pill_imprint_unknown[7] = {
+  14, 17, 1, 2, 4, 0, 4
+};
+static const uint8_t s_pill_imprint_bar[7] = {
+  4, 4, 4, 4, 4, 4, 4
+};
+static const uint8_t s_pill_imprint_dash[7] = {
+  0, 0, 0, 31, 0, 0, 0
+};
+static const uint8_t s_pill_imprint_slash[7] = {
+  1, 2, 2, 4, 8, 8, 16
+};
+static const uint8_t s_pill_imprint_plus[7] = {
+  0, 4, 4, 31, 4, 4, 0
+};
+static const uint8_t s_pill_imprint_dot[7] = {
+  0, 0, 0, 0, 0, 6, 6
+};
+static const uint8_t s_pill_imprint_space[7] = {
+  0, 0, 0, 0, 0, 0, 0
+};
+
+
+#define PHYSICS_ROUNDED_OVAL_QUADRANT_STEPS 8
+#define PHYSICS_ROUNDED_OVAL_PATH_POINTS \
+  (PHYSICS_ROUNDED_OVAL_QUADRANT_STEPS * 4)
+#define PHYSICS_ROUNDED_OVAL_OUTLINE_PX 2
+#define PHYSICS_ROUNDED_OVAL_Q12 4096
+
+/*
+ * Longer cubic control arms mean larger visual radii:
+ * - 82 % at the left/right ends makes them much rounder.
+ * - 76 % along the top/bottom keeps those arcs noticeably flatter.
+ */
+#define PHYSICS_ROUNDED_OVAL_END_CONTROL_NUM 81
+#define PHYSICS_ROUNDED_OVAL_TOP_CONTROL_NUM 57
+#define PHYSICS_ROUNDED_OVAL_CONTROL_DEN 100
+
+
+static void draw_icon_rounded_rect(
+    GContext *ctx,
+    GRect rect,
+    uint16_t radius,
+    GColor fill_color,
+    GColor outline_color
+);
+static void draw_tablet_icon(
+    GContext *ctx,
+    GRect frame,
+    const MedicationSettings *medication,
+    GColor outline_color
+);
+static void draw_pen_icon(
+    GContext *ctx,
+    GRect frame,
+    const MedicationSettings *medication,
+    GColor outline_color
+);
+static void draw_medication_icon(
+    GContext *ctx,
+    GRect frame,
+    const MedicationSettings *medication,
+    GColor outline_color
+);
+static void draw_physics_round_line(
+    GContext *ctx,
+    GPoint start,
+    GPoint end,
+    uint8_t radius,
+    GColor color
+);
+static void draw_physics_capsule(
+    GContext *ctx,
+    GPoint center,
+    int32_t angle,
+    int16_t half_length,
+    uint8_t radius,
+    GColor fill_color,
+    GColor outline_color,
+    bool draw_divider
+);
+static uint8_t medication_appearance_size(
+    const MedicationAppearance *appearance
+);
+static int16_t medication_appearance_scaled(
+    int16_t base,
+    uint8_t size
+);
+static void medication_appearance_geometry(
+    const MedicationAppearance *appearance,
+    int16_t *line_half,
+    int16_t *radius,
+    int16_t *diamond_half
+);
+static void draw_physics_capsule_pixel_run(
+    GContext *ctx,
+    int16_t y,
+    int16_t start_x,
+    int16_t end_x,
+    uint8_t color_index,
+    GColor outline_color,
+    GColor first_color,
+    GColor second_color
+);
+static void draw_physics_two_color_capsule(
+    GContext *ctx,
+    GPoint center,
+    int32_t angle,
+    int16_t half_length,
+    uint8_t radius,
+    GColor first_color,
+    GColor second_color,
+    GColor outline_color
+);
+static void draw_physics_appearance_diamond(
+    GContext *ctx,
+    GPoint center,
+    int32_t angle,
+    int16_t half_size,
+    GColor fill_color,
+    GColor outline_color
+);
+static int16_t medication_appearance_brightness(GColor color);
+static const uint8_t *pill_physics_imprint_glyph(
+    char character
+);
+static GPoint pill_physics_imprint_rotated_point(
+    GPoint center,
+    int32_t angle,
+    int16_t local_x,
+    int16_t local_y
+);
+static void draw_physics_appearance_imprint(
+    GContext *ctx,
+    GPoint center,
+    int32_t angle,
+    const MedicationAppearance *appearance,
+    int16_t body_width,
+    int16_t body_height
+);
+static int16_t pill_physics_cubic_component(
+    int16_t p0,
+    int16_t p1,
+    int16_t p2,
+    int16_t p3,
+    int32_t t_q12
+);
+static void pill_physics_rounded_oval_quadrant(
+    GPoint *points,
+    uint8_t point_offset,
+    int16_t p0_x,
+    int16_t p0_y,
+    int16_t p1_x,
+    int16_t p1_y,
+    int16_t p2_x,
+    int16_t p2_y,
+    int16_t p3_x,
+    int16_t p3_y
+);
+static void draw_physics_rounded_oval_fill(
+    GContext *ctx,
+    GPoint center,
+    int32_t angle,
+    int16_t half_width,
+    int16_t half_height,
+    GColor color
+);
+static void draw_physics_true_ellipse(
+    GContext *ctx,
+    GPoint center,
+    int32_t angle,
+    int16_t line_half,
+    int16_t radius,
+    GColor fill_color,
+    GColor outline_color
+);
+static void draw_physics_pill_body(
+    GContext *ctx,
+    const PillPhysicsBody *body,
+    int32_t arena_y,
+    GColor outline_color
+);
+
+static void draw_icon_rounded_rect(
+    GContext *ctx,
+    GRect rect,
+    uint16_t radius,
+    GColor fill_color,
+    GColor outline_color
+) {
+  graphics_context_set_fill_color(
+    ctx,
+    outline_color
+  );
+  graphics_fill_rect(
+    ctx,
+    rect,
+    radius,
+    GCornersAll
+  );
+
+  if (
+    rect.size.w <= 4 ||
+    rect.size.h <= 4
+  ) {
+    return;
+  }
+
+  const GRect inner = GRect(
+    rect.origin.x + 2,
+    rect.origin.y + 2,
+    rect.size.w - 4,
+    rect.size.h - 4
+  );
+
+  graphics_context_set_fill_color(
+    ctx,
+    fill_color
+  );
+  graphics_fill_rect(
+    ctx,
+    inner,
+    radius > 2 ? radius - 2 : 0,
+    GCornersAll
+  );
+}
+
+static void draw_tablet_icon(
+    GContext *ctx,
+    GRect frame,
+    const MedicationSettings *medication,
+    GColor outline_color
+) {
+  const GColor fill_color = {
+    .argb = medication->color
+  };
+
+  const int16_t center_x =
+      frame.origin.x + frame.size.w / 2;
+  const int16_t center_y =
+      frame.origin.y + frame.size.h / 2;
+
+  switch (medication->shape) {
+    case 0:
+      graphics_context_set_fill_color(
+        ctx,
+        outline_color
+      );
+      graphics_fill_circle(
+        ctx,
+        GPoint(center_x, center_y),
+        10
+      );
+
+      graphics_context_set_fill_color(
+        ctx,
+        fill_color
+      );
+      graphics_fill_circle(
+        ctx,
+        GPoint(center_x, center_y),
+        8
+      );
+      break;
+
+    case 1:
+      draw_icon_rounded_rect(
+        ctx,
+        GRect(
+          center_x - 13,
+          center_y - 9,
+          26,
+          18
+        ),
+        9,
+        fill_color,
+        outline_color
+      );
+      break;
+
+    case 2:
+      draw_icon_rounded_rect(
+        ctx,
+        GRect(
+          center_x - 15,
+          center_y - 7,
+          30,
+          14
+        ),
+        7,
+        fill_color,
+        outline_color
+      );
+
+      graphics_context_set_stroke_color(
+        ctx,
+        outline_color
+      );
+      graphics_context_set_stroke_width(
+        ctx,
+        2
+      );
+      graphics_draw_line(
+        ctx,
+        GPoint(center_x, center_y - 5),
+        GPoint(center_x, center_y + 5)
+      );
+      break;
+
+    case 3: {
+      GPoint points[] = {
+        GPoint(0, -11),
+        GPoint(11, 0),
+        GPoint(0, 11),
+        GPoint(-11, 0)
+      };
+
+      const GPathInfo path_info = {
+        .num_points = ARRAY_LENGTH(points),
+        .points = points
+      };
+
+      GPath *path =
+          gpath_create(&path_info);
+
+      if (!path) {
+        return;
+      }
+
+      gpath_move_to(
+        path,
+        GPoint(center_x, center_y)
+      );
+
+      graphics_context_set_fill_color(
+        ctx,
+        fill_color
+      );
+      graphics_context_set_stroke_color(
+        ctx,
+        outline_color
+      );
+      graphics_context_set_stroke_width(
+        ctx,
+        2
+      );
+
+      gpath_draw_filled(ctx, path);
+      gpath_draw_outline(ctx, path);
+      gpath_destroy(path);
+      break;
+    }
+  }
+
+  graphics_context_set_stroke_width(ctx, 1);
+}
+
+static void draw_pen_icon(
+    GContext *ctx,
+    GRect frame,
+    const MedicationSettings *medication,
+    GColor outline_color
+) {
+  const GColor fill_color = {
+    .argb = medication->color
+  };
+
+  const GPoint barrel_start = GPoint(
+    frame.origin.x + 7,
+    frame.origin.y + frame.size.h - 7
+  );
+
+  const GPoint barrel_end = GPoint(
+    frame.origin.x + frame.size.w - 9,
+    frame.origin.y + 8
+  );
+
+  graphics_context_set_stroke_color(
+    ctx,
+    outline_color
+  );
+  graphics_context_set_stroke_width(
+    ctx,
+    8
+  );
+  graphics_draw_line(
+    ctx,
+    barrel_start,
+    barrel_end
+  );
+
+  graphics_context_set_stroke_color(
+    ctx,
+    fill_color
+  );
+  graphics_context_set_stroke_width(
+    ctx,
+    5
+  );
+  graphics_draw_line(
+    ctx,
+    barrel_start,
+    barrel_end
+  );
+
+  graphics_context_set_stroke_color(
+    ctx,
+    outline_color
+  );
+  graphics_context_set_stroke_width(
+    ctx,
+    2
+  );
+
+  graphics_draw_line(
+    ctx,
+    GPoint(
+      barrel_start.x - 4,
+      barrel_start.y - 4
+    ),
+    GPoint(
+      barrel_start.x + 3,
+      barrel_start.y + 3
+    )
+  );
+
+  graphics_draw_line(
+    ctx,
+    barrel_end,
+    GPoint(
+      frame.origin.x + frame.size.w - 2,
+      frame.origin.y + 1
+    )
+  );
+
+  graphics_context_set_stroke_width(ctx, 1);
+}
+
+static void draw_medication_icon(
+    GContext *ctx,
+    GRect frame,
+    const MedicationSettings *medication,
+    GColor outline_color
+) {
+  if (
+    !medication ||
+    !medication->icon_set
+  ) {
+    return;
+  }
+
+  if (
+    medication->symbol ==
+        MEDICATION_SYMBOL_PEN
+  ) {
+    draw_pen_icon(
+      ctx,
+      frame,
+      medication,
+      outline_color
+    );
+    return;
+  }
+
+  draw_tablet_icon(
+    ctx,
+    frame,
+    medication,
+    outline_color
+  );
+}
+
+static void draw_physics_round_line(
+    GContext *ctx,
+    GPoint start,
+    GPoint end,
+    uint8_t radius,
+    GColor color
+) {
+  /*
+   * The previous renderer filled one circle for every pixel along the line.
+   * A thick native line plus two end caps produces the same rounded capsule
+   * with only three drawing primitives.
+   */
+  graphics_context_set_stroke_color(ctx, color);
+  graphics_context_set_stroke_width(
+    ctx,
+    (uint8_t)(radius * 2)
+  );
+  graphics_draw_line(ctx, start, end);
+
+  graphics_context_set_fill_color(ctx, color);
+  graphics_fill_circle(ctx, start, radius);
+  graphics_fill_circle(ctx, end, radius);
+  graphics_context_set_stroke_width(ctx, 1);
+}
+
+static void draw_physics_capsule(
+    GContext *ctx,
+    GPoint center,
+    int32_t angle,
+    int16_t half_length,
+    uint8_t radius,
+    GColor fill_color,
+    GColor outline_color,
+    bool draw_divider
+) {
+  const int16_t dx = (int16_t)(
+    ((int32_t)cos_lookup(angle) *
+     half_length) /
+    TRIG_MAX_RATIO
+  );
+  const int16_t dy = (int16_t)(
+    ((int32_t)sin_lookup(angle) *
+     half_length) /
+    TRIG_MAX_RATIO
+  );
+  const GPoint start = GPoint(
+    center.x - dx,
+    center.y - dy
+  );
+  const GPoint end = GPoint(
+    center.x + dx,
+    center.y + dy
+  );
+
+  draw_physics_round_line(
+    ctx,
+    start,
+    end,
+    radius + 2,
+    outline_color
+  );
+  draw_physics_round_line(
+    ctx,
+    start,
+    end,
+    radius,
+    fill_color
+  );
+
+  if (draw_divider) {
+    const int32_t divider_angle =
+        angle + TRIG_MAX_ANGLE / 4;
+    const int16_t divider_dx = (int16_t)(
+      ((int32_t)cos_lookup(divider_angle) *
+       (radius - 1)) /
+      TRIG_MAX_RATIO
+    );
+    const int16_t divider_dy = (int16_t)(
+      ((int32_t)sin_lookup(divider_angle) *
+       (radius - 1)) /
+      TRIG_MAX_RATIO
+    );
+
+    draw_physics_round_line(
+      ctx,
+      GPoint(
+        center.x - divider_dx,
+        center.y - divider_dy
+      ),
+      GPoint(
+        center.x + divider_dx,
+        center.y + divider_dy
+      ),
+      1,
+      outline_color
+    );
+  }
+}
+
+static uint8_t medication_appearance_size(
+    const MedicationAppearance *appearance
+) {
+  return
+      appearance &&
+      appearance->valid &&
+      appearance->size >= 60 &&
+      appearance->size <= 140
+          ? appearance->size
+          : 100;
+}
+
+static int16_t medication_appearance_scaled(
+    int16_t base,
+    uint8_t size
+) {
+  const int16_t scaled = (int16_t)(
+    ((int32_t)base * size + 50) / 100
+  );
+
+  return scaled < 1 ? 1 : scaled;
+}
+
+static void medication_appearance_geometry(
+    const MedicationAppearance *appearance,
+    int16_t *line_half,
+    int16_t *radius,
+    int16_t *diamond_half
+) {
+  const uint8_t size =
+      medication_appearance_size(appearance);
+  int16_t local_line_half = 0;
+  int16_t local_radius = 10;
+  int16_t local_diamond_half = 0;
+
+  switch (appearance ? appearance->shape : 0) {
+    case 1:
+      /*
+       * Same height and curvature, but about 50 % more total width.
+       * Width changes from 2 * (8 + 13) = 42 px to
+       * 2 * (19 + 13) = 64 px. The phone percentage is still
+       * applied afterwards as before.
+       */
+      local_line_half = 19;
+      local_radius = 13;
+      break;
+    case 2:
+      local_line_half = 8;
+      local_radius = 7;
+      break;
+    case 3:
+      local_radius = 0;
+      local_diamond_half = 11;
+      break;
+    case 4:
+      /*
+       * 20 % thinner while keeping the same total capsule length:
+       * old half extent 23 + 15 = 38 px
+       * new half extent 26 + 12 = 38 px
+       * The phone size percentage is still applied afterwards.
+       */
+      local_line_half = 26;
+      local_radius = 12;
+      break;
+    case 0:
+    default:
+      break;
+  }
+
+  if (line_half) {
+    *line_half = medication_appearance_scaled(local_line_half, size);
+  }
+  if (radius) {
+    *radius = medication_appearance_scaled(local_radius, size);
+  }
+  if (diamond_half) {
+    *diamond_half = medication_appearance_scaled(local_diamond_half, size);
+  }
+}
+
+static void draw_physics_capsule_pixel_run(
+    GContext *ctx,
+    int16_t y,
+    int16_t start_x,
+    int16_t end_x,
+    uint8_t color_index,
+    GColor outline_color,
+    GColor first_color,
+    GColor second_color
+) {
+  if (
+    color_index == 0 ||
+    end_x < start_x
+  ) {
+    return;
+  }
+
+  GColor color = outline_color;
+
+  if (color_index == 2) {
+    color = first_color;
+  } else if (color_index == 3) {
+    color = second_color;
+  }
+
+  graphics_context_set_stroke_color(ctx, color);
+  graphics_context_set_stroke_width(ctx, 1);
+  graphics_draw_line(
+    ctx,
+    GPoint(start_x, y),
+    GPoint(end_x, y)
+  );
+}
+
+static void draw_physics_two_color_capsule(
+    GContext *ctx,
+    GPoint center,
+    int32_t angle,
+    int16_t half_length,
+    uint8_t radius,
+    GColor first_color,
+    GColor second_color,
+    GColor outline_color
+) {
+  /*
+   * Exact capsule geometry:
+   * all pixels whose distance to the center line segment is <= radius.
+   * The inner capsule uses exactly the same geometry with a radius reduced
+   * by two pixels. This doubles the black outer outline while keeping it
+   * equally thick on straight tangent sections and circular end arcs.
+   */
+  const int32_t cosine = cos_lookup(angle);
+  const int32_t sine = sin_lookup(angle);
+  const int32_t absolute_cosine = abs_int32(cosine);
+  const int32_t absolute_sine = abs_int32(sine);
+
+  /*
+   * The center segment rotates, but each end cap is a circle. A circle has
+   * the full radius on both screen axes at every angle. Multiplying the
+   * radius by sine/cosine clipped horizontal capsules at left/right and
+   * vertical capsules at top/bottom.
+   */
+  const int16_t extent_x = (int16_t)(
+    (absolute_cosine * half_length) /
+    TRIG_MAX_RATIO +
+    radius +
+    2
+  );
+  const int16_t extent_y = (int16_t)(
+    (absolute_sine * half_length) /
+    TRIG_MAX_RATIO +
+    radius +
+    2
+  );
+
+  const int16_t minimum_x =
+      (int16_t)(center.x - extent_x);
+  const int16_t maximum_x =
+      (int16_t)(center.x + extent_x);
+  const int16_t minimum_y =
+      (int16_t)(center.y - extent_y);
+  const int16_t maximum_y =
+      (int16_t)(center.y + extent_y);
+
+  const int32_t cosine_q8 =
+      (cosine * PILL_PHYSICS_Q8) /
+      TRIG_MAX_RATIO;
+  const int32_t sine_q8 =
+      (sine * PILL_PHYSICS_Q8) /
+      TRIG_MAX_RATIO;
+  const int32_t half_length_q8 =
+      half_length * PILL_PHYSICS_Q8;
+  const int32_t outer_radius_q8 =
+      radius * PILL_PHYSICS_Q8;
+  const int32_t inner_radius_q8 =
+      radius > 2
+          ? (radius - 2) * PILL_PHYSICS_Q8
+          : 0;
+  const int32_t divider_half_width_q8 =
+      PILL_PHYSICS_Q8 / 2;
+  const int32_t outer_radius_squared =
+      outer_radius_q8 * outer_radius_q8;
+  const int32_t inner_radius_squared =
+      inner_radius_q8 * inner_radius_q8;
+
+  for (int16_t y = minimum_y; y <= maximum_y; y++) {
+    const int32_t relative_y = y - center.y;
+    const int32_t first_relative_x =
+        minimum_x - center.x;
+
+    int32_t local_x_q8 =
+        first_relative_x * cosine_q8 +
+        relative_y * sine_q8;
+    int32_t local_y_q8 =
+        -first_relative_x * sine_q8 +
+        relative_y * cosine_q8;
+
+    uint8_t run_color = 0;
+    int16_t run_start_x = minimum_x;
+
+    for (int16_t x = minimum_x; x <= maximum_x; x++) {
+      int32_t nearest_x_q8 = local_x_q8;
+
+      if (nearest_x_q8 < -half_length_q8) {
+        nearest_x_q8 = -half_length_q8;
+      } else if (nearest_x_q8 > half_length_q8) {
+        nearest_x_q8 = half_length_q8;
+      }
+
+      const int32_t distance_x_q8 =
+          local_x_q8 - nearest_x_q8;
+      const int32_t distance_squared =
+          distance_x_q8 * distance_x_q8 +
+          local_y_q8 * local_y_q8;
+
+      uint8_t pixel_color = 0;
+
+      if (distance_squared <= outer_radius_squared) {
+        if (
+          distance_squared > inner_radius_squared ||
+          abs_int32(local_x_q8) <=
+              divider_half_width_q8
+        ) {
+          pixel_color = 1;
+        } else {
+          pixel_color =
+              local_x_q8 < 0 ? 2 : 3;
+        }
+      }
+
+      if (pixel_color != run_color) {
+        draw_physics_capsule_pixel_run(
+          ctx,
+          y,
+          run_start_x,
+          (int16_t)(x - 1),
+          run_color,
+          outline_color,
+          first_color,
+          second_color
+        );
+
+        run_color = pixel_color;
+        run_start_x = x;
+      }
+
+      local_x_q8 += cosine_q8;
+      local_y_q8 -= sine_q8;
+    }
+
+    draw_physics_capsule_pixel_run(
+      ctx,
+      y,
+      run_start_x,
+      maximum_x,
+      run_color,
+      outline_color,
+      first_color,
+      second_color
+    );
+  }
+}
+
+static void draw_physics_appearance_diamond(
+    GContext *ctx,
+    GPoint center,
+    int32_t angle,
+    int16_t half_size,
+    GColor fill_color,
+    GColor outline_color
+) {
+  GPoint outer_points[4];
+  GPoint inner_points[4];
+  const int16_t inner_half =
+      half_size > 3 ? half_size - 3 : 1;
+
+  for (uint8_t index = 0; index < 4; index++) {
+    const int32_t point_angle =
+        angle + ((int32_t)index * TRIG_MAX_ANGLE) / 4;
+    outer_points[index] = GPoint(
+      center.x + (int16_t)(
+        ((int32_t)cos_lookup(point_angle) * half_size) /
+        TRIG_MAX_RATIO
+      ),
+      center.y + (int16_t)(
+        ((int32_t)sin_lookup(point_angle) * half_size) /
+        TRIG_MAX_RATIO
+      )
+    );
+    inner_points[index] = GPoint(
+      center.x + (int16_t)(
+        ((int32_t)cos_lookup(point_angle) * inner_half) /
+        TRIG_MAX_RATIO
+      ),
+      center.y + (int16_t)(
+        ((int32_t)sin_lookup(point_angle) * inner_half) /
+        TRIG_MAX_RATIO
+      )
+    );
+  }
+
+  const GPathInfo outer_info = {
+    .num_points = ARRAY_LENGTH(outer_points),
+    .points = outer_points
+  };
+  const GPathInfo inner_info = {
+    .num_points = ARRAY_LENGTH(inner_points),
+    .points = inner_points
+  };
+  GPath *outer = gpath_create(&outer_info);
+  GPath *inner = gpath_create(&inner_info);
+
+  if (!outer || !inner) {
+    if (outer) {
+      gpath_destroy(outer);
+    }
+    if (inner) {
+      gpath_destroy(inner);
+    }
+    return;
+  }
+
+  graphics_context_set_fill_color(ctx, outline_color);
+  gpath_draw_filled(ctx, outer);
+  graphics_context_set_fill_color(ctx, fill_color);
+  gpath_draw_filled(ctx, inner);
+  gpath_destroy(outer);
+  gpath_destroy(inner);
+}
+
+static int16_t medication_appearance_brightness(GColor color) {
+  const uint8_t value = color.argb;
+  const uint8_t red = (value >> 4) & 3;
+  const uint8_t green = (value >> 2) & 3;
+  const uint8_t blue = value & 3;
+
+  return red * 30 + green * 59 + blue * 11;
+}
+
+static const uint8_t *pill_physics_imprint_glyph(
+    char character
+) {
+  if (character >= '0' && character <= '9') {
+    return s_pill_imprint_digits[character - '0'];
+  }
+
+  if (character >= 'a' && character <= 'z') {
+    character = (char)(character - 'a' + 'A');
+  }
+
+  if (character >= 'A' && character <= 'Z') {
+    return s_pill_imprint_letters[character - 'A'];
+  }
+
+  switch (character) {
+    case '|':
+      return s_pill_imprint_bar;
+    case '-':
+      return s_pill_imprint_dash;
+    case '/':
+      return s_pill_imprint_slash;
+    case '+':
+      return s_pill_imprint_plus;
+    case '.':
+      return s_pill_imprint_dot;
+    case ' ':
+      return s_pill_imprint_space;
+    default:
+      return s_pill_imprint_unknown;
+  }
+}
+
+static GPoint pill_physics_imprint_rotated_point(
+    GPoint center,
+    int32_t angle,
+    int16_t local_x,
+    int16_t local_y
+) {
+  const int32_t cosine = cos_lookup(angle);
+  const int32_t sine = sin_lookup(angle);
+
+  return GPoint(
+    center.x + (int16_t)(
+      ((int32_t)local_x * cosine -
+       (int32_t)local_y * sine) /
+      TRIG_MAX_RATIO
+    ),
+    center.y + (int16_t)(
+      ((int32_t)local_x * sine +
+       (int32_t)local_y * cosine) /
+      TRIG_MAX_RATIO
+    )
+  );
+}
+
+static void draw_physics_appearance_imprint(
+    GContext *ctx,
+    GPoint center,
+    int32_t angle,
+    const MedicationAppearance *appearance,
+    int16_t body_width,
+    int16_t body_height
+) {
+  if (
+    !appearance ||
+    appearance->imprint[0] == '\0' ||
+    body_width < 8 ||
+    body_height < 8
+  ) {
+    return;
+  }
+
+  uint8_t character_count = 0;
+  while (
+    character_count < sizeof(appearance->imprint) &&
+    appearance->imprint[character_count] != '\0'
+  ) {
+    character_count++;
+  }
+
+  if (character_count == 0) {
+    return;
+  }
+
+  const int16_t unscaled_width = (int16_t)(
+    character_count * PILL_IMPRINT_GLYPH_WIDTH +
+    (character_count - 1) * PILL_IMPRINT_GLYPH_GAP
+  );
+
+  int16_t scale_from_width =
+      (body_width - 4) / unscaled_width;
+  int16_t scale_from_height =
+      (body_height - 4) / PILL_IMPRINT_GLYPH_HEIGHT;
+  int16_t scale =
+      scale_from_width < scale_from_height
+          ? scale_from_width
+          : scale_from_height;
+
+  if (scale < 1) {
+    scale = 1;
+  } else if (scale > PILL_IMPRINT_MAX_SCALE) {
+    scale = PILL_IMPRINT_MAX_SCALE;
+  }
+
+  const int16_t text_width =
+      unscaled_width * scale;
+  const int16_t text_height =
+      PILL_IMPRINT_GLYPH_HEIGHT * scale;
+  const int16_t text_left =
+      (int16_t)(-text_width / 2);
+  const int16_t text_top =
+      (int16_t)(-text_height / 2);
+
+  const GColor first_color = {
+    .argb = appearance->primary_color
+  };
+  int16_t brightness =
+      medication_appearance_brightness(first_color);
+
+  if (appearance->shape == 4) {
+    const GColor second_color = {
+      .argb = appearance->secondary_color
+    };
+    brightness = (int16_t)(
+      (brightness + medication_appearance_brightness(second_color)) / 2
+    );
+  }
+
+  /*
+   * Imprints are deliberately grey rather than black/white:
+   * dark grey on bright tablets, light grey on dark tablets.
+   */
+  graphics_context_set_fill_color(
+    ctx,
+    brightness >= 165 ? GColorDarkGray : GColorLightGray
+  );
+
+  for (
+    uint8_t character_index = 0;
+    character_index < character_count;
+    character_index++
+  ) {
+    const uint8_t *glyph =
+        pill_physics_imprint_glyph(
+          appearance->imprint[character_index]
+        );
+    const int16_t character_x = (int16_t)(
+      text_left +
+      character_index *
+          (PILL_IMPRINT_GLYPH_WIDTH + PILL_IMPRINT_GLYPH_GAP) *
+          scale
+    );
+
+    for (
+      uint8_t row = 0;
+      row < PILL_IMPRINT_GLYPH_HEIGHT;
+      row++
+    ) {
+      for (
+        uint8_t column = 0;
+        column < PILL_IMPRINT_GLYPH_WIDTH;
+        column++
+      ) {
+        if (
+          !(glyph[row] &
+            (1 << (PILL_IMPRINT_GLYPH_WIDTH - 1 - column)))
+        ) {
+          continue;
+        }
+
+        const int16_t local_x = (int16_t)(
+          character_x + column * scale + scale / 2
+        );
+        const int16_t local_y = (int16_t)(
+          text_top + row * scale + scale / 2
+        );
+        const GPoint pixel_center =
+            pill_physics_imprint_rotated_point(
+              center,
+              angle,
+              local_x,
+              local_y
+            );
+        const int16_t pixel_half = scale / 2;
+
+        /*
+         * Filled pixel blocks are reliable even for short glyph strokes.
+         * Their positions rotate with the pill; unlike graphics_draw_text(),
+         * the complete imprint therefore follows body->angle.
+         */
+        graphics_fill_rect(
+          ctx,
+          GRect(
+            pixel_center.x - pixel_half,
+            pixel_center.y - pixel_half,
+            scale,
+            scale
+          ),
+          0,
+          GCornerNone
+        );
+      }
+    }
+  }
+
+}
+
+static int16_t pill_physics_cubic_component(
+    int16_t p0,
+    int16_t p1,
+    int16_t p2,
+    int16_t p3,
+    int32_t t_q12
+) {
+  const int64_t scale = PHYSICS_ROUNDED_OVAL_Q12;
+  const int64_t t = t_q12;
+  const int64_t u = scale - t;
+  const int64_t scale_cubed = scale * scale * scale;
+
+  const int64_t value =
+      u * u * u * p0 +
+      3 * u * u * t * p1 +
+      3 * u * t * t * p2 +
+      t * t * t * p3;
+
+  if (value >= 0) {
+    return (int16_t)(
+      (value + scale_cubed / 2) /
+      scale_cubed
+    );
+  }
+
+  return (int16_t)(
+    -((-value + scale_cubed / 2) /
+      scale_cubed)
+  );
+}
+
+static void pill_physics_rounded_oval_quadrant(
+    GPoint *points,
+    uint8_t point_offset,
+    int16_t p0_x,
+    int16_t p0_y,
+    int16_t p1_x,
+    int16_t p1_y,
+    int16_t p2_x,
+    int16_t p2_y,
+    int16_t p3_x,
+    int16_t p3_y
+) {
+  for (
+    uint8_t step = 0;
+    step < PHYSICS_ROUNDED_OVAL_QUADRANT_STEPS;
+    step++
+  ) {
+    /*
+     * The endpoint belongs to the following quadrant. Omitting it here keeps
+     * every vertex unique while the final GPath closes the last gap itself.
+     */
+    const int32_t t_q12 = (int32_t)(
+      ((int64_t)step * PHYSICS_ROUNDED_OVAL_Q12) /
+      PHYSICS_ROUNDED_OVAL_QUADRANT_STEPS
+    );
+
+    points[point_offset + step] = GPoint(
+      pill_physics_cubic_component(
+        p0_x,
+        p1_x,
+        p2_x,
+        p3_x,
+        t_q12
+      ),
+      pill_physics_cubic_component(
+        p0_y,
+        p1_y,
+        p2_y,
+        p3_y,
+        t_q12
+      )
+    );
+  }
+}
+
+static void draw_physics_rounded_oval_fill(
+    GContext *ctx,
+    GPoint center,
+    int32_t angle,
+    int16_t half_width,
+    int16_t half_height,
+    GColor color
+) {
+  if (half_width < 2 || half_height < 2) {
+    return;
+  }
+
+  const int16_t end_control = (int16_t)(
+    ((int32_t)half_height *
+     PHYSICS_ROUNDED_OVAL_END_CONTROL_NUM +
+     PHYSICS_ROUNDED_OVAL_CONTROL_DEN / 2) /
+    PHYSICS_ROUNDED_OVAL_CONTROL_DEN
+  );
+  const int16_t top_control = (int16_t)(
+    ((int32_t)half_width *
+     PHYSICS_ROUNDED_OVAL_TOP_CONTROL_NUM +
+     PHYSICS_ROUNDED_OVAL_CONTROL_DEN / 2) /
+    PHYSICS_ROUNDED_OVAL_CONTROL_DEN
+  );
+
+  GPoint points[PHYSICS_ROUNDED_OVAL_PATH_POINTS];
+
+  /* Right end -> top. */
+  pill_physics_rounded_oval_quadrant(
+    points,
+    0,
+    half_width,
+    0,
+    half_width,
+    (int16_t)-end_control,
+    top_control,
+    (int16_t)-half_height,
+    0,
+    (int16_t)-half_height
+  );
+
+  /* Top -> left end. */
+  pill_physics_rounded_oval_quadrant(
+    points,
+    PHYSICS_ROUNDED_OVAL_QUADRANT_STEPS,
+    0,
+    (int16_t)-half_height,
+    (int16_t)-top_control,
+    (int16_t)-half_height,
+    (int16_t)-half_width,
+    (int16_t)-end_control,
+    (int16_t)-half_width,
+    0
+  );
+
+  /* Left end -> bottom. */
+  pill_physics_rounded_oval_quadrant(
+    points,
+    PHYSICS_ROUNDED_OVAL_QUADRANT_STEPS * 2,
+    (int16_t)-half_width,
+    0,
+    (int16_t)-half_width,
+    end_control,
+    (int16_t)-top_control,
+    half_height,
+    0,
+    half_height
+  );
+
+  /* Bottom -> right end. */
+  pill_physics_rounded_oval_quadrant(
+    points,
+    PHYSICS_ROUNDED_OVAL_QUADRANT_STEPS * 3,
+    0,
+    half_height,
+    top_control,
+    half_height,
+    half_width,
+    end_control,
+    half_width,
+    0
+  );
+
+  const GPathInfo path_info = {
+    .num_points = PHYSICS_ROUNDED_OVAL_PATH_POINTS,
+    .points = points
+  };
+  GPath *path = gpath_create(&path_info);
+
+  if (!path) {
+    return;
+  }
+
+  gpath_move_to(path, center);
+  gpath_rotate_to(path, angle);
+  graphics_context_set_fill_color(ctx, color);
+  gpath_draw_filled(ctx, path);
+  gpath_destroy(path);
+}
+
+static void draw_physics_true_ellipse(
+    GContext *ctx,
+    GPoint center,
+    int32_t angle,
+    int16_t line_half,
+    int16_t radius,
+    GColor fill_color,
+    GColor outline_color
+) {
+  const int16_t inner_half_width =
+      line_half + radius;
+  const int16_t inner_half_height = radius;
+
+  /*
+   * The same flatter, strongly rounded outline is drawn twice. The larger
+   * black shape leaves the established two-pixel border around the tablet.
+   */
+  draw_physics_rounded_oval_fill(
+    ctx,
+    center,
+    angle,
+    inner_half_width + PHYSICS_ROUNDED_OVAL_OUTLINE_PX,
+    inner_half_height + PHYSICS_ROUNDED_OVAL_OUTLINE_PX,
+    outline_color
+  );
+  draw_physics_rounded_oval_fill(
+    ctx,
+    center,
+    angle,
+    inner_half_width,
+    inner_half_height,
+    fill_color
+  );
+}
+
+static void draw_physics_pill_body(
+    GContext *ctx,
+    const PillPhysicsBody *body,
+    int32_t arena_y,
+    GColor outline_color
+) {
+  if (
+    !body ||
+    body->medication_index >= s_medication_count
+  ) {
+    return;
+  }
+
+  const MedicationSettings *medication =
+      &s_medications[body->medication_index];
+  const MedicationAppearance *stored =
+      body->medication_index < s_medication_appearance_count
+          ? &s_medication_appearances[body->medication_index]
+          : NULL;
+  MedicationAppearance fallback = {
+    .valid = true,
+    .shape = medication->shape <= 3 ? medication->shape : 0,
+    .primary_color = medication->color,
+    .secondary_color = medication->color,
+    .size = 100,
+    .imprint = { 0 }
+  };
+  const MedicationAppearance *appearance =
+      stored && stored->valid ? stored : &fallback;
+  const GColor fill_color = {
+    .argb = appearance->primary_color
+  };
+  const GColor second_color = {
+    .argb = appearance->secondary_color
+  };
+  const GPoint center = GPoint(
+    (int16_t)(body->x_q8 / PILL_PHYSICS_Q8),
+    (int16_t)(arena_y + body->y_q8 / PILL_PHYSICS_Q8)
+  );
+  int16_t line_half;
+  int16_t radius;
+  int16_t diamond_half;
+
+  medication_appearance_geometry(
+    appearance,
+    &line_half,
+    &radius,
+    &diamond_half
+  );
+
+  switch (appearance->shape) {
+    case 1:
+      draw_physics_true_ellipse(
+        ctx,
+        center,
+        body->angle,
+        line_half,
+        radius,
+        fill_color,
+        outline_color
+      );
+      break;
+
+    case 2:
+      draw_physics_capsule(
+        ctx,
+        center,
+        body->angle,
+        line_half,
+        (uint8_t)radius,
+        fill_color,
+        outline_color,
+        true
+      );
+      break;
+
+    case 3:
+      draw_physics_appearance_diamond(
+        ctx,
+        center,
+        body->angle,
+        diamond_half,
+        fill_color,
+        outline_color
+      );
+      break;
+
+    case 4:
+      draw_physics_two_color_capsule(
+        ctx,
+        center,
+        body->angle,
+        line_half,
+        (uint8_t)radius,
+        fill_color,
+        second_color,
+        outline_color
+      );
+      break;
+
+    case 0:
+    default:
+      graphics_context_set_fill_color(ctx, outline_color);
+      graphics_fill_circle(
+        ctx,
+        center,
+        (uint16_t)(radius + 2)
+      );
+      graphics_context_set_fill_color(ctx, fill_color);
+      graphics_fill_circle(
+        ctx,
+        center,
+        (uint16_t)radius
+      );
+      break;
+  }
+
+  const int16_t body_width =
+      diamond_half > 0
+          ? diamond_half * 2
+          : (line_half + radius) * 2;
+  const int16_t body_height =
+      diamond_half > 0
+          ? diamond_half * 2
+          : radius * 2;
+
+  draw_physics_appearance_imprint(
+    ctx,
+    center,
+    body->angle,
+    appearance,
+    body_width,
+    body_height
+  );
+}
+
+void draw_physics_pills(
+    GContext *ctx,
+    GRect bounds,
+    int32_t arena_y
+) {
+  if (
+    arena_y <= -s_frame_height ||
+    arena_y >= bounds.size.h
+  ) {
+    return;
+  }
+
+  for (
+    uint8_t index = 0;
+    index < s_pill_physics_body_count;
+    index++
+  ) {
+    draw_physics_pill_body(
+      ctx,
+      &s_pill_physics_bodies[index],
+      arena_y,
+      GColorLightGray
+    );
+  }
+}
+
+void draw_medications(
+    GContext *ctx,
+    GRect bounds,
+    int32_t pill_y,
+    GColor text_color
+) {
+  const int32_t label_y =
+      pill_y +
+      s_frame_height +
+      MEDICATION_GAP - 7 +
+      HINT_POSITION_ADJUST_Y +
+      HINT_HEIGHT +
+      15;
+
+  const int32_t rows_y = label_y + MEDICATION_HEADER_HEIGHT;
+
+  if (
+    rows_y +
+        LIST_ROW_COUNT *
+            (MEDICATION_ROW_HEIGHT + MEDICATION_ROW_GAP) < 0 ||
+    label_y > bounds.size.h
+  ) {
+    return;
+  }
+
+  graphics_context_set_text_color(ctx, text_color);
+
+  graphics_draw_text(
+    ctx,
+    "MEDICATIONS",
+    s_header_font,
+    GRect(
+      bounds.origin.x + 10,
+      (int16_t)label_y,
+      bounds.size.w - 20,
+      MEDICATION_HEADER_HEIGHT
+    ),
+    GTextOverflowModeTrailingEllipsis,
+    GTextAlignmentCenter,
+    NULL
+  );
+
+  for (int index = 0; index < LIST_ROW_COUNT; index++) {
+    const int32_t row_y =
+        rows_y +
+        index * (MEDICATION_ROW_HEIGHT + MEDICATION_ROW_GAP);
+
+    if (
+      row_y + MEDICATION_ROW_HEIGHT < 0 ||
+      row_y > bounds.size.h
+    ) {
+      continue;
+    }
+
+    GRect text_frame = GRect(
+      bounds.origin.x + 8,
+      (int16_t)row_y + 3,
+      bounds.size.w - 16,
+      MEDICATION_ROW_HEIGHT - 3
+    );
+
+    GTextAlignment alignment =
+        GTextAlignmentCenter;
+
+    if (
+      s_row_kinds[index] ==
+          MEDICATION_ROW_ITEM
+    ) {
+      const int8_t medication_index =
+          s_row_medication_indices[index];
+
+      if (
+        medication_index >= 0 &&
+        medication_index <
+            (int8_t)s_medication_count
+      ) {
+        draw_medication_icon(
+          ctx,
+          GRect(
+            bounds.origin.x +
+                MEDICATION_ICON_LEFT,
+            (int16_t)row_y +
+                (
+                  MEDICATION_ROW_HEIGHT -
+                  MEDICATION_ICON_SIZE
+                ) /
+                2,
+            MEDICATION_ICON_SIZE,
+            MEDICATION_ICON_SIZE
+          ),
+          &s_medications[medication_index],
+          text_color
+        );
+
+        text_frame = GRect(
+          bounds.origin.x +
+              MEDICATION_ICON_TEXT_X,
+          (int16_t)row_y + 3,
+          bounds.size.w -
+              MEDICATION_ICON_TEXT_X -
+              MEDICATION_ICON_TEXT_RIGHT,
+          MEDICATION_ROW_HEIGHT - 3
+        );
+
+        alignment = GTextAlignmentLeft;
+      }
+    }
+
+    graphics_draw_text(
+      ctx,
+      s_rows[index],
+      s_medication_font,
+      text_frame,
+      GTextOverflowModeTrailingEllipsis,
+      alignment,
+      NULL
+    );
+  }
+}

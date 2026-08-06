@@ -1,0 +1,307 @@
+#include <pebble.h>
+
+#include <stdio.h>
+#include <string.h>
+
+#include "app_state.h"
+#include "app_util.h"
+#include "medication_model.h"
+#include "watch_settings.h"
+#include "medication_alarm.h"
+#include "pill_physics.h"
+#include "pill_renderer.h"
+#include "scroll_controller.h"
+#include "confirmation_ui.h"
+#include "medication_ui.h"
+
+static void format_medication_label(
+    const MedicationSettings *medication,
+    char *label,
+    size_t label_size
+);
+static MedicationTime medication_time_for_minute(
+    int minute
+);
+static bool medication_group_is_confirmed(
+    MedicationSymbol symbol
+);
+static bool medication_matches_group(
+    const MedicationSettings *medication,
+    MedicationTime visible_time,
+    MedicationSymbol symbol
+);
+static void append_confirmation_row(
+    MedicationSymbol symbol
+);
+void daypart_tick_handler(
+    struct tm *tick_time,
+    TimeUnits units_changed
+);
+
+static void format_medication_label(
+    const MedicationSettings *medication,
+    char *label,
+    size_t label_size
+) {
+  if (medication->quantity > 1) {
+    snprintf(
+      label,
+      label_size,
+      "%s x%u",
+      medication->name,
+      (unsigned int)medication->quantity
+    );
+    return;
+  }
+
+  snprintf(
+    label,
+    label_size,
+    "%s",
+    medication->name
+  );
+}
+
+static MedicationTime medication_time_for_minute(
+    int minute
+) {
+  if (
+    minute >= s_dayparts.morning &&
+    minute < s_dayparts.noon
+  ) {
+    return MEDICATION_TIME_MORNING;
+  }
+
+  if (
+    minute >= s_dayparts.noon &&
+    minute < s_dayparts.evening
+  ) {
+    return MEDICATION_TIME_NOON;
+  }
+
+  if (
+    minute >= s_dayparts.evening &&
+    minute < s_dayparts.night
+  ) {
+    return MEDICATION_TIME_EVENING;
+  }
+
+  return MEDICATION_TIME_NIGHT;
+}
+
+MedicationTime current_medication_time(void) {
+  const time_t now = time(NULL);
+  struct tm *local_time = localtime(&now);
+
+  if (!local_time) {
+    return MEDICATION_TIME_MORNING;
+  }
+
+  return medication_time_for_minute(
+    local_time->tm_hour * 60 +
+    local_time->tm_min
+  );
+}
+
+void reset_medication_confirmations(void) {
+  alarm_refresh_window_state();
+  s_pills_confirmed =
+      (s_alarm_window_state.confirmed_mask &
+       (1u << MEDICATION_SYMBOL_PILL)) != 0;
+  s_pen_confirmed =
+      (s_alarm_window_state.confirmed_mask &
+       (1u << MEDICATION_SYMBOL_PEN)) != 0;
+}
+
+static bool medication_group_is_confirmed(
+    MedicationSymbol symbol
+) {
+  return
+      symbol == MEDICATION_SYMBOL_PILL
+          ? s_pills_confirmed
+          : s_pen_confirmed;
+}
+
+void mark_medication_group_confirmed(
+    MedicationSymbol symbol
+) {
+  if (symbol == MEDICATION_SYMBOL_PILL) {
+    s_pills_confirmed = true;
+    return;
+  }
+
+  s_pen_confirmed = true;
+}
+
+static bool medication_matches_group(
+    const MedicationSettings *medication,
+    MedicationTime visible_time,
+    MedicationSymbol symbol
+) {
+  return
+      medication &&
+      medication->enabled &&
+      medication->time ==
+          (uint8_t)visible_time &&
+      medication->symbol ==
+          (uint8_t)symbol;
+}
+
+bool medication_group_is_due(
+    MedicationSymbol symbol
+) {
+  if (medication_group_is_confirmed(symbol)) {
+    return false;
+  }
+
+  const MedicationTime visible_time =
+      current_medication_time();
+
+  for (
+    uint8_t index = 0;
+    index < s_medication_count;
+    index++
+  ) {
+    if (
+      medication_matches_group(
+        &s_medications[index],
+        visible_time,
+        symbol
+      )
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool unconfirmed_medication_group_is_due(void) {
+  return
+      medication_group_is_due(
+        MEDICATION_SYMBOL_PILL
+      ) ||
+      medication_group_is_due(
+        MEDICATION_SYMBOL_PEN
+      );
+}
+
+static void append_confirmation_row(
+    MedicationSymbol symbol
+) {
+  const char *prompt =
+      symbol == MEDICATION_SYMBOL_PILL
+          ? "Tabletten genommen?"
+          : "Pen injiziert?";
+
+  snprintf(
+    s_row_labels[s_list_row_count],
+    sizeof(s_row_labels[s_list_row_count]),
+    "%s",
+    prompt
+  );
+
+  s_rows[s_list_row_count] =
+      s_row_labels[s_list_row_count];
+
+  s_row_kinds[s_list_row_count] =
+      symbol == MEDICATION_SYMBOL_PILL
+          ? MEDICATION_ROW_CONFIRM_PILLS
+          : MEDICATION_ROW_CONFIRM_PEN;
+
+  s_row_medication_indices[s_list_row_count] = -1;
+
+  s_list_row_count++;
+}
+
+void rebuild_medication_rows(void) {
+  const MedicationTime visible_time =
+      current_medication_time();
+
+  s_visible_medication_time = visible_time;
+  s_visible_medication_time_set = true;
+  s_list_row_count = 0;
+
+  memset(
+    s_row_medication_indices,
+    -1,
+    sizeof(s_row_medication_indices)
+  );
+
+  for (
+    uint8_t group_index = 0;
+    group_index < 2;
+    group_index++
+  ) {
+    const MedicationSymbol symbol =
+        (MedicationSymbol)group_index;
+
+    if (medication_group_is_confirmed(symbol)) {
+      continue;
+    }
+
+    bool group_has_medication = false;
+
+    for (
+      uint8_t index = 0;
+      index < s_medication_count;
+      index++
+    ) {
+      if (
+        !medication_matches_group(
+          &s_medications[index],
+          visible_time,
+          symbol
+        )
+      ) {
+        continue;
+      }
+
+      format_medication_label(
+        &s_medications[index],
+        s_row_labels[s_list_row_count],
+        sizeof(s_row_labels[s_list_row_count])
+      );
+
+      s_rows[s_list_row_count] =
+          s_row_labels[s_list_row_count];
+
+      s_row_kinds[s_list_row_count] =
+          MEDICATION_ROW_ITEM;
+
+      s_row_medication_indices[s_list_row_count] =
+          (int8_t)index;
+
+      s_list_row_count++;
+      group_has_medication = true;
+    }
+
+    if (group_has_medication) {
+      append_confirmation_row(symbol);
+    }
+  }
+}
+
+void refresh_medication_rows_for_time(void) {
+  const MedicationTime visible_time =
+      current_medication_time();
+
+  if (
+    s_visible_medication_time_set &&
+    visible_time == s_visible_medication_time
+  ) {
+    return;
+  }
+
+  refresh_app_screen_state();
+}
+
+void daypart_tick_handler(
+    struct tm *tick_time,
+    TimeUnits units_changed
+) {
+  (void)units_changed;
+
+  refresh_medication_rows_for_time();
+  alarm_handle_minute_tick(tick_time);
+}
