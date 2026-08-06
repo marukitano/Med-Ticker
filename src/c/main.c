@@ -142,15 +142,15 @@
 #define PILL_PHYSICS_ACCEL_DIVISOR 1
 #define PILL_PHYSICS_BOUNCE_NUM 120
 #define PILL_PHYSICS_BOUNCE_DEN 256
-#define PILL_PHYSICS_MAX_VELOCITY_Q8 (22 * PILL_PHYSICS_Q8)
+#define PILL_PHYSICS_MAX_VELOCITY_Q8 (28 * PILL_PHYSICS_Q8)
 #define PILL_PHYSICS_EDGE_MARGIN 4
 #define PILL_PHYSICS_STATIC_FRICTION_MG 220
 #define PILL_PHYSICS_SIZE_STATIC_FRICTION_MIN_MG 160
 #define PILL_PHYSICS_SIZE_STATIC_FRICTION_MAX_MG 280
-#define PILL_PHYSICS_KINETIC_FRICTION_MG 70
-#define PILL_PHYSICS_WAKE_DELTA_MG 60
-#define PILL_PHYSICS_REST_FRICTION_Q8 (PILL_PHYSICS_Q8 * 5 / 4)
-#define PILL_PHYSICS_ROLLING_FRICTION_Q8 (PILL_PHYSICS_Q8 / 64)
+#define PILL_PHYSICS_KINETIC_FRICTION_MG 35
+#define PILL_PHYSICS_WAKE_DELTA_MG 45
+#define PILL_PHYSICS_REST_FRICTION_Q8 (PILL_PHYSICS_Q8 * 3 / 4)
+#define PILL_PHYSICS_ROLLING_FRICTION_Q8 (PILL_PHYSICS_Q8 / 128)
 #define PILL_PHYSICS_COLLISION_INTERVAL 1
 #define PILL_PHYSICS_CONTACT_SLOP_PX 5
 #define PILL_PHYSICS_SENSOR_STILL_SAMPLES 5
@@ -162,7 +162,33 @@
 #define PILL_PHYSICS_Q8_PER_Q4 (PILL_PHYSICS_Q8 / PILL_PHYSICS_Q4_PER_PIXEL)
 #define PILL_PHYSICS_SETTLE_VELOCITY_Q8 (PILL_PHYSICS_Q8 / 2)
 #define PILL_PHYSICS_ANGLE_BUCKET (TRIG_MAX_ANGLE / 32)
-#define PILL_PHYSICS_ROTATION_MIN_TRAVEL_Q8 (PILL_PHYSICS_Q8 / 2)
+/* Capsule rigid-body physics. Positions and linear velocities use Q8. */
+#define PILL_RB_FRAME_MS 40
+#define PILL_RB_ALARM_FRAME_MS 40
+#define PILL_RB_ACCEL_DIVISOR 4
+#define PILL_RB_MAX_LINEAR_Q8 (30 * PILL_PHYSICS_Q8)
+#define PILL_RB_MAX_ANGULAR (TRIG_MAX_ANGLE / 12)
+#define PILL_RB_ANGULAR_DAMPING_NUM 253
+#define PILL_RB_ANGULAR_DAMPING_DEN 256
+#define PILL_RB_RESTITUTION_NUM 1
+#define PILL_RB_RESTITUTION_DEN 5
+#define PILL_RB_RESTITUTION_SPEED_Q8 (2 * PILL_PHYSICS_Q8)
+#define PILL_RB_FLAT_CONTACT_TOLERANCE_Q8 (4 * PILL_PHYSICS_Q8)
+#define PILL_RB_FRICTION_NUM 3
+#define PILL_RB_FRICTION_DEN 5
+#define PILL_RB_POSITION_SLOP_Q8 (PILL_PHYSICS_Q8 / 8)
+#define PILL_RB_SOLVER_ITERATIONS 4
+#define PILL_RB_PARAMETER_Q12 4096
+#define PILL_RB_ANGLE_TO_LINEAR_NUM 201
+#define PILL_RB_ANGLE_TO_LINEAR_DEN 8192
+#define PILL_RB_RAD_TO_ANGLE_NUM 10430
+#define PILL_RB_SLEEP_LINEAR_Q8 (PILL_PHYSICS_Q8)
+#define PILL_RB_SLEEP_ANGULAR (TRIG_MAX_ANGLE / 240)
+#define PILL_RB_SLEEP_FRAMES 5
+#define PILL_RB_SENSOR_WAKE_MG 35
+
+#define PILL_PHYSICS_ROTATION_MIN_TRAVEL_Q8 (PILL_PHYSICS_Q8)
+#define PILL_PHYSICS_ROTATION_DIVISOR 4
 
 
 typedef enum {
@@ -362,8 +388,10 @@ typedef struct {
   int32_t vx_q8;
   int32_t vy_q8;
   int32_t angle;
+  int32_t angular_velocity;
   uint8_t medication_index;
   uint8_t collision_radius;
+  uint8_t collision_half_length;
 } PillPhysicsBody;
 
 static PillPhysicsBody s_pill_physics_bodies[
@@ -1605,7 +1633,7 @@ static bool read_medication_from_message(
     symbol < MEDICATION_SYMBOL_PILL ||
     symbol > MEDICATION_SYMBOL_PEN ||
     shape < 0 ||
-    shape > 3 ||
+    shape > 4 ||
     color < 192 ||
     color > 255 ||
     icon_set < 0 ||
@@ -1640,7 +1668,7 @@ static bool read_medication_from_message(
     .schedule = (uint8_t)schedule,
     .day = (uint8_t)day,
     .symbol = (uint8_t)symbol,
-    .shape = (uint8_t)shape,
+    .shape = (uint8_t)(shape <= 3 ? shape : 2),
     .color = (uint8_t)color,
     .icon_set = (uint8_t)icon_set,
     .enabled = (uint8_t)enabled
@@ -1684,16 +1712,9 @@ static void reset_pending_medications(
   s_pending_received_mask = 0;
 }
 
-#define MEDICATION_APPEARANCE_PACKET_BYTES 10
 #define MEDICATION_APPEARANCE_IMPRINT_LENGTH 6
 #define MEDICATION_APPEARANCE_COUNT_PERSIST_KEY 219
 #define MEDICATION_APPEARANCE_PERSIST_KEY_BASE 220
-
-typedef enum {
-  APPEARANCE_COMMAND_RESET = 0,
-  APPEARANCE_COMMAND_ITEM = 1,
-  APPEARANCE_COMMAND_COMMIT = 2,
-} AppearanceCommand;
 
 typedef struct {
   bool valid;
@@ -1724,57 +1745,89 @@ static void reset_pending_medication_appearances(uint8_t count) {
   );
 }
 
-static bool decode_medication_appearance(
-    const Tuple *data_tuple,
+static bool read_medication_appearance_from_message(
+    DictionaryIterator *iterator,
     MedicationAppearance *appearance
 ) {
-  if (
-    !data_tuple ||
-    !appearance ||
-    data_tuple->type != TUPLE_BYTE_ARRAY ||
-    data_tuple->length != MEDICATION_APPEARANCE_PACKET_BYTES
-  ) {
+  if (!iterator || !appearance) {
     return false;
   }
 
-  const uint8_t *packet = data_tuple->value->data;
-  const uint8_t shape = packet[0];
-  const uint8_t primary_color = packet[1];
-  const uint8_t secondary_color = packet[2];
-  const uint8_t size = packet[3];
-  const uint8_t imprint_length = packet[4];
+  Tuple *shape_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_SHAPE
+  );
+  Tuple *primary_color_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_COLOR
+  );
+  Tuple *secondary_color_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_COLOR2
+  );
+  Tuple *size_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_SIZE
+  );
+  Tuple *imprint_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_IMPRINT
+  );
+
+  int32_t shape;
+  int32_t primary_color;
+  int32_t secondary_color;
+  int32_t size;
 
   if (
+    !tuple_read_int32(shape_tuple, &shape) ||
+    !tuple_read_int32(primary_color_tuple, &primary_color) ||
+    !tuple_read_int32(secondary_color_tuple, &secondary_color) ||
+    !tuple_read_int32(size_tuple, &size) ||
+    !imprint_tuple ||
+    imprint_tuple->type != TUPLE_CSTRING ||
+    shape < 0 ||
     shape > 4 ||
     primary_color < 192 ||
+    primary_color > 255 ||
     secondary_color < 192 ||
+    secondary_color > 255 ||
     size < 60 ||
-    size > 140 ||
-    imprint_length > 5
+    size > 140
   ) {
     return false;
   }
 
-  MedicationAppearance parsed = {
-    .valid = true,
-    .shape = shape,
-    .primary_color = primary_color,
-    .secondary_color = secondary_color,
-    .size = size,
-    .imprint = { 0 }
-  };
+  const char *imprint = imprint_tuple->value->cstring;
+  const size_t imprint_length = strlen(imprint);
 
-  for (uint8_t index = 0; index < imprint_length; index++) {
-    const uint8_t character = packet[5 + index];
+  if (imprint_length >= MEDICATION_APPEARANCE_IMPRINT_LENGTH) {
+    return false;
+  }
+
+  for (size_t index = 0; index < imprint_length; index++) {
+    const unsigned char character = (unsigned char)imprint[index];
 
     if (character < 32 || character > 126) {
       return false;
     }
-
-    parsed.imprint[index] = (char)character;
   }
 
-  parsed.imprint[imprint_length] = '\0';
+  MedicationAppearance parsed = {
+    .valid = true,
+    .shape = (uint8_t)shape,
+    .primary_color = (uint8_t)primary_color,
+    .secondary_color = (uint8_t)secondary_color,
+    .size = (uint8_t)size,
+    .imprint = { 0 }
+  };
+
+  memcpy(
+    parsed.imprint,
+    imprint,
+    imprint_length + 1
+  );
+
   *appearance = parsed;
   return true;
 }
@@ -1865,32 +1918,42 @@ static uint8_t medication_appearance_collision_radius(
   const MedicationSettings *medication =
       &s_medications[medication_index];
   const MedicationAppearance *appearance =
-      medication_index < s_medication_appearance_count
-          ? &s_medication_appearances[medication_index]
+      medication_index <
+              s_medication_appearance_count
+          ? &s_medication_appearances[
+              medication_index
+            ]
           : NULL;
 
   if (!appearance || !appearance->valid) {
-    return pill_physics_radius_for_shape(medication->shape);
+    return pill_physics_radius_for_shape(
+      medication->shape
+    );
   }
 
   int16_t base_radius;
 
   switch (appearance->shape) {
     case 1:
-      base_radius = 14;
+      /* ellipse */
+      base_radius = 21;
       break;
     case 2:
-      base_radius = 15;
+      /* tablet */
+      base_radius = 22;
       break;
     case 3:
-      base_radius = 12;
+      /* rhombus */
+      base_radius = 15;
       break;
     case 4:
-      base_radius = 18;
+      /* capsule */
+      base_radius = 24;
       break;
     case 0:
     default:
-      base_radius = 11;
+      /* round */
+      base_radius = 14;
       break;
   }
 
@@ -1898,10 +1961,25 @@ static uint8_t medication_appearance_collision_radius(
     ((int32_t)base_radius * appearance->size + 50) / 100
   );
 
-  if (radius < 5) {
-    radius = 5;
-  } else if (radius > 40) {
-    radius = 40;
+  /*
+   * Use a deliberately larger broad-phase collider than the visual body.
+   * This keeps the pills from sinking too deeply into each other while still
+   * remaining cheap enough for the watch.
+   */
+  if (
+    appearance->shape == 1 ||
+    appearance->shape == 2 ||
+    appearance->shape == 4
+  ) {
+    radius += (radius + 2) / 4; /* about +25 % */
+  } else {
+    radius += (radius + 4) / 5; /* about +20 % */
+  }
+
+  if (radius < 6) {
+    radius = 6;
+  } else if (radius > 48) {
+    radius = 48;
   }
 
   return (uint8_t)radius;
@@ -1923,113 +2001,11 @@ static void apply_medication_appearances(void) {
   }
 }
 
-static bool handle_appearance_message(
-    DictionaryIterator *iterator
-) {
-  Tuple *command_tuple = dict_find(
-    iterator,
-    MESSAGE_KEY_APPEAR_COMMAND
-  );
-
-  if (!command_tuple) {
-    return false;
-  }
-
-  int32_t command;
-
-  if (!tuple_read_int32(command_tuple, &command)) {
-    return true;
-  }
-
-  Tuple *count_tuple = dict_find(
-    iterator,
-    MESSAGE_KEY_APPEAR_COUNT
-  );
-  int32_t count;
-
-  if (
-    !tuple_read_int32(count_tuple, &count) ||
-    count < 0 ||
-    count > MAX_MEDICATIONS
-  ) {
-    return true;
-  }
-
-  if (command == APPEARANCE_COMMAND_RESET) {
-    reset_pending_medication_appearances((uint8_t)count);
-    return true;
-  }
-
-  if (count != s_pending_medication_appearance_count) {
-    return true;
-  }
-
-  if (command == APPEARANCE_COMMAND_ITEM) {
-    Tuple *index_tuple = dict_find(
-      iterator,
-      MESSAGE_KEY_APPEAR_INDEX
-    );
-    Tuple *data_tuple = dict_find(
-      iterator,
-      MESSAGE_KEY_APPEAR_DATA
-    );
-    int32_t index;
-
-    if (
-      !tuple_read_int32(index_tuple, &index) ||
-      index < 0 ||
-      index >= count ||
-      !data_tuple
-    ) {
-      return true;
-    }
-
-    MedicationAppearance appearance;
-    memset(&appearance, 0, sizeof(appearance));
-
-    if (!decode_medication_appearance(data_tuple, &appearance)) {
-      return true;
-    }
-
-    s_pending_medication_appearances[index] = appearance;
-    s_pending_medication_appearance_mask |= (uint16_t)(1u << index);
-
-    APP_LOG(
-      APP_LOG_LEVEL_INFO,
-      "Appearance item %ld received (%u bytes)",
-      (long)index,
-      (unsigned int)data_tuple->length
-    );
-    return true;
-  }
-
-  if (
-    command == APPEARANCE_COMMAND_COMMIT &&
-    s_pending_medication_appearance_mask ==
-        expected_pending_mask(s_pending_medication_appearance_count)
-  ) {
-    apply_medication_appearances();
-    APP_LOG(
-      APP_LOG_LEVEL_INFO,
-      "Appearance commit: %u sprites active",
-      (unsigned int)s_medication_appearance_count
-    );
-    reset_pending_medication_appearances(0);
-    return true;
-  }
-
-  return true;
-}
-
 static void settings_inbox_received(
     DictionaryIterator *iterator,
     void *context
 ) {
   (void)context;
-
-  if (handle_appearance_message(iterator)) {
-    return;
-  }
 
   Tuple *command_tuple = dict_find(
     iterator,
@@ -2069,11 +2045,17 @@ static void settings_inbox_received(
     reset_pending_medications(
       (uint8_t)count
     );
+    reset_pending_medication_appearances(
+      (uint8_t)count
+    );
     show_transfer_screen();
     return;
   }
 
-  if (count != s_pending_count) {
+  if (
+    count != s_pending_count ||
+    count != s_pending_medication_appearance_count
+  ) {
     return;
   }
 
@@ -2097,22 +2079,42 @@ static void settings_inbox_received(
     }
 
     MedicationSettings medication;
+    MedicationAppearance appearance;
 
     if (
       !read_medication_from_message(
         iterator,
         &medication
+      ) ||
+      !read_medication_appearance_from_message(
+        iterator,
+        &appearance
       )
     ) {
+      APP_LOG(
+        APP_LOG_LEVEL_WARNING,
+        "Incomplete medication item %ld ignored",
+        (long)index
+      );
       return;
     }
 
-    s_pending_medications[index] =
-        medication;
+    s_pending_medications[index] = medication;
+    s_pending_medication_appearances[index] = appearance;
 
     s_pending_received_mask |=
         (uint16_t)(1u << index);
+    s_pending_medication_appearance_mask |=
+        (uint16_t)(1u << index);
 
+    APP_LOG(
+      APP_LOG_LEVEL_INFO,
+      "Medication item %ld complete: shape=%u size=%u imprint=%s",
+      (long)index,
+      (unsigned int)appearance.shape,
+      (unsigned int)appearance.size,
+      appearance.imprint
+    );
     return;
   }
 
@@ -2121,6 +2123,10 @@ static void settings_inbox_received(
     s_pending_received_mask !=
         expected_pending_mask(
           s_pending_count
+        ) ||
+    s_pending_medication_appearance_mask !=
+        expected_pending_mask(
+          s_pending_medication_appearance_count
         )
   ) {
     return;
@@ -2204,9 +2210,16 @@ static void settings_inbox_received(
     s_pending_count,
     true
   );
+  apply_medication_appearances();
 
   alarm_reset_after_settings_save();
   reset_pending_medications(0);
+  reset_pending_medication_appearances(0);
+
+  APP_LOG(
+    APP_LOG_LEVEL_INFO,
+    "Single settings transaction committed completely"
+  );
   schedule_transfer_close();
 }
 
@@ -2219,6 +2232,7 @@ static void settings_init(void) {
   load_alarm_settings();
   load_medication_settings();
   reset_pending_medications(0);
+  reset_pending_medication_appearances(0);
 
   app_message_register_inbox_received(
     settings_inbox_received
@@ -3144,14 +3158,14 @@ static uint8_t pill_physics_radius_for_shape(
 ) {
   switch (shape) {
     case 1:
-      return 14;
-    case 2:
       return 15;
+    case 2:
+      return 9;
     case 3:
-      return 12;
+      return 14;
     case 0:
     default:
-      return 11;
+      return 12;
   }
 }
 
@@ -3168,7 +3182,491 @@ static bool pill_physics_medication_is_visible(
       !s_pills_confirmed;
 }
 
-static void pill_physics_initialize_body(
+static int32_t pill_rb_clamp_angle(int32_t angle) {
+  while (angle < 0) {
+    angle += TRIG_MAX_ANGLE;
+  }
+  while (angle >= TRIG_MAX_ANGLE) {
+    angle -= TRIG_MAX_ANGLE;
+  }
+  return angle;
+}
+
+static int32_t pill_rb_clamp_int32(
+    int32_t value,
+    int32_t minimum,
+    int32_t maximum
+) {
+  if (value < minimum) {
+    return minimum;
+  }
+  if (value > maximum) {
+    return maximum;
+  }
+  return value;
+}
+
+static uint64_t pill_rb_integer_sqrt64(uint64_t value) {
+  uint64_t result = 0;
+  uint64_t bit = (uint64_t)1 << 62;
+
+  while (bit > value) {
+    bit >>= 2;
+  }
+
+  while (bit != 0) {
+    if (value >= result + bit) {
+      value -= result + bit;
+      result = (result >> 1) + bit;
+    } else {
+      result >>= 1;
+    }
+    bit >>= 2;
+  }
+
+  return result;
+}
+
+static void pill_rb_collision_geometry(
+    uint8_t medication_index,
+    uint8_t *half_length,
+    uint8_t *radius
+) {
+  uint8_t shape = 0;
+  uint8_t size = 100;
+
+  if (medication_index < s_medication_count) {
+    shape = s_medications[medication_index].shape;
+  }
+
+  if (
+    medication_index < s_medication_appearance_count &&
+    s_medication_appearances[medication_index].valid
+  ) {
+    const MedicationAppearance *appearance =
+        &s_medication_appearances[medication_index];
+    shape = appearance->shape;
+    size = appearance->size;
+  }
+
+  int16_t local_half_length;
+  int16_t local_radius;
+
+  switch (shape) {
+    case 1:
+      local_half_length = 19;
+      local_radius = 13;
+      break;
+    case 2:
+      local_half_length = 8;
+      local_radius = 7;
+      break;
+    case 4:
+      local_half_length = 26;
+      local_radius = 12;
+      break;
+    case 3:
+      local_half_length = 0;
+      local_radius = 13;
+      break;
+    case 0:
+    default:
+      local_half_length = 0;
+      local_radius = 10;
+      break;
+  }
+
+  local_half_length = (int16_t)(
+    ((int32_t)local_half_length * size + 50) / 100
+  );
+  local_radius = (int16_t)(
+    ((int32_t)local_radius * size + 50) / 100
+  );
+
+  /* Small safety envelope prevents visible interpenetration. */
+  if (local_half_length > 0) {
+    local_half_length += 1;
+  }
+  local_radius += 2;
+
+  if (local_half_length < 0) {
+    local_half_length = 0;
+  } else if (local_half_length > 40) {
+    local_half_length = 40;
+  }
+
+  if (local_radius < 5) {
+    local_radius = 5;
+  } else if (local_radius > 28) {
+    local_radius = 28;
+  }
+
+  *half_length = (uint8_t)local_half_length;
+  *radius = (uint8_t)local_radius;
+}
+
+static int32_t pill_rb_inertia(const PillPhysicsBody *body) {
+  const int32_t half_length =
+      body->collision_half_length;
+  const int32_t radius =
+      body->collision_radius;
+  int32_t inertia =
+      (half_length * half_length) / 3 +
+      (radius * radius) / 2;
+
+  if (inertia < 24) {
+    inertia = 24;
+  }
+
+  return inertia;
+}
+
+static void pill_rb_segment_endpoints(
+    const PillPhysicsBody *body,
+    int32_t *ax_q8,
+    int32_t *ay_q8,
+    int32_t *bx_q8,
+    int32_t *by_q8
+) {
+  const int32_t dx_q8 = (int32_t)(
+    ((int64_t)cos_lookup(body->angle) *
+     body->collision_half_length *
+     PILL_PHYSICS_Q8) /
+    TRIG_MAX_RATIO
+  );
+  const int32_t dy_q8 = (int32_t)(
+    ((int64_t)sin_lookup(body->angle) *
+     body->collision_half_length *
+     PILL_PHYSICS_Q8) /
+    TRIG_MAX_RATIO
+  );
+
+  *ax_q8 = body->x_q8 - dx_q8;
+  *ay_q8 = body->y_q8 - dy_q8;
+  *bx_q8 = body->x_q8 + dx_q8;
+  *by_q8 = body->y_q8 + dy_q8;
+}
+
+static int32_t pill_rb_rotational_velocity_q8(
+    int32_t angular_velocity,
+    int16_t lever_pixels
+) {
+  return (int32_t)(
+    ((int64_t)angular_velocity *
+     lever_pixels *
+     PILL_RB_ANGLE_TO_LINEAR_NUM) /
+    PILL_RB_ANGLE_TO_LINEAR_DEN
+  );
+}
+
+static void pill_rb_contact_velocity(
+    const PillPhysicsBody *body,
+    int16_t lever_x,
+    int16_t lever_y,
+    int32_t *velocity_x_q8,
+    int32_t *velocity_y_q8
+) {
+  *velocity_x_q8 =
+      body->vx_q8 -
+      pill_rb_rotational_velocity_q8(
+        body->angular_velocity,
+        lever_y
+      );
+  *velocity_y_q8 =
+      body->vy_q8 +
+      pill_rb_rotational_velocity_q8(
+        body->angular_velocity,
+        lever_x
+      );
+}
+
+static int32_t pill_rb_cross_lever_normal(
+    int16_t lever_x,
+    int16_t lever_y,
+    int32_t normal_x_q12,
+    int32_t normal_y_q12
+) {
+  return (int32_t)(
+    ((int64_t)lever_x * normal_y_q12 -
+     (int64_t)lever_y * normal_x_q12) /
+    PILL_RB_PARAMETER_Q12
+  );
+}
+
+static void pill_rb_apply_impulse(
+    PillPhysicsBody *body,
+    int32_t impulse_q8,
+    int32_t normal_x_q12,
+    int32_t normal_y_q12,
+    int16_t lever_x,
+    int16_t lever_y,
+    int direction
+) {
+  body->vx_q8 += (int32_t)(
+    ((int64_t)direction * impulse_q8 *
+     normal_x_q12) /
+    PILL_RB_PARAMETER_Q12
+  );
+  body->vy_q8 += (int32_t)(
+    ((int64_t)direction * impulse_q8 *
+     normal_y_q12) /
+    PILL_RB_PARAMETER_Q12
+  );
+
+  const int32_t cross =
+      pill_rb_cross_lever_normal(
+        lever_x,
+        lever_y,
+        normal_x_q12,
+        normal_y_q12
+      );
+  const int32_t inertia = pill_rb_inertia(body);
+
+  body->angular_velocity += (int32_t)(
+    ((int64_t)direction * cross * impulse_q8 *
+     PILL_RB_RAD_TO_ANGLE_NUM) /
+    ((int64_t)PILL_PHYSICS_Q8 * inertia)
+  );
+
+  body->angular_velocity = pill_rb_clamp_int32(
+    body->angular_velocity,
+    -PILL_RB_MAX_ANGULAR,
+    PILL_RB_MAX_ANGULAR
+  );
+}
+
+static int32_t pill_rb_effective_mass_q8(
+    const PillPhysicsBody *first,
+    int16_t first_lever_x,
+    int16_t first_lever_y,
+    const PillPhysicsBody *second,
+    int16_t second_lever_x,
+    int16_t second_lever_y,
+    int32_t normal_x_q12,
+    int32_t normal_y_q12
+) {
+  int32_t denominator_q8 = PILL_PHYSICS_Q8;
+
+  const int32_t first_cross =
+      pill_rb_cross_lever_normal(
+        first_lever_x,
+        first_lever_y,
+        normal_x_q12,
+        normal_y_q12
+      );
+  denominator_q8 += (int32_t)(
+    ((int64_t)first_cross * first_cross *
+     PILL_PHYSICS_Q8) /
+    pill_rb_inertia(first)
+  );
+
+  if (second) {
+    denominator_q8 += PILL_PHYSICS_Q8;
+    const int32_t second_cross =
+        pill_rb_cross_lever_normal(
+          second_lever_x,
+          second_lever_y,
+          normal_x_q12,
+          normal_y_q12
+        );
+    denominator_q8 += (int32_t)(
+      ((int64_t)second_cross * second_cross *
+       PILL_PHYSICS_Q8) /
+      pill_rb_inertia(second)
+    );
+  }
+
+  return denominator_q8 > 0
+      ? denominator_q8
+      : PILL_PHYSICS_Q8;
+}
+
+static int32_t pill_rb_solve_contact_impulse(
+    PillPhysicsBody *first,
+    PillPhysicsBody *second,
+    int16_t first_lever_x,
+    int16_t first_lever_y,
+    int16_t second_lever_x,
+    int16_t second_lever_y,
+    int32_t normal_x_q12,
+    int32_t normal_y_q12
+) {
+  int32_t first_vx_q8;
+  int32_t first_vy_q8;
+  int32_t second_vx_q8 = 0;
+  int32_t second_vy_q8 = 0;
+
+  pill_rb_contact_velocity(
+    first,
+    first_lever_x,
+    first_lever_y,
+    &first_vx_q8,
+    &first_vy_q8
+  );
+
+  if (second) {
+    pill_rb_contact_velocity(
+      second,
+      second_lever_x,
+      second_lever_y,
+      &second_vx_q8,
+      &second_vy_q8
+    );
+  }
+
+  const int32_t relative_vx_q8 =
+      first_vx_q8 - second_vx_q8;
+  const int32_t relative_vy_q8 =
+      first_vy_q8 - second_vy_q8;
+  const int32_t normal_velocity_q8 = (int32_t)(
+    ((int64_t)relative_vx_q8 * normal_x_q12 +
+     (int64_t)relative_vy_q8 * normal_y_q12) /
+    PILL_RB_PARAMETER_Q12
+  );
+
+  if (normal_velocity_q8 >= 0) {
+    return 0;
+  }
+
+  const int32_t denominator_q8 =
+      pill_rb_effective_mass_q8(
+        first,
+        first_lever_x,
+        first_lever_y,
+        second,
+        second_lever_x,
+        second_lever_y,
+        normal_x_q12,
+        normal_y_q12
+      );
+
+  /*
+   * Resting contacts must not bounce. At tiny closing speeds the previous
+   * 20 % restitution re-injected energy every frame, especially where two
+   * walls constrained the same pill. Real impact bounce is retained only
+   * above the low-speed threshold.
+   */
+  const int32_t closing_speed_q8 =
+      -normal_velocity_q8;
+  const int32_t restitution_num =
+      closing_speed_q8 >
+          PILL_RB_RESTITUTION_SPEED_Q8
+          ? PILL_RB_RESTITUTION_NUM
+          : 0;
+  const int32_t normal_impulse_q8 = (int32_t)(
+    ((int64_t)closing_speed_q8 *
+     (PILL_RB_RESTITUTION_DEN +
+      restitution_num) *
+     PILL_PHYSICS_Q8) /
+    ((int64_t)PILL_RB_RESTITUTION_DEN *
+     denominator_q8)
+  );
+
+  pill_rb_apply_impulse(
+    first,
+    normal_impulse_q8,
+    normal_x_q12,
+    normal_y_q12,
+    first_lever_x,
+    first_lever_y,
+    1
+  );
+
+  if (second) {
+    pill_rb_apply_impulse(
+      second,
+      normal_impulse_q8,
+      normal_x_q12,
+      normal_y_q12,
+      second_lever_x,
+      second_lever_y,
+      -1
+    );
+  }
+
+  /* Coulomb friction at the same contact point. */
+  const int32_t tangent_x_q12 = -normal_y_q12;
+  const int32_t tangent_y_q12 = normal_x_q12;
+
+  pill_rb_contact_velocity(
+    first,
+    first_lever_x,
+    first_lever_y,
+    &first_vx_q8,
+    &first_vy_q8
+  );
+  if (second) {
+    pill_rb_contact_velocity(
+      second,
+      second_lever_x,
+      second_lever_y,
+      &second_vx_q8,
+      &second_vy_q8
+    );
+  }
+
+  const int32_t tangent_velocity_q8 = (int32_t)(
+    ((int64_t)(first_vx_q8 - second_vx_q8) *
+         tangent_x_q12 +
+     (int64_t)(first_vy_q8 - second_vy_q8) *
+         tangent_y_q12) /
+    PILL_RB_PARAMETER_Q12
+  );
+
+  const int32_t tangent_denominator_q8 =
+      pill_rb_effective_mass_q8(
+        first,
+        first_lever_x,
+        first_lever_y,
+        second,
+        second_lever_x,
+        second_lever_y,
+        tangent_x_q12,
+        tangent_y_q12
+      );
+
+  int32_t tangent_impulse_q8 = (int32_t)(
+    ((int64_t)(-tangent_velocity_q8) *
+     PILL_PHYSICS_Q8) /
+    tangent_denominator_q8
+  );
+  const int32_t friction_limit_q8 = (int32_t)(
+    ((int64_t)normal_impulse_q8 *
+     PILL_RB_FRICTION_NUM) /
+    PILL_RB_FRICTION_DEN
+  );
+
+  tangent_impulse_q8 = pill_rb_clamp_int32(
+    tangent_impulse_q8,
+    -friction_limit_q8,
+    friction_limit_q8
+  );
+
+  pill_rb_apply_impulse(
+    first,
+    tangent_impulse_q8,
+    tangent_x_q12,
+    tangent_y_q12,
+    first_lever_x,
+    first_lever_y,
+    1
+  );
+  if (second) {
+    pill_rb_apply_impulse(
+      second,
+      tangent_impulse_q8,
+      tangent_x_q12,
+      tangent_y_q12,
+      second_lever_x,
+      second_lever_y,
+      -1
+    );
+  }
+
+  return normal_impulse_q8;
+}
+
+static void pill_rb_initialize_body(
     PillPhysicsBody *body,
     uint8_t medication_index,
     uint8_t body_index
@@ -3177,88 +3675,64 @@ static void pill_physics_initialize_body(
     return;
   }
 
-  const uint8_t radius =
-      medication_appearance_collision_radius(
-        medication_index
-      );
+  uint8_t half_length;
+  uint8_t radius;
+  pill_rb_collision_geometry(
+    medication_index,
+    &half_length,
+    &radius
+  );
 
   int16_t arena_width = 228;
   int16_t arena_height = 228;
+  int16_t arena_y = 0;
 
   if (s_canvas_layer) {
-    const GRect bounds =
-        layer_get_bounds(s_canvas_layer);
+    const GRect bounds = layer_get_bounds(s_canvas_layer);
     arena_width = bounds.size.w;
     arena_height = bounds.size.h;
+    arena_y = (int16_t)current_pill_y();
   }
 
-  const uint8_t column = body_index % 4;
-  const uint8_t row = body_index / 4;
-  const int16_t cell_width = arena_width / 4;
-  int16_t x =
-      column * cell_width +
-      cell_width / 2;
-  int16_t y =
-      13 +
-      row * 24;
+  const uint8_t column = body_index % 3;
+  const uint8_t row = body_index / 3;
+  int16_t x = (int16_t)(
+    ((int32_t)(column * 2 + 1) * arena_width) / 6
+  );
+  int16_t screen_y = (int16_t)(22 + row * 38);
+  int16_t local_y = (int16_t)(screen_y - arena_y);
+  const int16_t extent =
+      radius + half_length + PILL_PHYSICS_EDGE_MARGIN;
 
-  x += (int16_t)((body_index * 7u) % 7u) - 3;
-  y += (int16_t)((body_index * 5u) % 5u) - 2;
-
-  const int16_t minimum_x =
-      radius + PILL_PHYSICS_EDGE_MARGIN;
-  const int16_t maximum_x =
-      arena_width - radius -
-      PILL_PHYSICS_EDGE_MARGIN;
-  /*
-   * Body-Y bleibt im bisherigen Pillen-Koordinatensystem. Nur dessen
-   * obere und untere Grenze werden auf die echten Displaykanten erweitert.
-   * Dadurch bleiben Zeichnung, Scrollen und die komplette Physik unverändert.
-   */
-  const int16_t arena_origin_y =
-      (arena_height - s_frame_height) / 2 +
-      CANVAS_START_OFFSET_Y;
-  const int16_t minimum_y =
-      radius + PILL_PHYSICS_EDGE_MARGIN -
-      arena_origin_y;
-  const int16_t maximum_y =
-      arena_height - radius -
-      PILL_PHYSICS_EDGE_MARGIN -
-      arena_origin_y;
-
-  if (x < minimum_x) {
-    x = minimum_x;
-  } else if (x > maximum_x) {
-    x = maximum_x;
+  if (x < extent) {
+    x = extent;
+  } else if (x > arena_width - extent) {
+    x = arena_width - extent;
   }
 
-  if (y < minimum_y) {
-    y = minimum_y;
-  } else if (y > maximum_y) {
-    y = maximum_y;
+  if (screen_y < extent) {
+    local_y = extent - arena_y;
+  } else if (screen_y > arena_height - extent) {
+    local_y = arena_height - extent - arena_y;
   }
 
   *body = (PillPhysicsBody) {
     .x_q8 = (int32_t)x * PILL_PHYSICS_Q8,
-    .y_q8 = (int32_t)y * PILL_PHYSICS_Q8,
-    .vx_q8 =
-        ((int32_t)(body_index % 3) - 1) *
-        (PILL_PHYSICS_Q8 / 3),
-    .vy_q8 =
-        ((int32_t)((body_index + 1) % 3) - 1) *
-        (PILL_PHYSICS_Q8 / 4),
+    .y_q8 = (int32_t)local_y * PILL_PHYSICS_Q8,
+    .vx_q8 = 0,
+    .vy_q8 = 0,
     .angle =
-        ((int32_t)body_index *
+        ((int32_t)(body_index * 5u + 1u) *
          TRIG_MAX_ANGLE) /
-        PILL_PHYSICS_MAX_BODIES,
+        32,
+    .angular_velocity = 0,
     .medication_index = medication_index,
-    .collision_radius = radius
+    .collision_radius = radius,
+    .collision_half_length = half_length
   };
 }
 
-static bool pill_physics_add_body(
-    uint8_t medication_index
-) {
+static bool pill_rb_add_body(uint8_t medication_index) {
   if (
     s_pill_physics_body_count >=
         PILL_PHYSICS_MAX_BODIES
@@ -3266,14 +3740,13 @@ static bool pill_physics_add_body(
     return false;
   }
 
-  pill_physics_initialize_body(
+  pill_rb_initialize_body(
     &s_pill_physics_bodies[
       s_pill_physics_body_count
     ],
     medication_index,
     s_pill_physics_body_count
   );
-
   s_pill_physics_body_count++;
   return true;
 }
@@ -3288,10 +3761,6 @@ static void pill_physics_rebuild(void) {
 
   uint8_t remaining[MAX_MEDICATIONS] = { 0 };
 
-  /*
-   * First pass: every due tablet medication gets at least one visible body.
-   * This keeps different medicines visible even when one has a high quantity.
-   */
   for (
     uint8_t index = 0;
     index < s_medication_count &&
@@ -3306,23 +3775,20 @@ static void pill_physics_rebuild(void) {
       continue;
     }
 
-    (void)pill_physics_add_body(index);
+    (void)pill_rb_add_body(index);
     remaining[index] =
         medication->quantity > 0
             ? medication->quantity - 1
             : 0;
   }
 
-  /* Additional prescribed pieces are distributed round-robin. */
   bool added = true;
-
   while (
     added &&
     s_pill_physics_body_count <
         PILL_PHYSICS_MAX_BODIES
   ) {
     added = false;
-
     for (
       uint8_t index = 0;
       index < s_medication_count &&
@@ -3333,8 +3799,7 @@ static void pill_physics_rebuild(void) {
       if (remaining[index] == 0) {
         continue;
       }
-
-      if (pill_physics_add_body(index)) {
+      if (pill_rb_add_body(index)) {
         remaining[index]--;
         added = true;
       }
@@ -3346,7 +3811,6 @@ static void pill_physics_rebuild(void) {
   s_pill_physics_last_target_x = 0;
   s_pill_physics_last_target_y = 0;
   s_pill_physics_quiet_frames = 0;
-  s_pill_physics_collision_phase = 0;
   s_pill_physics_sensor_quiet_samples = 0;
 
   if (s_canvas_layer) {
@@ -3354,315 +3818,605 @@ static void pill_physics_rebuild(void) {
   }
 }
 
-static uint32_t pill_physics_integer_sqrt(uint32_t value) {
-  uint32_t result = 0;
-  uint32_t bit = 1u << 30;
+static void pill_rb_closest_point_on_segment(
+    int32_t point_x_q8,
+    int32_t point_y_q8,
+    int32_t start_x_q8,
+    int32_t start_y_q8,
+    int32_t end_x_q8,
+    int32_t end_y_q8,
+    int32_t *closest_x_q8,
+    int32_t *closest_y_q8
+) {
+  const int32_t segment_x_q8 = end_x_q8 - start_x_q8;
+  const int32_t segment_y_q8 = end_y_q8 - start_y_q8;
+  const int64_t length_squared =
+      (int64_t)segment_x_q8 * segment_x_q8 +
+      (int64_t)segment_y_q8 * segment_y_q8;
 
-  while (bit > value) {
-    bit >>= 2;
+  if (length_squared <= 0) {
+    *closest_x_q8 = start_x_q8;
+    *closest_y_q8 = start_y_q8;
+    return;
   }
 
-  while (bit != 0) {
-    if (value >= result + bit) {
-      value -= result + bit;
-      result = (result >> 1) + bit;
-    } else {
-      result >>= 1;
-    }
+  int64_t parameter_q12 =
+      ((int64_t)(point_x_q8 - start_x_q8) *
+           segment_x_q8 +
+       (int64_t)(point_y_q8 - start_y_q8) *
+           segment_y_q8) *
+      PILL_RB_PARAMETER_Q12 /
+      length_squared;
 
-    bit >>= 2;
+  if (parameter_q12 < 0) {
+    parameter_q12 = 0;
+  } else if (parameter_q12 > PILL_RB_PARAMETER_Q12) {
+    parameter_q12 = PILL_RB_PARAMETER_Q12;
   }
 
-  return result;
+  *closest_x_q8 = start_x_q8 + (int32_t)(
+    ((int64_t)segment_x_q8 * parameter_q12) /
+    PILL_RB_PARAMETER_Q12
+  );
+  *closest_y_q8 = start_y_q8 + (int32_t)(
+    ((int64_t)segment_y_q8 * parameter_q12) /
+    PILL_RB_PARAMETER_Q12
+  );
 }
 
-static bool pill_physics_apply_edge_collision(
-    PillPhysicsBody *body,
-    int16_t arena_width,
-    int16_t arena_height,
-    int16_t drive_x,
-    int16_t drive_y
-);
-
-static bool pill_physics_resolve_body_collisions(
-    int16_t arena_width,
-    int16_t arena_height,
-    int16_t drive_x,
-    int16_t drive_y
+static int64_t pill_rb_cross_q8(
+    int32_t ax_q8,
+    int32_t ay_q8,
+    int32_t bx_q8,
+    int32_t by_q8
 ) {
-  bool had_contact = false;
+  return
+      (int64_t)ax_q8 * by_q8 -
+      (int64_t)ay_q8 * bx_q8;
+}
 
-  /*
-   * Position Based Dynamics: project overlapping circles apart directly.
-   * There is no bounce impulse and no dominant X/Y axis. With five pills
-   * this is only ten pairs per pass, so three passes are still very cheap.
-   */
-  for (
-    uint8_t iteration = 0;
-    iteration < PILL_PHYSICS_SOLVER_ITERATIONS;
-    iteration++
+static bool pill_rb_segment_intersection(
+    int32_t a0x_q8,
+    int32_t a0y_q8,
+    int32_t a1x_q8,
+    int32_t a1y_q8,
+    int32_t b0x_q8,
+    int32_t b0y_q8,
+    int32_t b1x_q8,
+    int32_t b1y_q8,
+    int32_t *intersection_x_q8,
+    int32_t *intersection_y_q8
+) {
+  const int32_t rx_q8 = a1x_q8 - a0x_q8;
+  const int32_t ry_q8 = a1y_q8 - a0y_q8;
+  const int32_t sx_q8 = b1x_q8 - b0x_q8;
+  const int32_t sy_q8 = b1y_q8 - b0y_q8;
+  const int32_t qpx_q8 = b0x_q8 - a0x_q8;
+  const int32_t qpy_q8 = b0y_q8 - a0y_q8;
+  const int64_t denominator =
+      pill_rb_cross_q8(
+        rx_q8,
+        ry_q8,
+        sx_q8,
+        sy_q8
+      );
+
+  if (denominator == 0) {
+    return false;
+  }
+
+  const int64_t t_numerator =
+      pill_rb_cross_q8(
+        qpx_q8,
+        qpy_q8,
+        sx_q8,
+        sy_q8
+      );
+  const int64_t u_numerator =
+      pill_rb_cross_q8(
+        qpx_q8,
+        qpy_q8,
+        rx_q8,
+        ry_q8
+      );
+
+  if (
+    (denominator > 0 &&
+     (t_numerator < 0 || t_numerator > denominator ||
+      u_numerator < 0 || u_numerator > denominator)) ||
+    (denominator < 0 &&
+     (t_numerator > 0 || t_numerator < denominator ||
+      u_numerator > 0 || u_numerator < denominator))
   ) {
-    bool iteration_had_pair_contact = false;
+    return false;
+  }
 
-    for (
-      uint8_t left_index = 0;
-      left_index < s_pill_physics_body_count;
-      left_index++
-    ) {
-      PillPhysicsBody *left =
-          &s_pill_physics_bodies[left_index];
+  const int64_t t_q12 =
+      t_numerator * PILL_RB_PARAMETER_Q12 /
+      denominator;
+  *intersection_x_q8 = a0x_q8 + (int32_t)(
+    ((int64_t)rx_q8 * t_q12) /
+    PILL_RB_PARAMETER_Q12
+  );
+  *intersection_y_q8 = a0y_q8 + (int32_t)(
+    ((int64_t)ry_q8 * t_q12) /
+    PILL_RB_PARAMETER_Q12
+  );
+  return true;
+}
 
-      for (
-        uint8_t right_index = left_index + 1;
-        right_index < s_pill_physics_body_count;
-        right_index++
-      ) {
-        PillPhysicsBody *right =
-            &s_pill_physics_bodies[right_index];
+static void pill_rb_consider_closest_pair(
+    int32_t candidate_ax_q8,
+    int32_t candidate_ay_q8,
+    int32_t candidate_bx_q8,
+    int32_t candidate_by_q8,
+    uint64_t *best_distance_squared,
+    int32_t *best_ax_q8,
+    int32_t *best_ay_q8,
+    int32_t *best_bx_q8,
+    int32_t *best_by_q8
+) {
+  const int64_t dx_q8 =
+      (int64_t)candidate_ax_q8 - candidate_bx_q8;
+  const int64_t dy_q8 =
+      (int64_t)candidate_ay_q8 - candidate_by_q8;
+  const uint64_t distance_squared = (uint64_t)(
+    dx_q8 * dx_q8 + dy_q8 * dy_q8
+  );
 
-        int32_t dx_q4 =
-            (right->x_q8 - left->x_q8) /
-            PILL_PHYSICS_Q8_PER_Q4;
-        int32_t dy_q4 =
-            (right->y_q8 - left->y_q8) /
-            PILL_PHYSICS_Q8_PER_Q4;
+  if (distance_squared >= *best_distance_squared) {
+    return;
+  }
 
-        const int32_t minimum_distance_q4 =
-            (
-              left->collision_radius +
-              right->collision_radius -
-              PILL_PHYSICS_CONTACT_SLOP_PX
-            ) * PILL_PHYSICS_Q4_PER_PIXEL;
+  *best_distance_squared = distance_squared;
+  *best_ax_q8 = candidate_ax_q8;
+  *best_ay_q8 = candidate_ay_q8;
+  *best_bx_q8 = candidate_bx_q8;
+  *best_by_q8 = candidate_by_q8;
+}
 
-        if (minimum_distance_q4 <= 0) {
-          continue;
-        }
+static void pill_rb_closest_segment_points(
+    const PillPhysicsBody *first,
+    const PillPhysicsBody *second,
+    int32_t *first_x_q8,
+    int32_t *first_y_q8,
+    int32_t *second_x_q8,
+    int32_t *second_y_q8
+) {
+  int32_t a0x_q8;
+  int32_t a0y_q8;
+  int32_t a1x_q8;
+  int32_t a1y_q8;
+  int32_t b0x_q8;
+  int32_t b0y_q8;
+  int32_t b1x_q8;
+  int32_t b1y_q8;
 
-        if (dx_q4 == 0 && dy_q4 == 0) {
-          switch ((left_index * 7u + right_index) & 3u) {
-            case 0:
-              dx_q4 = PILL_PHYSICS_Q4_PER_PIXEL;
-              break;
-            case 1:
-              dx_q4 = -PILL_PHYSICS_Q4_PER_PIXEL;
-              break;
-            case 2:
-              dy_q4 = PILL_PHYSICS_Q4_PER_PIXEL;
-              break;
-            default:
-              dy_q4 = -PILL_PHYSICS_Q4_PER_PIXEL;
-              break;
-          }
-        }
+  pill_rb_segment_endpoints(
+    first,
+    &a0x_q8,
+    &a0y_q8,
+    &a1x_q8,
+    &a1y_q8
+  );
+  pill_rb_segment_endpoints(
+    second,
+    &b0x_q8,
+    &b0y_q8,
+    &b1x_q8,
+    &b1y_q8
+  );
 
-        const uint32_t distance_squared_q4 =
-            (uint32_t)(dx_q4 * dx_q4) +
-            (uint32_t)(dy_q4 * dy_q4);
-        const uint32_t minimum_squared_q4 =
-            (uint32_t)(
-              minimum_distance_q4 *
-              minimum_distance_q4
-            );
+  int32_t intersection_x_q8;
+  int32_t intersection_y_q8;
+  if (
+    pill_rb_segment_intersection(
+      a0x_q8,
+      a0y_q8,
+      a1x_q8,
+      a1y_q8,
+      b0x_q8,
+      b0y_q8,
+      b1x_q8,
+      b1y_q8,
+      &intersection_x_q8,
+      &intersection_y_q8
+    )
+  ) {
+    *first_x_q8 = intersection_x_q8;
+    *first_y_q8 = intersection_y_q8;
+    *second_x_q8 = intersection_x_q8;
+    *second_y_q8 = intersection_y_q8;
+    return;
+  }
 
-        if (distance_squared_q4 >= minimum_squared_q4) {
-          continue;
-        }
+  uint64_t best_distance_squared = UINT64_MAX;
+  int32_t closest_x_q8;
+  int32_t closest_y_q8;
 
-        const int32_t distance_q4 = (int32_t)
-            pill_physics_integer_sqrt(
-              distance_squared_q4
-            );
+  pill_rb_closest_point_on_segment(
+    a0x_q8,
+    a0y_q8,
+    b0x_q8,
+    b0y_q8,
+    b1x_q8,
+    b1y_q8,
+    &closest_x_q8,
+    &closest_y_q8
+  );
+  pill_rb_consider_closest_pair(
+    a0x_q8,
+    a0y_q8,
+    closest_x_q8,
+    closest_y_q8,
+    &best_distance_squared,
+    first_x_q8,
+    first_y_q8,
+    second_x_q8,
+    second_y_q8
+  );
 
-        if (distance_q4 <= 0) {
-          continue;
-        }
+  pill_rb_closest_point_on_segment(
+    a1x_q8,
+    a1y_q8,
+    b0x_q8,
+    b0y_q8,
+    b1x_q8,
+    b1y_q8,
+    &closest_x_q8,
+    &closest_y_q8
+  );
+  pill_rb_consider_closest_pair(
+    a1x_q8,
+    a1y_q8,
+    closest_x_q8,
+    closest_y_q8,
+    &best_distance_squared,
+    first_x_q8,
+    first_y_q8,
+    second_x_q8,
+    second_y_q8
+  );
 
-        had_contact = true;
-        iteration_had_pair_contact = true;
+  pill_rb_closest_point_on_segment(
+    b0x_q8,
+    b0y_q8,
+    a0x_q8,
+    a0y_q8,
+    a1x_q8,
+    a1y_q8,
+    &closest_x_q8,
+    &closest_y_q8
+  );
+  pill_rb_consider_closest_pair(
+    closest_x_q8,
+    closest_y_q8,
+    b0x_q8,
+    b0y_q8,
+    &best_distance_squared,
+    first_x_q8,
+    first_y_q8,
+    second_x_q8,
+    second_y_q8
+  );
 
-        const int32_t penetration_q4 =
-            minimum_distance_q4 - distance_q4;
-        const int32_t correction_q8 =
-            penetration_q4 *
-            PILL_PHYSICS_Q8_PER_Q4;
-        const int32_t correction_x_q8 = (int32_t)(
-          ((int64_t)correction_q8 * dx_q4) /
-          ((int64_t)distance_q4 * 2)
-        );
-        const int32_t correction_y_q8 = (int32_t)(
-          ((int64_t)correction_q8 * dy_q4) /
-          ((int64_t)distance_q4 * 2)
-        );
+  pill_rb_closest_point_on_segment(
+    b1x_q8,
+    b1y_q8,
+    a0x_q8,
+    a0y_q8,
+    a1x_q8,
+    a1y_q8,
+    &closest_x_q8,
+    &closest_y_q8
+  );
+  pill_rb_consider_closest_pair(
+    closest_x_q8,
+    closest_y_q8,
+    b1x_q8,
+    b1y_q8,
+    &best_distance_squared,
+    first_x_q8,
+    first_y_q8,
+    second_x_q8,
+    second_y_q8
+  );
+}
 
-        left->x_q8 -= correction_x_q8;
-        left->y_q8 -= correction_y_q8;
-        right->x_q8 += correction_x_q8;
-        right->y_q8 += correction_y_q8;
+static bool pill_rb_solve_pair(
+    PillPhysicsBody *first,
+    PillPhysicsBody *second
+) {
+  int32_t first_line_x_q8;
+  int32_t first_line_y_q8;
+  int32_t second_line_x_q8;
+  int32_t second_line_y_q8;
 
-        /*
-         * Remove only closing speed along the contact normal. Tangential
-         * movement remains untouched, so pills can still slide naturally.
-         */
-        const int32_t relative_vx_q8 =
-            right->vx_q8 - left->vx_q8;
-        const int32_t relative_vy_q8 =
-            right->vy_q8 - left->vy_q8;
-        const int64_t normal_velocity_dot =
-            (int64_t)relative_vx_q8 * dx_q4 +
-            (int64_t)relative_vy_q8 * dy_q4;
+  pill_rb_closest_segment_points(
+    first,
+    second,
+    &first_line_x_q8,
+    &first_line_y_q8,
+    &second_line_x_q8,
+    &second_line_y_q8
+  );
 
-        if (normal_velocity_dot < 0) {
-          const int64_t denominator =
-              (int64_t)distance_squared_q4 * 2;
-          const int32_t impulse_x_q8 = (int32_t)(
-            ((-normal_velocity_dot) * dx_q4) /
-            denominator
-          );
-          const int32_t impulse_y_q8 = (int32_t)(
-            ((-normal_velocity_dot) * dy_q4) /
-            denominator
-          );
+  int32_t delta_x_q8 =
+      first_line_x_q8 - second_line_x_q8;
+  int32_t delta_y_q8 =
+      first_line_y_q8 - second_line_y_q8;
+  uint64_t distance_squared =
+      (uint64_t)((int64_t)delta_x_q8 * delta_x_q8) +
+      (uint64_t)((int64_t)delta_y_q8 * delta_y_q8);
+  int32_t distance_q8 = (int32_t)
+      pill_rb_integer_sqrt64(distance_squared);
+  const int32_t minimum_distance_q8 =
+      (first->collision_radius +
+       second->collision_radius) *
+      PILL_PHYSICS_Q8;
 
-          left->vx_q8 -= impulse_x_q8;
-          left->vy_q8 -= impulse_y_q8;
-          right->vx_q8 += impulse_x_q8;
-          right->vy_q8 += impulse_y_q8;
-        }
+  if (distance_q8 >= minimum_distance_q8) {
+    return false;
+  }
+
+  if (distance_q8 <= 0) {
+    delta_x_q8 = first->x_q8 - second->x_q8;
+    delta_y_q8 = first->y_q8 - second->y_q8;
+    distance_squared =
+        (uint64_t)((int64_t)delta_x_q8 * delta_x_q8) +
+        (uint64_t)((int64_t)delta_y_q8 * delta_y_q8);
+    distance_q8 = (int32_t)
+        pill_rb_integer_sqrt64(distance_squared);
+
+    if (distance_q8 <= 0) {
+      delta_x_q8 = PILL_PHYSICS_Q8;
+      delta_y_q8 = 0;
+      distance_q8 = PILL_PHYSICS_Q8;
+    }
+  }
+
+  const int32_t normal_x_q12 = (int32_t)(
+    ((int64_t)delta_x_q8 *
+     PILL_RB_PARAMETER_Q12) /
+    distance_q8
+  );
+  const int32_t normal_y_q12 = (int32_t)(
+    ((int64_t)delta_y_q8 *
+     PILL_RB_PARAMETER_Q12) /
+    distance_q8
+  );
+  int32_t penetration_q8 =
+      minimum_distance_q8 - distance_q8;
+
+  if (penetration_q8 > PILL_RB_POSITION_SLOP_Q8) {
+    penetration_q8 -= PILL_RB_POSITION_SLOP_Q8;
+    const int32_t correction_x_q8 = (int32_t)(
+      ((int64_t)normal_x_q12 * penetration_q8) /
+      (PILL_RB_PARAMETER_Q12 * 2)
+    );
+    const int32_t correction_y_q8 = (int32_t)(
+      ((int64_t)normal_y_q12 * penetration_q8) /
+      (PILL_RB_PARAMETER_Q12 * 2)
+    );
+    first->x_q8 += correction_x_q8;
+    first->y_q8 += correction_y_q8;
+    second->x_q8 -= correction_x_q8;
+    second->y_q8 -= correction_y_q8;
+  }
+
+  const int32_t first_surface_x_q8 =
+      first_line_x_q8 - (int32_t)(
+        ((int64_t)normal_x_q12 *
+         first->collision_radius *
+         PILL_PHYSICS_Q8) /
+        PILL_RB_PARAMETER_Q12
+      );
+  const int32_t first_surface_y_q8 =
+      first_line_y_q8 - (int32_t)(
+        ((int64_t)normal_y_q12 *
+         first->collision_radius *
+         PILL_PHYSICS_Q8) /
+        PILL_RB_PARAMETER_Q12
+      );
+  const int32_t second_surface_x_q8 =
+      second_line_x_q8 + (int32_t)(
+        ((int64_t)normal_x_q12 *
+         second->collision_radius *
+         PILL_PHYSICS_Q8) /
+        PILL_RB_PARAMETER_Q12
+      );
+  const int32_t second_surface_y_q8 =
+      second_line_y_q8 + (int32_t)(
+        ((int64_t)normal_y_q12 *
+         second->collision_radius *
+         PILL_PHYSICS_Q8) /
+        PILL_RB_PARAMETER_Q12
+      );
+  const int32_t contact_x_q8 =
+      (first_surface_x_q8 + second_surface_x_q8) / 2;
+  const int32_t contact_y_q8 =
+      (first_surface_y_q8 + second_surface_y_q8) / 2;
+
+  pill_rb_solve_contact_impulse(
+    first,
+    second,
+    (int16_t)(
+      (contact_x_q8 - first->x_q8) /
+      PILL_PHYSICS_Q8
+    ),
+    (int16_t)(
+      (contact_y_q8 - first->y_q8) /
+      PILL_PHYSICS_Q8
+    ),
+    (int16_t)(
+      (contact_x_q8 - second->x_q8) /
+      PILL_PHYSICS_Q8
+    ),
+    (int16_t)(
+      (contact_y_q8 - second->y_q8) /
+      PILL_PHYSICS_Q8
+    ),
+    normal_x_q12,
+    normal_y_q12
+  );
+  return true;
+}
+
+static bool pill_rb_solve_wall(
+    PillPhysicsBody *body,
+    uint8_t wall,
+    int32_t minimum_x_q8,
+    int32_t maximum_x_q8,
+    int32_t minimum_y_q8,
+    int32_t maximum_y_q8
+) {
+  int32_t ax_q8;
+  int32_t ay_q8;
+  int32_t bx_q8;
+  int32_t by_q8;
+  pill_rb_segment_endpoints(
+    body,
+    &ax_q8,
+    &ay_q8,
+    &bx_q8,
+    &by_q8
+  );
+
+  const int32_t radius_q8 =
+      body->collision_radius * PILL_PHYSICS_Q8;
+  int32_t penetration_q8 = 0;
+  int32_t normal_x_q12 = 0;
+  int32_t normal_y_q12 = 0;
+  int32_t support_x_q8 = body->x_q8;
+  int32_t support_y_q8 = body->y_q8;
+
+  switch (wall) {
+    case 0: {
+      const int32_t minimum_surface_q8 =
+          (ax_q8 < bx_q8 ? ax_q8 : bx_q8) -
+          radius_q8;
+      penetration_q8 =
+          minimum_x_q8 - minimum_surface_q8;
+      normal_x_q12 = PILL_RB_PARAMETER_Q12;
+      if (abs_int32(ax_q8 - bx_q8) <= PILL_RB_FLAT_CONTACT_TOLERANCE_Q8) {
+        support_x_q8 = (ax_q8 + bx_q8) / 2;
+        support_y_q8 = (ay_q8 + by_q8) / 2;
+      } else if (ax_q8 < bx_q8) {
+        support_x_q8 = ax_q8;
+        support_y_q8 = ay_q8;
+      } else {
+        support_x_q8 = bx_q8;
+        support_y_q8 = by_q8;
       }
+      break;
     }
-
-    /* Walls are constraints too. Applying them in every pass prevents a
-     * corner pile from being pushed through a wall and corrected next frame.
-     */
-    for (
-      uint8_t index = 0;
-      index < s_pill_physics_body_count;
-      index++
-    ) {
-      had_contact |=
-          pill_physics_apply_edge_collision(
-            &s_pill_physics_bodies[index],
-            arena_width,
-            arena_height,
-            drive_x,
-            drive_y
-          );
+    case 1: {
+      const int32_t maximum_surface_q8 =
+          (ax_q8 > bx_q8 ? ax_q8 : bx_q8) +
+          radius_q8;
+      penetration_q8 =
+          maximum_surface_q8 - maximum_x_q8;
+      normal_x_q12 = -PILL_RB_PARAMETER_Q12;
+      if (abs_int32(ax_q8 - bx_q8) <= PILL_RB_FLAT_CONTACT_TOLERANCE_Q8) {
+        support_x_q8 = (ax_q8 + bx_q8) / 2;
+        support_y_q8 = (ay_q8 + by_q8) / 2;
+      } else if (ax_q8 > bx_q8) {
+        support_x_q8 = ax_q8;
+        support_y_q8 = ay_q8;
+      } else {
+        support_x_q8 = bx_q8;
+        support_y_q8 = by_q8;
+      }
+      break;
     }
-
-    if (!iteration_had_pair_contact) {
+    case 2: {
+      const int32_t minimum_surface_q8 =
+          (ay_q8 < by_q8 ? ay_q8 : by_q8) -
+          radius_q8;
+      penetration_q8 =
+          minimum_y_q8 - minimum_surface_q8;
+      normal_y_q12 = PILL_RB_PARAMETER_Q12;
+      if (abs_int32(ay_q8 - by_q8) <= PILL_RB_FLAT_CONTACT_TOLERANCE_Q8) {
+        support_x_q8 = (ax_q8 + bx_q8) / 2;
+        support_y_q8 = (ay_q8 + by_q8) / 2;
+      } else if (ay_q8 < by_q8) {
+        support_x_q8 = ax_q8;
+        support_y_q8 = ay_q8;
+      } else {
+        support_x_q8 = bx_q8;
+        support_y_q8 = by_q8;
+      }
+      break;
+    }
+    case 3:
+    default: {
+      const int32_t maximum_surface_q8 =
+          (ay_q8 > by_q8 ? ay_q8 : by_q8) +
+          radius_q8;
+      penetration_q8 =
+          maximum_surface_q8 - maximum_y_q8;
+      normal_y_q12 = -PILL_RB_PARAMETER_Q12;
+      if (abs_int32(ay_q8 - by_q8) <= PILL_RB_FLAT_CONTACT_TOLERANCE_Q8) {
+        support_x_q8 = (ax_q8 + bx_q8) / 2;
+        support_y_q8 = (ay_q8 + by_q8) / 2;
+      } else if (ay_q8 > by_q8) {
+        support_x_q8 = ax_q8;
+        support_y_q8 = ay_q8;
+      } else {
+        support_x_q8 = bx_q8;
+        support_y_q8 = by_q8;
+      }
       break;
     }
   }
 
-  return had_contact;
-}
-
-static int32_t pill_physics_bounced_velocity(
-    int32_t velocity
-) {
-  if (
-    abs_int32(velocity) <=
-        PILL_PHYSICS_SETTLE_VELOCITY_Q8
-  ) {
-    return 0;
+  if (penetration_q8 <= 0) {
+    return false;
   }
 
-  return
-      -velocity *
-      PILL_PHYSICS_BOUNCE_NUM /
-      PILL_PHYSICS_BOUNCE_DEN;
+  body->x_q8 += (int32_t)(
+    ((int64_t)normal_x_q12 * penetration_q8) /
+    PILL_RB_PARAMETER_Q12
+  );
+  body->y_q8 += (int32_t)(
+    ((int64_t)normal_y_q12 * penetration_q8) /
+    PILL_RB_PARAMETER_Q12
+  );
+
+  const int32_t contact_x_q8 =
+      support_x_q8 - (int32_t)(
+        ((int64_t)normal_x_q12 * radius_q8) /
+        PILL_RB_PARAMETER_Q12
+      );
+  const int32_t contact_y_q8 =
+      support_y_q8 - (int32_t)(
+        ((int64_t)normal_y_q12 * radius_q8) /
+        PILL_RB_PARAMETER_Q12
+      );
+
+  pill_rb_solve_contact_impulse(
+    body,
+    NULL,
+    (int16_t)(
+      (contact_x_q8 - body->x_q8) /
+      PILL_PHYSICS_Q8
+    ),
+    (int16_t)(
+      (contact_y_q8 - body->y_q8) /
+      PILL_PHYSICS_Q8
+    ),
+    0,
+    0,
+    normal_x_q12,
+    normal_y_q12
+  );
+
+  return true;
 }
 
-static bool pill_physics_apply_edge_collision(
-    PillPhysicsBody *body,
-    int16_t arena_width,
-    int16_t arena_height,
-    int16_t drive_x,
-    int16_t drive_y
-) {
-  bool supported = false;
-
-  const int32_t minimum_x_q8 =
-      (body->collision_radius +
-       PILL_PHYSICS_EDGE_MARGIN) *
-      PILL_PHYSICS_Q8;
-  const int32_t maximum_x_q8 =
-      (arena_width -
-       body->collision_radius -
-       PILL_PHYSICS_EDGE_MARGIN) *
-      PILL_PHYSICS_Q8;
-  const int16_t arena_origin_y =
-      (arena_height - s_frame_height) / 2 +
-      CANVAS_START_OFFSET_Y;
-  const int32_t minimum_y_q8 =
-      (body->collision_radius +
-       PILL_PHYSICS_EDGE_MARGIN -
-       arena_origin_y) *
-      PILL_PHYSICS_Q8;
-  const int32_t maximum_y_q8 =
-      (arena_height -
-       body->collision_radius -
-       PILL_PHYSICS_EDGE_MARGIN -
-       arena_origin_y) *
-      PILL_PHYSICS_Q8;
-
-  if (body->x_q8 <= minimum_x_q8) {
-    body->x_q8 = minimum_x_q8;
-    if (drive_x < 0) {
-      body->vx_q8 = 0;
-      supported = true;
-    } else if (body->vx_q8 < 0) {
-      body->vx_q8 =
-          pill_physics_bounced_velocity(
-            body->vx_q8
-          );
-    }
-  } else if (body->x_q8 >= maximum_x_q8) {
-    body->x_q8 = maximum_x_q8;
-    if (drive_x > 0) {
-      body->vx_q8 = 0;
-      supported = true;
-    } else if (body->vx_q8 > 0) {
-      body->vx_q8 =
-          pill_physics_bounced_velocity(
-            body->vx_q8
-          );
-    }
-  }
-
-  if (body->y_q8 <= minimum_y_q8) {
-    body->y_q8 = minimum_y_q8;
-    if (drive_y < 0) {
-      body->vy_q8 = 0;
-      supported = true;
-    } else if (body->vy_q8 < 0) {
-      body->vy_q8 =
-          pill_physics_bounced_velocity(
-            body->vy_q8
-          );
-    }
-  } else if (body->y_q8 >= maximum_y_q8) {
-    body->y_q8 = maximum_y_q8;
-    if (drive_y > 0) {
-      body->vy_q8 = 0;
-      supported = true;
-    } else if (body->vy_q8 > 0) {
-      body->vy_q8 =
-          pill_physics_bounced_velocity(
-            body->vy_q8
-          );
-    }
-  }
-
-  return supported;
-}
-
-/* The scheduler is defined next and needs this callback declaration. */
 static void pill_physics_tick(void *context);
 
-static void pill_physics_schedule_tick(
-    uint32_t delay_ms
-) {
+static void pill_physics_schedule_tick(uint32_t delay_ms) {
   if (
     s_pill_physics_timer ||
     !s_pill_physics_window_visible ||
@@ -3678,130 +4432,6 @@ static void pill_physics_schedule_tick(
     pill_physics_tick,
     NULL
   );
-}
-
-static int16_t pill_physics_tilt_magnitude(
-    int16_t x,
-    int16_t y
-) {
-  const int16_t abs_x = x < 0 ? -x : x;
-  const int16_t abs_y = y < 0 ? -y : y;
-  const int16_t maximum =
-      abs_x > abs_y ? abs_x : abs_y;
-  const int16_t minimum =
-      abs_x > abs_y ? abs_y : abs_x;
-
-  /* Fast circular approximation: max + half of min. No square root. */
-  return (int16_t)(maximum + minimum / 2);
-}
-
-static uint8_t pill_physics_size_percent_for_body(
-    const PillPhysicsBody *body
-) {
-  if (
-    !body ||
-    body->medication_index >=
-        s_medication_appearance_count
-  ) {
-    return 100;
-  }
-
-  const MedicationAppearance *appearance =
-      &s_medication_appearances[
-        body->medication_index
-      ];
-
-  if (
-    !appearance->valid ||
-    appearance->size < 60 ||
-    appearance->size > 140
-  ) {
-    return 100;
-  }
-
-  return appearance->size;
-}
-
-static int16_t pill_physics_static_friction_for_body(
-    const PillPhysicsBody *body
-) {
-  const uint8_t size =
-      pill_physics_size_percent_for_body(body);
-
-  /*
-   * 60 %  -> 160 mg: starts rolling first
-   * 100 % -> 220 mg: previous behaviour
-   * 140 % -> 280 mg: starts rolling last
-   */
-  return (int16_t)(
-    PILL_PHYSICS_SIZE_STATIC_FRICTION_MIN_MG +
-    (
-      (int32_t)(
-        PILL_PHYSICS_SIZE_STATIC_FRICTION_MAX_MG -
-        PILL_PHYSICS_SIZE_STATIC_FRICTION_MIN_MG
-      ) *
-      (size - 60) +
-      40
-    ) /
-    80
-  );
-}
-
-static void pill_physics_drive_for_threshold(
-    int16_t static_friction_mg,
-    int16_t *drive_x,
-    int16_t *drive_y
-) {
-  const int16_t magnitude =
-      pill_physics_tilt_magnitude(
-        s_pill_physics_gravity_x,
-        s_pill_physics_gravity_y
-      );
-
-  if (magnitude <= static_friction_mg) {
-    *drive_x = 0;
-    *drive_y = 0;
-    return;
-  }
-
-  const int16_t active_magnitude =
-      magnitude -
-      PILL_PHYSICS_KINETIC_FRICTION_MG;
-
-  *drive_x = (int16_t)(
-    ((int32_t)s_pill_physics_gravity_x *
-     active_magnitude) /
-    magnitude
-  );
-  *drive_y = (int16_t)(
-    ((int32_t)s_pill_physics_gravity_y *
-     active_magnitude) /
-    magnitude
-  );
-}
-
-static int32_t pill_physics_apply_friction(
-    int32_t velocity,
-    bool driven
-) {
-  const int32_t friction =
-      driven
-          ? PILL_PHYSICS_ROLLING_FRICTION_Q8
-          : PILL_PHYSICS_REST_FRICTION_Q8;
-
-  if (velocity > 0) {
-    return velocity <= friction
-        ? 0
-        : velocity - friction;
-  }
-
-  if (velocity < 0) {
-    return -velocity <= friction
-        ? 0
-        : velocity + friction;
-  }
-
-  return 0;
 }
 
 static void pill_physics_tick(void *context) {
@@ -3828,26 +4458,30 @@ static void pill_physics_tick(void *context) {
 
   int16_t arena_width = 228;
   int16_t arena_height = 228;
+  int16_t arena_y = 0;
 
   if (s_canvas_layer) {
-    const GRect bounds =
-        layer_get_bounds(s_canvas_layer);
+    const GRect bounds = layer_get_bounds(s_canvas_layer);
     arena_width = bounds.size.w;
     arena_height = bounds.size.h;
+    arena_y = (int16_t)current_pill_y();
   }
 
-  int16_t collision_drive_x;
-  int16_t collision_drive_y;
-  pill_physics_drive_for_threshold(
-    PILL_PHYSICS_SIZE_STATIC_FRICTION_MIN_MG,
-    &collision_drive_x,
-    &collision_drive_y
-  );
+  const int32_t minimum_x_q8 =
+      PILL_PHYSICS_EDGE_MARGIN * PILL_PHYSICS_Q8;
+  const int32_t maximum_x_q8 =
+      (arena_width - PILL_PHYSICS_EDGE_MARGIN) *
+      PILL_PHYSICS_Q8;
+  const int32_t minimum_y_q8 =
+      (PILL_PHYSICS_EDGE_MARGIN - arena_y) *
+      PILL_PHYSICS_Q8;
+  const int32_t maximum_y_q8 =
+      (arena_height - PILL_PHYSICS_EDGE_MARGIN - arena_y) *
+      PILL_PHYSICS_Q8;
 
   int32_t old_x_q8[PILL_PHYSICS_MAX_BODIES];
   int32_t old_y_q8[PILL_PHYSICS_MAX_BODIES];
-  uint8_t old_angle[PILL_PHYSICS_MAX_BODIES];
-  bool stable_contact = false;
+  int32_t old_angle[PILL_PHYSICS_MAX_BODIES];
 
   for (
     uint8_t index = 0;
@@ -3856,125 +4490,112 @@ static void pill_physics_tick(void *context) {
   ) {
     PillPhysicsBody *body =
         &s_pill_physics_bodies[index];
-    int16_t body_drive_x;
-    int16_t body_drive_y;
-    pill_physics_drive_for_threshold(
-      pill_physics_static_friction_for_body(body),
-      &body_drive_x,
-      &body_drive_y
-    );
-    const bool body_driven =
-        body_drive_x != 0 ||
-        body_drive_y != 0;
-
     old_x_q8[index] = body->x_q8;
     old_y_q8[index] = body->y_q8;
-    old_angle[index] = (uint8_t)(
-      body->angle / PILL_PHYSICS_ANGLE_BUCKET
-    );
+    old_angle[index] = body->angle;
 
     body->vx_q8 +=
-        body_drive_x /
-        PILL_PHYSICS_ACCEL_DIVISOR;
+        s_pill_physics_gravity_x /
+        PILL_RB_ACCEL_DIVISOR;
     body->vy_q8 +=
-        body_drive_y /
-        PILL_PHYSICS_ACCEL_DIVISOR;
+        s_pill_physics_gravity_y /
+        PILL_RB_ACCEL_DIVISOR;
 
-    body->vx_q8 =
-        pill_physics_apply_friction(
-          body->vx_q8,
-          body_driven
-        );
-    body->vy_q8 =
-        pill_physics_apply_friction(
-          body->vy_q8,
-          body_driven
-        );
-
-    body->vx_q8 = clamp_symmetric(
+    body->vx_q8 = pill_rb_clamp_int32(
       body->vx_q8,
-      PILL_PHYSICS_MAX_VELOCITY_Q8
+      -PILL_RB_MAX_LINEAR_Q8,
+      PILL_RB_MAX_LINEAR_Q8
     );
-    body->vy_q8 = clamp_symmetric(
+    body->vy_q8 = pill_rb_clamp_int32(
       body->vy_q8,
-      PILL_PHYSICS_MAX_VELOCITY_Q8
+      -PILL_RB_MAX_LINEAR_Q8,
+      PILL_RB_MAX_LINEAR_Q8
+    );
+
+    body->angular_velocity = (int32_t)(
+      ((int64_t)body->angular_velocity *
+       PILL_RB_ANGULAR_DAMPING_NUM) /
+      PILL_RB_ANGULAR_DAMPING_DEN
     );
 
     body->x_q8 += body->vx_q8;
     body->y_q8 += body->vy_q8;
-
-    stable_contact |=
-        pill_physics_apply_edge_collision(
-          body,
-          arena_width,
-          arena_height,
-          body_drive_x,
-          body_drive_y
-        );
+    body->angle = pill_rb_clamp_angle(
+      body->angle + body->angular_velocity
+    );
   }
 
-  s_pill_physics_collision_phase++;
-  if (
-    s_pill_physics_collision_phase >=
-        PILL_PHYSICS_COLLISION_INTERVAL
-  ) {
-    s_pill_physics_collision_phase = 0;
-    stable_contact |=
-        pill_physics_resolve_body_collisions(
-          arena_width,
-          arena_height,
-          collision_drive_x,
-          collision_drive_y
-        );
-  }
-
-  /*
-   * Rotate only by real final movement. The same real movement is also the
-   * sleep criterion: attempted velocity into a wall must not keep a quiet
-   * pile awake forever.
-   */
-  int32_t maximum_travel_q8 = 0;
+  bool had_contact = false;
 
   for (
-    uint8_t index = 0;
-    index < s_pill_physics_body_count;
-    index++
+    uint8_t iteration = 0;
+    iteration < PILL_RB_SOLVER_ITERATIONS;
+    iteration++
   ) {
-    PillPhysicsBody *body =
-        &s_pill_physics_bodies[index];
-    const int32_t travel_x_q8 =
-        body->x_q8 - old_x_q8[index];
-    const int32_t travel_y_q8 =
-        body->y_q8 - old_y_q8[index];
-    const int32_t travel_q8 =
-        abs_int32(travel_x_q8) +
-        abs_int32(travel_y_q8);
-
-    if (travel_q8 > maximum_travel_q8) {
-      maximum_travel_q8 = travel_q8;
-    }
-
-    if (
-      travel_q8 <
-          PILL_PHYSICS_ROTATION_MIN_TRAVEL_Q8
+    for (
+      uint8_t index = 0;
+      index < s_pill_physics_body_count;
+      index++
     ) {
-      continue;
+      PillPhysicsBody *body =
+          &s_pill_physics_bodies[index];
+      had_contact |= pill_rb_solve_wall(
+        body,
+        0,
+        minimum_x_q8,
+        maximum_x_q8,
+        minimum_y_q8,
+        maximum_y_q8
+      );
+      had_contact |= pill_rb_solve_wall(
+        body,
+        1,
+        minimum_x_q8,
+        maximum_x_q8,
+        minimum_y_q8,
+        maximum_y_q8
+      );
+      had_contact |= pill_rb_solve_wall(
+        body,
+        2,
+        minimum_x_q8,
+        maximum_x_q8,
+        minimum_y_q8,
+        maximum_y_q8
+      );
+      had_contact |= pill_rb_solve_wall(
+        body,
+        3,
+        minimum_x_q8,
+        maximum_x_q8,
+        minimum_y_q8,
+        maximum_y_q8
+      );
     }
 
-    body->angle +=
-        travel_x_q8 * 2 -
-        travel_y_q8;
-
-    while (body->angle < 0) {
-      body->angle += TRIG_MAX_ANGLE;
-    }
-    while (body->angle >= TRIG_MAX_ANGLE) {
-      body->angle -= TRIG_MAX_ANGLE;
+    for (
+      uint8_t first_index = 0;
+      first_index < s_pill_physics_body_count;
+      first_index++
+    ) {
+      for (
+        uint8_t second_index = first_index + 1;
+        second_index < s_pill_physics_body_count;
+        second_index++
+      ) {
+        had_contact |= pill_rb_solve_pair(
+          &s_pill_physics_bodies[first_index],
+          &s_pill_physics_bodies[second_index]
+        );
+      }
     }
   }
 
   bool visual_changed = false;
-  int32_t maximum_velocity_q8 = 0;
+  bool moving = false;
+  const bool resting_contact_candidate =
+      had_contact &&
+      s_pill_physics_sensor_quiet_samples >= 3;
 
   for (
     uint8_t index = 0;
@@ -3983,37 +4604,53 @@ static void pill_physics_tick(void *context) {
   ) {
     PillPhysicsBody *body =
         &s_pill_physics_bodies[index];
-    const int16_t new_x = (int16_t)(
-      body->x_q8 / PILL_PHYSICS_Q8
-    );
-    const int16_t new_y = (int16_t)(
-      body->y_q8 / PILL_PHYSICS_Q8
-    );
-    const uint8_t new_angle = (uint8_t)(
-      body->angle / PILL_PHYSICS_ANGLE_BUCKET
-    );
-    const int32_t speed_x =
-        abs_int32(body->vx_q8);
-    const int32_t speed_y =
-        abs_int32(body->vy_q8);
+
+    /*
+     * Remove solver noise inside a resting contact dead band. This is only
+     * active while the watch sensor is quiet and at least one contact exists;
+     * a real tilt change wakes the complete simulation again.
+     */
+    if (resting_contact_candidate) {
+      if (
+        abs_int32(body->vx_q8) <=
+            PILL_RB_SLEEP_LINEAR_Q8
+      ) {
+        body->vx_q8 = 0;
+      }
+      if (
+        abs_int32(body->vy_q8) <=
+            PILL_RB_SLEEP_LINEAR_Q8
+      ) {
+        body->vy_q8 = 0;
+      }
+      if (
+        abs_int32(body->angular_velocity) <=
+            PILL_RB_SLEEP_ANGULAR
+      ) {
+        body->angular_velocity = 0;
+      }
+    }
 
     if (
-      new_x != (int16_t)(
-        old_x_q8[index] / PILL_PHYSICS_Q8
-      ) ||
-      new_y != (int16_t)(
-        old_y_q8[index] / PILL_PHYSICS_Q8
-      ) ||
-      new_angle != old_angle[index]
+      body->x_q8 / PILL_PHYSICS_Q8 !=
+          old_x_q8[index] / PILL_PHYSICS_Q8 ||
+      body->y_q8 / PILL_PHYSICS_Q8 !=
+          old_y_q8[index] / PILL_PHYSICS_Q8 ||
+      body->angle / PILL_PHYSICS_ANGLE_BUCKET !=
+          old_angle[index] / PILL_PHYSICS_ANGLE_BUCKET
     ) {
       visual_changed = true;
     }
 
-    if (speed_x > maximum_velocity_q8) {
-      maximum_velocity_q8 = speed_x;
-    }
-    if (speed_y > maximum_velocity_q8) {
-      maximum_velocity_q8 = speed_y;
+    if (
+      abs_int32(body->vx_q8) >
+          PILL_RB_SLEEP_LINEAR_Q8 ||
+      abs_int32(body->vy_q8) >
+          PILL_RB_SLEEP_LINEAR_Q8 ||
+      abs_int32(body->angular_velocity) >
+          PILL_RB_SLEEP_ANGULAR
+    ) {
+      moving = true;
     }
   }
 
@@ -4021,33 +4658,19 @@ static void pill_physics_tick(void *context) {
     layer_mark_dirty(s_canvas_layer);
   }
 
-  const bool stable_pile =
-      stable_contact &&
-      s_pill_physics_sensor_quiet_samples >=
-          PILL_PHYSICS_SENSOR_STILL_SAMPLES &&
-      maximum_travel_q8 <=
-          PILL_PHYSICS_PILE_SLEEP_TRAVEL_Q8;
-
-  const bool naturally_still =
-      !visual_changed &&
-      maximum_velocity_q8 <=
-          PILL_PHYSICS_SLEEP_VELOCITY_Q8;
-
-  if (stable_pile || naturally_still) {
-    if (
-      s_pill_physics_quiet_frames <
-          PILL_PHYSICS_SLEEP_FRAMES
-    ) {
+  if (
+    had_contact &&
+    !moving &&
+    s_pill_physics_sensor_quiet_samples >= 3
+  ) {
+    if (s_pill_physics_quiet_frames < 255) {
       s_pill_physics_quiet_frames++;
     }
   } else {
     s_pill_physics_quiet_frames = 0;
   }
 
-  if (
-    s_pill_physics_quiet_frames >=
-        PILL_PHYSICS_SLEEP_FRAMES
-  ) {
+  if (s_pill_physics_quiet_frames >= PILL_RB_SLEEP_FRAMES) {
     for (
       uint8_t index = 0;
       index < s_pill_physics_body_count;
@@ -4055,15 +4678,15 @@ static void pill_physics_tick(void *context) {
     ) {
       s_pill_physics_bodies[index].vx_q8 = 0;
       s_pill_physics_bodies[index].vy_q8 = 0;
+      s_pill_physics_bodies[index].angular_velocity = 0;
     }
-
     return;
   }
 
   pill_physics_schedule_tick(
     s_alarm_active
-        ? PILL_PHYSICS_ALARM_FRAME_MS
-        : PILL_PHYSICS_FRAME_MS
+        ? PILL_RB_ALARM_FRAME_MS
+        : PILL_RB_FRAME_MS
   );
 }
 
@@ -4075,8 +4698,7 @@ static void pill_physics_accel_handler(
     return;
   }
 
-  const AccelData sample =
-      data[num_samples - 1];
+  const AccelData sample = data[num_samples - 1];
 
   if (sample.did_vibrate) {
     return;
@@ -4084,44 +4706,23 @@ static void pill_physics_accel_handler(
 
   const int16_t target_x = sample.x;
   const int16_t target_y = (int16_t)-sample.y;
-  const int16_t old_magnitude =
-      pill_physics_tilt_magnitude(
-        s_pill_physics_gravity_x,
-        s_pill_physics_gravity_y
-      );
 
-  /* 87.5 % neuer Messwert: direkt, aber ohne sichtbares Sensorrauschen. */
   s_pill_physics_gravity_x = (int16_t)(
-    (s_pill_physics_gravity_x +
-     target_x * 7) /
-    8
+    (s_pill_physics_gravity_x + target_x * 5) / 6
   );
   s_pill_physics_gravity_y = (int16_t)(
-    (s_pill_physics_gravity_y +
-     target_y * 7) /
-    8
+    (s_pill_physics_gravity_y + target_y * 5) / 6
   );
 
-  const int16_t new_magnitude =
-      pill_physics_tilt_magnitude(
-        s_pill_physics_gravity_x,
-        s_pill_physics_gravity_y
-      );
-  const bool threshold_crossed =
-      (old_magnitude >
-          PILL_PHYSICS_SIZE_STATIC_FRICTION_MIN_MG) !=
-      (new_magnitude >
-          PILL_PHYSICS_SIZE_STATIC_FRICTION_MIN_MG);
   const bool meaningful_change =
-      threshold_crossed ||
       abs_int32(
         (int32_t)s_pill_physics_gravity_x -
         s_pill_physics_last_target_x
-      ) >= PILL_PHYSICS_WAKE_DELTA_MG ||
+      ) >= PILL_RB_SENSOR_WAKE_MG ||
       abs_int32(
         (int32_t)s_pill_physics_gravity_y -
         s_pill_physics_last_target_y
-      ) >= PILL_PHYSICS_WAKE_DELTA_MG;
+      ) >= PILL_RB_SENSOR_WAKE_MG;
 
   if (!meaningful_change) {
     if (s_pill_physics_sensor_quiet_samples < 255) {
@@ -4178,8 +4779,8 @@ static void pill_physics_update_activity(void) {
     s_pill_physics_quiet_frames = 0;
     pill_physics_schedule_tick(
       s_alarm_active
-          ? PILL_PHYSICS_ALARM_FRAME_MS
-          : PILL_PHYSICS_FRAME_MS
+          ? PILL_RB_ALARM_FRAME_MS
+          : PILL_RB_FRAME_MS
     );
   }
 }

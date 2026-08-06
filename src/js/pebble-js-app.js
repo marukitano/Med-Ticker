@@ -28,14 +28,9 @@ var MED_ICON_SET_KEY = 17;
 var AUDIO_VOLUME_KEY = 18;
 var VIBRATION_ENABLED_KEY = 19;
 var REMINDER_INTERVAL_KEY = 20;
-var APPEAR_COMMAND_KEY = 21;
-var APPEAR_INDEX_KEY = 22;
-var APPEAR_DATA_KEY = 23;
-var APPEAR_COUNT_KEY = 24;
-
-var APPEARANCE_COMMAND_RESET = 0;
-var APPEARANCE_COMMAND_ITEM = 1;
-var APPEARANCE_COMMAND_COMMIT = 2;
+var MED_COLOR2_KEY = 21;
+var MED_SIZE_KEY = 22;
+var MED_IMPRINT_KEY = 23;
 
 
 var COMMAND_RESET = 0;
@@ -518,73 +513,12 @@ function sendMedicationAt(
     var commit = commitSettings;
     commit[MED_COMMAND_KEY] = COMMAND_COMMIT;
     commit[MED_COUNT_KEY] = medications.length;
-    sendMessage(commit, function() {
-      sendAppearanceList(medications);
-    });
+    sendMessage(commit);
     return;
   }
 
   var medication = medications[index];
   var message = {};
-
-  message[MED_COMMAND_KEY] = COMMAND_ITEM;
-  message[MED_INDEX_KEY] = index;
-  message[MED_COUNT_KEY] = medications.length;
-  message[MED_NAME_KEY] = medication.name;
-  message[MED_QUANTITY_KEY] = medication.quantity;
-  message[MED_TIME_KEY] = medication.time;
-  message[MED_SCHEDULE_KEY] = medication.schedule;
-  var iconSet = medication.iconSet === true;
-
-  message[MED_DAY_KEY] = medication.day;
-  message[MED_SYMBOL_KEY] = iconSet &&
-      integerInRange(medication.symbol, 0, 1)
-      ? medication.symbol
-      : 0;
-  message[MED_SHAPE_KEY] = iconSet &&
-      integerInRange(medication.shape, 0, 3)
-      ? medication.shape
-      : DEFAULT_MEDICATION.shape;
-  message[MED_COLOR_KEY] = iconSet &&
-      integerInRange(medication.color, 192, 255)
-      ? medication.color
-      : DEFAULT_MEDICATION.color;
-  message[MED_ICON_SET_KEY] = iconSet ? 1 : 0;
-  message[MED_ENABLED_KEY] =
-      medication.enabled && iconSet ? 1 : 0;
-
-  sendMessage(message, function() {
-    sendMedicationAt(
-      medications,
-      index + 1,
-      commitSettings
-    );
-  });
-}
-
-function appearanceInteger(value, minimum, maximum, fallback) {
-  if (
-    typeof value !== 'number' ||
-    isNaN(value) ||
-    value < minimum ||
-    value > maximum
-  ) {
-    return fallback;
-  }
-
-  return Math.round(value);
-}
-
-function appearanceAsciiByte(character) {
-  if (!character || character.length === 0) {
-    return 0;
-  }
-
-  var code = character.charCodeAt(0);
-  return code >= 32 && code <= 126 ? code : 63;
-}
-
-function encodeMedicationAppearance(medication) {
   var iconSet = medication.iconSet === true;
   var shape = iconSet && integerInRange(medication.shape, 0, 4)
       ? medication.shape
@@ -595,56 +529,40 @@ function encodeMedicationAppearance(medication) {
   var secondaryColor = iconSet && integerInRange(medication.color2, 192, 255)
       ? medication.color2
       : primaryColor;
-  var size = iconSet
-      ? appearanceInteger(medication.size, 60, 140, 100)
+  var size = iconSet && integerInRange(medication.size, 60, 140)
+      ? medication.size
       : 100;
   var imprint = iconSet && typeof medication.imprint === 'string'
-      ? medication.imprint.slice(0, 5)
+      ? medication.imprint.trim().slice(0, 5)
       : '';
-  var packet = [
-    shape,
-    primaryColor,
-    secondaryColor,
-    size,
-    imprint.length
-  ];
 
-  for (var index = 0; index < 5; index += 1) {
-    packet.push(
-      index < imprint.length
-          ? appearanceAsciiByte(imprint.charAt(index))
-          : 0
-    );
-  }
+  message[MED_COMMAND_KEY] = COMMAND_ITEM;
+  message[MED_INDEX_KEY] = index;
+  message[MED_COUNT_KEY] = medications.length;
+  message[MED_NAME_KEY] = medication.name;
+  message[MED_QUANTITY_KEY] = medication.quantity;
+  message[MED_TIME_KEY] = medication.time;
+  message[MED_SCHEDULE_KEY] = medication.schedule;
+  message[MED_DAY_KEY] = medication.day;
+  message[MED_SYMBOL_KEY] = iconSet &&
+      integerInRange(medication.symbol, 0, 1)
+      ? medication.symbol
+      : 0;
+  message[MED_SHAPE_KEY] = shape;
+  message[MED_COLOR_KEY] = primaryColor;
+  message[MED_COLOR2_KEY] = secondaryColor;
+  message[MED_SIZE_KEY] = size;
+  message[MED_IMPRINT_KEY] = imprint;
+  message[MED_ICON_SET_KEY] = iconSet ? 1 : 0;
+  message[MED_ENABLED_KEY] =
+      medication.enabled && iconSet ? 1 : 0;
 
-  return packet;
-}
-
-function sendAppearanceAt(medications, index) {
-  if (index >= medications.length) {
-    var commit = {};
-    commit[APPEAR_COMMAND_KEY] = APPEARANCE_COMMAND_COMMIT;
-    commit[APPEAR_COUNT_KEY] = medications.length;
-    sendMessage(commit);
-    return;
-  }
-
-  var message = {};
-  message[APPEAR_COMMAND_KEY] = APPEARANCE_COMMAND_ITEM;
-  message[APPEAR_INDEX_KEY] = index;
-  message[APPEAR_COUNT_KEY] = medications.length;
-  message[APPEAR_DATA_KEY] = encodeMedicationAppearance(medications[index]);
   sendMessage(message, function() {
-    sendAppearanceAt(medications, index + 1);
-  });
-}
-
-function sendAppearanceList(medications) {
-  var reset = {};
-  reset[APPEAR_COMMAND_KEY] = APPEARANCE_COMMAND_RESET;
-  reset[APPEAR_COUNT_KEY] = medications.length;
-  sendMessage(reset, function() {
-    sendAppearanceAt(medications, 0);
+    sendMedicationAt(
+      medications,
+      index + 1,
+      commitSettings
+    );
   });
 }
 

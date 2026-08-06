@@ -32,10 +32,9 @@
       "AUDIO_VOLUME": 18,
       "VIBRATION_ENABLED": 19,
       "REMINDER_INTERVAL": 20,
-      "APPEAR_COMMAND": 21,
-      "APPEAR_INDEX": 22,
-      "APPEAR_DATA": 23,
-      "APPEAR_COUNT": 24
+      "MED_COLOR2": 21,
+      "MED_SIZE": 22,
+      "MED_IMPRINT": 23
     },
     "projectType": "native",
     "resources": {
@@ -64,5 +63,5 @@
       "configurable"
     ]
   },
-  "version": "0.1.70"
+  "version": "0.1.77"
 }
