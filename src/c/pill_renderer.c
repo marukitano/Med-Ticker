@@ -87,7 +87,8 @@ static const uint8_t s_pill_imprint_space[7] = {
 #define PHYSICS_ROUNDED_OVAL_QUADRANT_STEPS 8
 #define PHYSICS_ROUNDED_OVAL_PATH_POINTS \
   (PHYSICS_ROUNDED_OVAL_QUADRANT_STEPS * 4)
-#define PHYSICS_ROUNDED_OVAL_OUTLINE_PX 2
+#define PILL_RENDER_OUTLINE_PX 3
+#define PILL_RENDER_DIAMOND_OUTLINE_PX 4
 #define PHYSICS_ROUNDED_OVAL_Q12 4096
 
 /*
@@ -161,7 +162,8 @@ static void draw_physics_capsule_pixel_run(
     int16_t start_x,
     int16_t end_x,
     uint8_t color_index,
-    GColor outline_color,
+    GColor first_outline_color,
+    GColor second_outline_color,
     GColor first_color,
     GColor second_color
 );
@@ -173,7 +175,8 @@ static void draw_physics_two_color_capsule(
     uint8_t radius,
     GColor first_color,
     GColor second_color,
-    GColor outline_color
+    GColor first_outline_color,
+    GColor second_outline_color
 );
 static void draw_physics_appearance_diamond(
     GContext *ctx,
@@ -183,7 +186,9 @@ static void draw_physics_appearance_diamond(
     GColor fill_color,
     GColor outline_color
 );
-static int16_t medication_appearance_brightness(GColor color);
+static GColor medication_appearance_darker_color(
+    uint8_t argb
+);
 static const uint8_t *pill_physics_imprint_glyph(
     char character
 );
@@ -240,8 +245,7 @@ static void draw_physics_true_ellipse(
 static void draw_physics_pill_body(
     GContext *ctx,
     const PillPhysicsBody *body,
-    int32_t arena_y,
-    GColor outline_color
+    int32_t arena_y
 );
 
 static void draw_icon_rounded_rect(
@@ -591,7 +595,7 @@ static void draw_physics_capsule(
     ctx,
     start,
     end,
-    radius + 2,
+    radius + PILL_RENDER_OUTLINE_PX,
     outline_color
   );
   draw_physics_round_line(
@@ -648,6 +652,10 @@ static int16_t medication_appearance_scaled(
     int16_t base,
     uint8_t size
 ) {
+  if (base <= 0) {
+    return 0;
+  }
+
   const int16_t scaled = (int16_t)(
     ((int32_t)base * size + 50) / 100
   );
@@ -718,7 +726,8 @@ static void draw_physics_capsule_pixel_run(
     int16_t start_x,
     int16_t end_x,
     uint8_t color_index,
-    GColor outline_color,
+    GColor first_outline_color,
+    GColor second_outline_color,
     GColor first_color,
     GColor second_color
 ) {
@@ -729,12 +738,14 @@ static void draw_physics_capsule_pixel_run(
     return;
   }
 
-  GColor color = outline_color;
+  GColor color = first_outline_color;
 
   if (color_index == 2) {
     color = first_color;
   } else if (color_index == 3) {
     color = second_color;
+  } else if (color_index == 4) {
+    color = second_outline_color;
   }
 
   graphics_context_set_stroke_color(ctx, color);
@@ -754,14 +765,16 @@ static void draw_physics_two_color_capsule(
     uint8_t radius,
     GColor first_color,
     GColor second_color,
-    GColor outline_color
+    GColor first_outline_color,
+    GColor second_outline_color
 ) {
   /*
    * Exact capsule geometry:
    * all pixels whose distance to the center line segment is <= radius.
    * The inner capsule uses exactly the same geometry with a radius reduced
-   * by two pixels. This doubles the black outer outline while keeping it
-   * equally thick on straight tangent sections and circular end arcs.
+   * by the shared outline thickness. The outline uses the same darker
+   * colors as the imprint,
+   * separately for both capsule halves, while retaining an even thickness.
    */
   const int32_t cosine = cos_lookup(angle);
   const int32_t sine = sin_lookup(angle);
@@ -807,8 +820,8 @@ static void draw_physics_two_color_capsule(
   const int32_t outer_radius_q8 =
       radius * PILL_PHYSICS_Q8;
   const int32_t inner_radius_q8 =
-      radius > 2
-          ? (radius - 2) * PILL_PHYSICS_Q8
+      radius > PILL_RENDER_OUTLINE_PX
+          ? (radius - PILL_RENDER_OUTLINE_PX) * PILL_PHYSICS_Q8
           : 0;
   const int32_t divider_half_width_q8 =
       PILL_PHYSICS_Q8 / 2;
@@ -855,7 +868,8 @@ static void draw_physics_two_color_capsule(
           abs_int32(local_x_q8) <=
               divider_half_width_q8
         ) {
-          pixel_color = 1;
+          pixel_color =
+              local_x_q8 < 0 ? 1 : 4;
         } else {
           pixel_color =
               local_x_q8 < 0 ? 2 : 3;
@@ -869,7 +883,8 @@ static void draw_physics_two_color_capsule(
           run_start_x,
           (int16_t)(x - 1),
           run_color,
-          outline_color,
+          first_outline_color,
+          second_outline_color,
           first_color,
           second_color
         );
@@ -888,7 +903,8 @@ static void draw_physics_two_color_capsule(
       run_start_x,
       maximum_x,
       run_color,
-      outline_color,
+      first_outline_color,
+      second_outline_color,
       first_color,
       second_color
     );
@@ -906,7 +922,9 @@ static void draw_physics_appearance_diamond(
   GPoint outer_points[4];
   GPoint inner_points[4];
   const int16_t inner_half =
-      half_size > 3 ? half_size - 3 : 1;
+      half_size > PILL_RENDER_DIAMOND_OUTLINE_PX
+          ? half_size - PILL_RENDER_DIAMOND_OUTLINE_PX
+          : 1;
 
   for (uint8_t index = 0; index < 4; index++) {
     const int32_t point_angle =
@@ -962,13 +980,31 @@ static void draw_physics_appearance_diamond(
   gpath_destroy(inner);
 }
 
-static int16_t medication_appearance_brightness(GColor color) {
-  const uint8_t value = color.argb;
-  const uint8_t red = (value >> 4) & 3;
-  const uint8_t green = (value >> 2) & 3;
-  const uint8_t blue = value & 3;
+static GColor medication_appearance_darker_color(
+    uint8_t argb
+) {
+  uint8_t red = (argb >> 4) & 3;
+  uint8_t green = (argb >> 2) & 3;
+  uint8_t blue = argb & 3;
 
-  return red * 30 + green * 59 + blue * 11;
+  if (red > 0) {
+    red--;
+  }
+  if (green > 0) {
+    green--;
+  }
+  if (blue > 0) {
+    blue--;
+  }
+
+  return (GColor) {
+    .argb = (uint8_t)(
+      0xc0 |
+      (red << 4) |
+      (green << 2) |
+      blue
+    )
+  };
 }
 
 static const uint8_t *pill_physics_imprint_glyph(
@@ -1056,28 +1092,59 @@ static void draw_physics_appearance_imprint(
     return;
   }
 
-  const int16_t unscaled_width = (int16_t)(
-    character_count * PILL_IMPRINT_GLYPH_WIDTH +
-    (character_count - 1) * PILL_IMPRINT_GLYPH_GAP
-  );
+  const bool round_tablet =
+      appearance->shape == 0;
+  const int16_t imprint_padding =
+      round_tablet ? 2 : 4;
+  const int16_t available_width =
+      body_width - imprint_padding;
+  const int16_t available_height =
+      body_height - imprint_padding;
 
-  int16_t scale_from_width =
-      (body_width - 4) / unscaled_width;
-  int16_t scale_from_height =
-      (body_height - 4) / PILL_IMPRINT_GLYPH_HEIGHT;
-  int16_t scale =
-      scale_from_width < scale_from_height
-          ? scale_from_width
-          : scale_from_height;
+  /*
+   * A round 100 % tablet has a 20 px inner diameter and a 24 px outer
+   * diameter. With the old scaled two-pixel character gap, "20" needed
+   * 22 px and was therefore reduced to a tiny 1x bitmap. Keep a single
+   * physical pixel between characters on round tablets and choose the
+   * largest complete scale that fits inside the outlined body.
+   */
+  int16_t scale = 1;
 
-  if (scale < 1) {
-    scale = 1;
-  } else if (scale > PILL_IMPRINT_MAX_SCALE) {
-    scale = PILL_IMPRINT_MAX_SCALE;
+  for (
+    int16_t candidate = PILL_IMPRINT_MAX_SCALE;
+    candidate >= 1;
+    candidate--
+  ) {
+    const int16_t candidate_gap =
+        round_tablet
+            ? 1
+            : PILL_IMPRINT_GLYPH_GAP * candidate;
+    const int16_t candidate_width = (int16_t)(
+      character_count *
+          PILL_IMPRINT_GLYPH_WIDTH * candidate +
+      (character_count - 1) * candidate_gap
+    );
+    const int16_t candidate_height =
+        PILL_IMPRINT_GLYPH_HEIGHT * candidate;
+
+    if (
+      candidate_width <= available_width &&
+      candidate_height <= available_height
+    ) {
+      scale = candidate;
+      break;
+    }
   }
 
-  const int16_t text_width =
-      unscaled_width * scale;
+  const int16_t glyph_gap =
+      round_tablet
+          ? 1
+          : PILL_IMPRINT_GLYPH_GAP * scale;
+  const int16_t text_width = (int16_t)(
+    character_count *
+        PILL_IMPRINT_GLYPH_WIDTH * scale +
+    (character_count - 1) * glyph_gap
+  );
   const int16_t text_height =
       PILL_IMPRINT_GLYPH_HEIGHT * scale;
   const int16_t text_left =
@@ -1085,29 +1152,17 @@ static void draw_physics_appearance_imprint(
   const int16_t text_top =
       (int16_t)(-text_height / 2);
 
-  const GColor first_color = {
-    .argb = appearance->primary_color
-  };
-  int16_t brightness =
-      medication_appearance_brightness(first_color);
-
-  if (appearance->shape == 4) {
-    const GColor second_color = {
-      .argb = appearance->secondary_color
-    };
-    brightness = (int16_t)(
-      (brightness + medication_appearance_brightness(second_color)) / 2
-    );
-  }
-
-  /*
-   * Imprints are deliberately grey rather than black/white:
-   * dark grey on bright tablets, light grey on dark tablets.
-   */
-  graphics_context_set_fill_color(
-    ctx,
-    brightness >= 165 ? GColorDarkGray : GColorLightGray
-  );
+  const GColor primary_imprint_color =
+      medication_appearance_darker_color(
+        appearance->primary_color
+      );
+  const GColor secondary_imprint_color =
+      appearance->shape == 4
+          ? medication_appearance_darker_color(
+              appearance->secondary_color
+            )
+          : primary_imprint_color;
+  uint8_t current_imprint_argb = 0;
 
   for (
     uint8_t character_index = 0;
@@ -1121,8 +1176,7 @@ static void draw_physics_appearance_imprint(
     const int16_t character_x = (int16_t)(
       text_left +
       character_index *
-          (PILL_IMPRINT_GLYPH_WIDTH + PILL_IMPRINT_GLYPH_GAP) *
-          scale
+          (PILL_IMPRINT_GLYPH_WIDTH * scale + glyph_gap)
     );
 
     for (
@@ -1156,6 +1210,18 @@ static void draw_physics_appearance_imprint(
               local_y
             );
         const int16_t pixel_half = scale / 2;
+        const GColor imprint_color =
+            appearance->shape == 4 && local_x >= 0
+                ? secondary_imprint_color
+                : primary_imprint_color;
+
+        if (current_imprint_argb != imprint_color.argb) {
+          graphics_context_set_fill_color(
+            ctx,
+            imprint_color
+          );
+          current_imprint_argb = imprint_color.argb;
+        }
 
         /*
          * Filled pixel blocks are reliable even for short glyph strokes.
@@ -1370,14 +1436,14 @@ static void draw_physics_true_ellipse(
 
   /*
    * The same flatter, strongly rounded outline is drawn twice. The larger
-   * black shape leaves the established two-pixel border around the tablet.
+   * outer shape leaves the shared border thickness around the tablet.
    */
   draw_physics_rounded_oval_fill(
     ctx,
     center,
     angle,
-    inner_half_width + PHYSICS_ROUNDED_OVAL_OUTLINE_PX,
-    inner_half_height + PHYSICS_ROUNDED_OVAL_OUTLINE_PX,
+    inner_half_width + PILL_RENDER_OUTLINE_PX,
+    inner_half_height + PILL_RENDER_OUTLINE_PX,
     outline_color
   );
   draw_physics_rounded_oval_fill(
@@ -1393,8 +1459,7 @@ static void draw_physics_true_ellipse(
 static void draw_physics_pill_body(
     GContext *ctx,
     const PillPhysicsBody *body,
-    int32_t arena_y,
-    GColor outline_color
+    int32_t arena_y
 ) {
   if (
     !body ||
@@ -1425,6 +1490,16 @@ static void draw_physics_pill_body(
   const GColor second_color = {
     .argb = appearance->secondary_color
   };
+  const GColor primary_outline_color =
+      medication_appearance_darker_color(
+        appearance->primary_color
+      );
+  const GColor secondary_outline_color =
+      appearance->shape == 4
+          ? medication_appearance_darker_color(
+              appearance->secondary_color
+            )
+          : primary_outline_color;
   const GPoint center = GPoint(
     (int16_t)(body->x_q8 / PILL_PHYSICS_Q8),
     (int16_t)(arena_y + body->y_q8 / PILL_PHYSICS_Q8)
@@ -1449,7 +1524,7 @@ static void draw_physics_pill_body(
         line_half,
         radius,
         fill_color,
-        outline_color
+        primary_outline_color
       );
       break;
 
@@ -1461,7 +1536,7 @@ static void draw_physics_pill_body(
         line_half,
         (uint8_t)radius,
         fill_color,
-        outline_color,
+        primary_outline_color,
         true
       );
       break;
@@ -1473,7 +1548,7 @@ static void draw_physics_pill_body(
         body->angle,
         diamond_half,
         fill_color,
-        outline_color
+        primary_outline_color
       );
       break;
 
@@ -1486,17 +1561,21 @@ static void draw_physics_pill_body(
         (uint8_t)radius,
         fill_color,
         second_color,
-        outline_color
+        primary_outline_color,
+        secondary_outline_color
       );
       break;
 
     case 0:
     default:
-      graphics_context_set_fill_color(ctx, outline_color);
+      graphics_context_set_fill_color(
+        ctx,
+        primary_outline_color
+      );
       graphics_fill_circle(
         ctx,
         center,
-        (uint16_t)(radius + 2)
+        (uint16_t)(radius + PILL_RENDER_OUTLINE_PX)
       );
       graphics_context_set_fill_color(ctx, fill_color);
       graphics_fill_circle(
@@ -1510,11 +1589,15 @@ static void draw_physics_pill_body(
   const int16_t body_width =
       diamond_half > 0
           ? diamond_half * 2
-          : (line_half + radius) * 2;
+          : appearance->shape == 0
+              ? (radius + 2) * 2
+              : (line_half + radius) * 2;
   const int16_t body_height =
       diamond_half > 0
           ? diamond_half * 2
-          : radius * 2;
+          : appearance->shape == 0
+              ? (radius + 2) * 2
+              : radius * 2;
 
   draw_physics_appearance_imprint(
     ctx,
@@ -1546,8 +1629,7 @@ void draw_physics_pills(
     draw_physics_pill_body(
       ctx,
       &s_pill_physics_bodies[index],
-      arena_y,
-      GColorLightGray
+      arena_y
     );
   }
 }

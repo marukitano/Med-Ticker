@@ -14,6 +14,31 @@
 #include "confirmation_ui.h"
 #include "medication_ui.h"
 
+/*
+ * Limit display-plane gravity to sin(45 degrees) ~= 0.707 g. Tilting the
+ * watch farther therefore keeps the same direction, but no longer increases
+ * the force pressing settled pills into the wall.
+ */
+#define PILL_RB_MAX_TILT_MG 707
+
+/*
+ * Mass follows the configured pill scale squared: 60 % -> 0.36 mass,
+ * 100 % -> 1.00 mass and 140 % -> 1.96 mass. Gravity remains identical
+ * for every pill; mass only changes collision response and rotation.
+ */
+#define PILL_RB_DEFAULT_MASS_Q8 PILL_PHYSICS_Q8
+#define PILL_RB_MIN_MASS_Q8 (PILL_PHYSICS_Q8 / 4)
+#define PILL_RB_MAX_MASS_Q8 (4 * PILL_PHYSICS_Q8)
+
+/*
+ * Stable per-body differences emulate small variations in coating and
+ * contact surface. The values are deterministic, never random per frame.
+ */
+static const int8_t
+    s_pill_rb_friction_variation_percent[] = {
+  -8, 6, -4, 8, 0, -6, 5, -7, 3, 7, -2, -2
+};
+
 static bool pill_physics_medication_is_visible(
     const MedicationSettings *medication
 );
@@ -24,12 +49,28 @@ static int32_t pill_rb_clamp_int32(
     int32_t maximum
 );
 static uint64_t pill_rb_integer_sqrt64(uint64_t value);
+static uint8_t pill_rb_medication_size(
+    uint8_t medication_index
+);
+static uint16_t pill_rb_mass_from_size_q8(uint8_t size);
+static uint16_t pill_rb_surface_friction_for_body_q8(
+    uint8_t medication_index,
+    uint8_t body_index
+);
+static int32_t pill_rb_mass_q8(
+    const PillPhysicsBody *body
+);
+static int32_t pill_rb_inverse_mass_q8(
+    const PillPhysicsBody *body
+);
 static void pill_rb_collision_geometry(
     uint8_t medication_index,
     uint8_t *half_length,
     uint8_t *radius
 );
-static int32_t pill_rb_inertia(const PillPhysicsBody *body);
+static int32_t pill_rb_inertia_q8(
+    const PillPhysicsBody *body
+);
 static void pill_rb_segment_endpoints(
     const PillPhysicsBody *body,
     int32_t *ax_q8,
@@ -153,6 +194,7 @@ static int16_t pill_rb_tilt_magnitude(
     int16_t y
 );
 static void pill_rb_drive_from_tilt(
+    const PillPhysicsBody *body,
     int16_t *drive_x,
     int16_t *drive_y
 );
@@ -219,6 +261,78 @@ static uint64_t pill_rb_integer_sqrt64(uint64_t value) {
   }
 
   return result;
+}
+
+static uint8_t pill_rb_medication_size(
+    uint8_t medication_index
+) {
+  uint8_t size = 100;
+
+  if (
+    medication_index < s_medication_appearance_count &&
+    s_medication_appearances[medication_index].valid
+  ) {
+    size = s_medication_appearances[medication_index].size;
+  }
+
+  if (size < 60) {
+    return 60;
+  }
+  if (size > 140) {
+    return 140;
+  }
+  return size;
+}
+
+static uint16_t pill_rb_mass_from_size_q8(uint8_t size) {
+  const int32_t mass_q8 = (int32_t)(
+    ((int32_t)size * size * PILL_PHYSICS_Q8 + 5000) /
+    10000
+  );
+
+  return (uint16_t)pill_rb_clamp_int32(
+    mass_q8,
+    PILL_RB_MIN_MASS_Q8,
+    PILL_RB_MAX_MASS_Q8
+  );
+}
+
+static uint16_t pill_rb_surface_friction_for_body_q8(
+    uint8_t medication_index,
+    uint8_t body_index
+) {
+  const uint8_t variation_index = (uint8_t)(
+    (body_index + medication_index * 3u) %
+    ARRAY_LENGTH(s_pill_rb_friction_variation_percent)
+  );
+  const int16_t percent = (int16_t)(
+    100 +
+    s_pill_rb_friction_variation_percent[variation_index]
+  );
+
+  return (uint16_t)(
+    ((int32_t)PILL_PHYSICS_Q8 * percent + 50) / 100
+  );
+}
+
+static int32_t pill_rb_mass_q8(
+    const PillPhysicsBody *body
+) {
+  return body && body->mass_q8 > 0
+      ? body->mass_q8
+      : PILL_RB_DEFAULT_MASS_Q8;
+}
+
+static int32_t pill_rb_inverse_mass_q8(
+    const PillPhysicsBody *body
+) {
+  const int32_t mass_q8 = pill_rb_mass_q8(body);
+
+  return (int32_t)(
+    ((int64_t)PILL_PHYSICS_Q8 * PILL_PHYSICS_Q8 +
+     mass_q8 / 2) /
+    mass_q8
+  );
 }
 
 static void pill_rb_collision_geometry(
@@ -299,20 +413,22 @@ static void pill_rb_collision_geometry(
   *radius = (uint8_t)local_radius;
 }
 
-static int32_t pill_rb_inertia(const PillPhysicsBody *body) {
+static int32_t pill_rb_inertia_q8(
+    const PillPhysicsBody *body
+) {
   const int32_t half_length =
       body->collision_half_length;
   const int32_t radius =
       body->collision_radius;
-  int32_t inertia =
+  int32_t geometry =
       (half_length * half_length) / 3 +
       (radius * radius) / 2;
 
-  if (inertia < 24) {
-    inertia = 24;
+  if (geometry < 24) {
+    geometry = 24;
   }
 
-  return inertia;
+  return geometry * pill_rb_mass_q8(body);
 }
 
 static void pill_rb_segment_endpoints(
@@ -396,15 +512,20 @@ static void pill_rb_apply_impulse(
     int16_t lever_y,
     int direction
 ) {
+  const int32_t inverse_mass_q8 =
+      pill_rb_inverse_mass_q8(body);
+
   body->vx_q8 += (int32_t)(
     ((int64_t)direction * impulse_q8 *
-     normal_x_q12) /
-    PILL_RB_PARAMETER_Q12
+     normal_x_q12 * inverse_mass_q8) /
+    ((int64_t)PILL_RB_PARAMETER_Q12 *
+     PILL_PHYSICS_Q8)
   );
   body->vy_q8 += (int32_t)(
     ((int64_t)direction * impulse_q8 *
-     normal_y_q12) /
-    PILL_RB_PARAMETER_Q12
+     normal_y_q12 * inverse_mass_q8) /
+    ((int64_t)PILL_RB_PARAMETER_Q12 *
+     PILL_PHYSICS_Q8)
   );
 
   const int32_t cross =
@@ -414,12 +535,13 @@ static void pill_rb_apply_impulse(
         normal_x_q12,
         normal_y_q12
       );
-  const int32_t inertia = pill_rb_inertia(body);
+  const int32_t inertia_q8 =
+      pill_rb_inertia_q8(body);
 
   body->angular_velocity += (int32_t)(
     ((int64_t)direction * cross * impulse_q8 *
      PILL_RB_RAD_TO_ANGLE_NUM) /
-    ((int64_t)PILL_PHYSICS_Q8 * inertia)
+    inertia_q8
   );
 
   body->angular_velocity = pill_rb_clamp_int32(
@@ -439,7 +561,8 @@ static int32_t pill_rb_effective_mass_q8(
     int32_t normal_x_q12,
     int32_t normal_y_q12
 ) {
-  int32_t denominator_q8 = PILL_PHYSICS_Q8;
+  int32_t denominator_q8 =
+      pill_rb_inverse_mass_q8(first);
 
   const int32_t first_cross =
       pill_rb_cross_lever_normal(
@@ -450,12 +573,12 @@ static int32_t pill_rb_effective_mass_q8(
       );
   denominator_q8 += (int32_t)(
     ((int64_t)first_cross * first_cross *
-     PILL_PHYSICS_Q8) /
-    pill_rb_inertia(first)
+     PILL_PHYSICS_Q8 * PILL_PHYSICS_Q8) /
+    pill_rb_inertia_q8(first)
   );
 
   if (second) {
-    denominator_q8 += PILL_PHYSICS_Q8;
+    denominator_q8 += pill_rb_inverse_mass_q8(second);
     const int32_t second_cross =
         pill_rb_cross_lever_normal(
           second_lever_x,
@@ -465,8 +588,8 @@ static int32_t pill_rb_effective_mass_q8(
         );
     denominator_q8 += (int32_t)(
       ((int64_t)second_cross * second_cross *
-       PILL_PHYSICS_Q8) /
-      pill_rb_inertia(second)
+       PILL_PHYSICS_Q8 * PILL_PHYSICS_Q8) /
+      pill_rb_inertia_q8(second)
     );
   }
 
@@ -624,10 +747,24 @@ static int32_t pill_rb_solve_contact_impulse(
      PILL_PHYSICS_Q8) /
     tangent_denominator_q8
   );
+  int32_t friction_scale_q8 =
+      first->surface_friction_q8 > 0
+          ? first->surface_friction_q8
+          : PILL_PHYSICS_Q8;
+  if (second) {
+    const int32_t second_friction_q8 =
+        second->surface_friction_q8 > 0
+            ? second->surface_friction_q8
+            : PILL_PHYSICS_Q8;
+    friction_scale_q8 =
+        (friction_scale_q8 + second_friction_q8) / 2;
+  }
+
   const int32_t friction_limit_q8 = (int32_t)(
     ((int64_t)normal_impulse_q8 *
-     PILL_RB_FRICTION_NUM) /
-    PILL_RB_FRICTION_DEN
+     PILL_RB_FRICTION_NUM * friction_scale_q8) /
+    ((int64_t)PILL_RB_FRICTION_DEN *
+     PILL_PHYSICS_Q8)
   );
 
   tangent_impulse_q8 = pill_rb_clamp_int32(
@@ -676,6 +813,8 @@ static void pill_rb_initialize_body(
     &half_length,
     &radius
   );
+  const uint8_t size =
+      pill_rb_medication_size(medication_index);
 
   int16_t arena_width = 228;
   int16_t arena_height = 228;
@@ -722,7 +861,13 @@ static void pill_rb_initialize_body(
     .angular_velocity = 0,
     .medication_index = medication_index,
     .collision_radius = radius,
-    .collision_half_length = half_length
+    .collision_half_length = half_length,
+    .mass_q8 = pill_rb_mass_from_size_q8(size),
+    .surface_friction_q8 =
+        pill_rb_surface_friction_for_body_q8(
+          medication_index,
+          body_index
+        )
   };
 }
 
@@ -1184,18 +1329,37 @@ static bool pill_rb_solve_pair(
 
   if (penetration_q8 > PILL_RB_POSITION_SLOP_Q8) {
     penetration_q8 -= PILL_RB_POSITION_SLOP_Q8;
-    const int32_t correction_x_q8 = (int32_t)(
-      ((int64_t)normal_x_q12 * penetration_q8) /
-      (PILL_RB_PARAMETER_Q12 * 2)
+    const int32_t first_inverse_mass_q8 =
+        pill_rb_inverse_mass_q8(first);
+    const int32_t second_inverse_mass_q8 =
+        pill_rb_inverse_mass_q8(second);
+    const int32_t total_inverse_mass_q8 =
+        first_inverse_mass_q8 +
+        second_inverse_mass_q8;
+    const int32_t first_correction_q8 = (int32_t)(
+      ((int64_t)penetration_q8 *
+       first_inverse_mass_q8) /
+      total_inverse_mass_q8
     );
-    const int32_t correction_y_q8 = (int32_t)(
-      ((int64_t)normal_y_q12 * penetration_q8) /
-      (PILL_RB_PARAMETER_Q12 * 2)
+    const int32_t second_correction_q8 =
+        penetration_q8 - first_correction_q8;
+
+    first->x_q8 += (int32_t)(
+      ((int64_t)normal_x_q12 * first_correction_q8) /
+      PILL_RB_PARAMETER_Q12
     );
-    first->x_q8 += correction_x_q8;
-    first->y_q8 += correction_y_q8;
-    second->x_q8 -= correction_x_q8;
-    second->y_q8 -= correction_y_q8;
+    first->y_q8 += (int32_t)(
+      ((int64_t)normal_y_q12 * first_correction_q8) /
+      PILL_RB_PARAMETER_Q12
+    );
+    second->x_q8 -= (int32_t)(
+      ((int64_t)normal_x_q12 * second_correction_q8) /
+      PILL_RB_PARAMETER_Q12
+    );
+    second->y_q8 -= (int32_t)(
+      ((int64_t)normal_y_q12 * second_correction_q8) /
+      PILL_RB_PARAMETER_Q12
+    );
   }
 
   const int32_t first_surface_x_q8 =
@@ -1423,6 +1587,7 @@ static int16_t pill_rb_tilt_magnitude(
 }
 
 static void pill_rb_drive_from_tilt(
+    const PillPhysicsBody *body,
     int16_t *drive_x,
     int16_t *drive_y
 ) {
@@ -1436,19 +1601,32 @@ static void pill_rb_drive_from_tilt(
         s_pill_physics_gravity_y
       );
 
-  if (magnitude <= PILL_RB_TILT_DEADZONE_MG) {
+  const int32_t friction_q8 =
+      body && body->surface_friction_q8 > 0
+          ? body->surface_friction_q8
+          : PILL_PHYSICS_Q8;
+  const int16_t deadzone_mg = (int16_t)(
+    ((int32_t)PILL_RB_TILT_DEADZONE_MG *
+     friction_q8 + PILL_PHYSICS_Q8 / 2) /
+    PILL_PHYSICS_Q8
+  );
+
+  if (magnitude <= deadzone_mg) {
     *drive_x = 0;
     *drive_y = 0;
     return;
   }
 
   /*
-   * Radial deadzone: the first 50 mg only overcome static friction.
-   * Above that threshold the remaining tilt becomes acceleration, so there
-   * is no visible jump when the pills break loose.
+   * Each pill has a small, stable static-friction variation. Gravity itself
+   * remains the same; only the force needed to break loose differs.
    */
+  const int16_t limited_magnitude =
+      magnitude > PILL_RB_MAX_TILT_MG
+          ? PILL_RB_MAX_TILT_MG
+          : magnitude;
   const int16_t active_magnitude =
-      magnitude - PILL_RB_TILT_DEADZONE_MG;
+      limited_magnitude - deadzone_mg;
 
   *drive_x = (int16_t)(
     ((int32_t)s_pill_physics_gravity_x *
@@ -1525,13 +1703,6 @@ static void pill_physics_tick(void *context) {
       (arena_height - PILL_PHYSICS_EDGE_MARGIN - arena_y) *
       PILL_PHYSICS_Q8;
 
-  int16_t drive_x;
-  int16_t drive_y;
-  pill_rb_drive_from_tilt(
-    &drive_x,
-    &drive_y
-  );
-
   int32_t old_x_q8[PILL_PHYSICS_MAX_BODIES];
   int32_t old_y_q8[PILL_PHYSICS_MAX_BODIES];
   int32_t old_angle[PILL_PHYSICS_MAX_BODIES];
@@ -1547,12 +1718,18 @@ static void pill_physics_tick(void *context) {
     old_y_q8[index] = body->y_q8;
     old_angle[index] = body->angle;
 
+    int16_t drive_x;
+    int16_t drive_y;
+    pill_rb_drive_from_tilt(
+      body,
+      &drive_x,
+      &drive_y
+    );
+
     body->vx_q8 +=
-        drive_x /
-        PILL_RB_ACCEL_DIVISOR;
+        drive_x / PILL_RB_ACCEL_DIVISOR;
     body->vy_q8 +=
-        drive_y /
-        PILL_RB_ACCEL_DIVISOR;
+        drive_y / PILL_RB_ACCEL_DIVISOR;
 
     body->vx_q8 = pill_rb_clamp_int32(
       body->vx_q8,
@@ -1685,11 +1862,20 @@ static void pill_physics_tick(void *context) {
     }
 
     /*
-     * Remove only tiny residual solver velocities here. Strong drive into a
-     * wall may still leave a larger attempted velocity, so final sleeping is
-     * based below on the real post-solver movement instead of that velocity.
+     * A supported body may still carry a sizeable attempted velocity because
+     * gravity is applied again every frame. If the solver kept the body
+     * geometrically still, discard that hidden velocity instead of letting it
+     * re-enter the next contact solve and shake a stack.
      */
-    if (resting_contact_candidate) {
+    if (
+      resting_contact_candidate &&
+      travel_q8 <= PILL_RB_REST_TRAVEL_Q8 &&
+      angle_travel <= PILL_RB_REST_ANGLE
+    ) {
+      body->vx_q8 = 0;
+      body->vy_q8 = 0;
+      body->angular_velocity = 0;
+    } else if (resting_contact_candidate) {
       if (
         abs_int32(body->vx_q8) <=
             PILL_RB_SLEEP_LINEAR_Q8
@@ -1782,7 +1968,6 @@ static void pill_physics_accel_handler(
         s_pill_physics_gravity_x,
         s_pill_physics_gravity_y
       );
-
   s_pill_physics_gravity_x = (int16_t)(
     (s_pill_physics_gravity_x + target_x * 5) / 6
   );
@@ -1796,9 +1981,10 @@ static void pill_physics_accel_handler(
         s_pill_physics_gravity_y
       );
   /*
-   * Hysteresis prevents filtered sensor noise around 50 mg from repeatedly
-   * waking and sleeping a settled pile. Drive still starts at the 50 mg
-   * deadzone; only the wake event uses the wider 40/60 mg band.
+   * Hysteresis prevents filtered sensor noise around the nominal 50 mg
+   * threshold from repeatedly waking and sleeping a settled pile. Individual
+   * pills vary slightly around that threshold; the wake event still uses the
+   * shared wider 40/60 mg band.
    */
   const bool entered_drive_band =
       old_magnitude <=

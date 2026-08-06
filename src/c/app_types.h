@@ -154,19 +154,19 @@
 #define PILL_RB_FLAT_CONTACT_TOLERANCE_Q8 (4 * PILL_PHYSICS_Q8)
 #define PILL_RB_FRICTION_NUM 3
 #define PILL_RB_FRICTION_DEN 5
-#define PILL_RB_POSITION_SLOP_Q8 (PILL_PHYSICS_Q8 / 8)
-#define PILL_RB_SOLVER_ITERATIONS 4
+#define PILL_RB_POSITION_SLOP_Q8 (PILL_PHYSICS_Q8 / 2)
+#define PILL_RB_SOLVER_ITERATIONS 6
 #define PILL_RB_PARAMETER_Q12 4096
 #define PILL_RB_ANGLE_TO_LINEAR_NUM 201
 #define PILL_RB_ANGLE_TO_LINEAR_DEN 8192
 #define PILL_RB_RAD_TO_ANGLE_NUM 10430
 #define PILL_RB_SLEEP_LINEAR_Q8 (PILL_PHYSICS_Q8)
 #define PILL_RB_SLEEP_ANGULAR (TRIG_MAX_ANGLE / 240)
-#define PILL_RB_SLEEP_FRAMES 5
-#define PILL_RB_SENSOR_WAKE_MG 35
+#define PILL_RB_SLEEP_FRAMES 3
+#define PILL_RB_SENSOR_WAKE_MG 50
 #define PILL_RB_TILT_DEADZONE_MG 50
 #define PILL_RB_TILT_WAKE_HYSTERESIS_MG 10
-#define PILL_RB_REST_TRAVEL_Q8 (PILL_PHYSICS_Q8)
+#define PILL_RB_REST_TRAVEL_Q8 (2 * PILL_PHYSICS_Q8)
 #define PILL_RB_REST_ANGLE (TRIG_MAX_ANGLE / 180)
 
 typedef enum {
@@ -273,6 +273,10 @@ typedef struct {
   uint8_t medication_index;
   uint8_t collision_radius;
   uint8_t collision_half_length;
+
+  /* Q8 mass and deterministic surface-friction variation. */
+  uint16_t mass_q8;
+  uint16_t surface_friction_q8;
 } PillPhysicsBody;
 
 typedef enum {
