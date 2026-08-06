@@ -1676,11 +1676,185 @@ static void reset_pending_medications(
   s_pending_received_mask = 0;
 }
 
+#define MEDICATION_APPEARANCE_WIDTH 24
+#define MEDICATION_APPEARANCE_HEIGHT 14
+#define MEDICATION_APPEARANCE_BYTES \
+    ((MEDICATION_APPEARANCE_WIDTH * MEDICATION_APPEARANCE_HEIGHT) / 4)
+
+typedef enum {
+  APPEARANCE_COMMAND_RESET = 0,
+  APPEARANCE_COMMAND_ITEM = 1,
+  APPEARANCE_COMMAND_COMMIT = 2,
+} AppearanceCommand;
+
+typedef struct {
+  bool valid;
+  uint8_t data[MEDICATION_APPEARANCE_BYTES];
+} MedicationAppearance;
+
+static MedicationAppearance s_medication_appearances[MAX_MEDICATIONS];
+static MedicationAppearance s_pending_medication_appearances[MAX_MEDICATIONS];
+static uint8_t s_pending_medication_appearance_count = 0;
+static uint16_t s_pending_medication_appearance_mask = 0;
+
+static void reset_pending_medication_appearances(uint8_t count) {
+  s_pending_medication_appearance_count = count;
+  s_pending_medication_appearance_mask = 0;
+  memset(
+    s_pending_medication_appearances,
+    0,
+    sizeof(s_pending_medication_appearances)
+  );
+}
+
+static int8_t appearance_hex_nibble(char c) {
+  if (c >= '0' && c <= '9') {
+    return (int8_t)(c - '0');
+  }
+  if (c >= 'a' && c <= 'f') {
+    return (int8_t)(10 + c - 'a');
+  }
+  if (c >= 'A' && c <= 'F') {
+    return (int8_t)(10 + c - 'A');
+  }
+  return -1;
+}
+
+static bool decode_medication_appearance(
+    const char *hex,
+    MedicationAppearance *appearance
+) {
+  if (!hex || !appearance) {
+    return false;
+  }
+
+  const size_t expected_length =
+      (size_t)(MEDICATION_APPEARANCE_BYTES * 2);
+
+  if (strlen(hex) != expected_length) {
+    return false;
+  }
+
+  appearance->valid = true;
+
+  for (size_t i = 0; i < MEDICATION_APPEARANCE_BYTES; i++) {
+    const int8_t high = appearance_hex_nibble(hex[i * 2]);
+    const int8_t low = appearance_hex_nibble(hex[i * 2 + 1]);
+
+    if (high < 0 || low < 0) {
+      return false;
+    }
+
+    appearance->data[i] = (uint8_t)((high << 4) | low);
+  }
+
+  return true;
+}
+
+static void apply_medication_appearances(void) {
+  memcpy(
+    s_medication_appearances,
+    s_pending_medication_appearances,
+    sizeof(s_medication_appearances)
+  );
+}
+
+static bool handle_appearance_message(
+    DictionaryIterator *iterator
+) {
+  Tuple *command_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_APPEAR_COMMAND
+  );
+
+  if (!command_tuple) {
+    return false;
+  }
+
+  int32_t command;
+
+  if (!tuple_read_int32(command_tuple, &command)) {
+    return true;
+  }
+
+  Tuple *count_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_APPEAR_COUNT
+  );
+  int32_t count;
+
+  if (
+    !tuple_read_int32(count_tuple, &count) ||
+    count < 0 ||
+    count > MAX_MEDICATIONS
+  ) {
+    return true;
+  }
+
+  if (command == APPEARANCE_COMMAND_RESET) {
+    reset_pending_medication_appearances((uint8_t)count);
+    return true;
+  }
+
+  if (count != s_pending_medication_appearance_count) {
+    return true;
+  }
+
+  if (command == APPEARANCE_COMMAND_ITEM) {
+    Tuple *index_tuple = dict_find(
+      iterator,
+      MESSAGE_KEY_APPEAR_INDEX
+    );
+    Tuple *data_tuple = dict_find(
+      iterator,
+      MESSAGE_KEY_APPEAR_DATA
+    );
+    int32_t index;
+
+    if (
+      !tuple_read_int32(index_tuple, &index) ||
+      index < 0 ||
+      index >= count ||
+      !data_tuple ||
+      data_tuple->type != TUPLE_CSTRING
+    ) {
+      return true;
+    }
+
+    MedicationAppearance appearance;
+    memset(&appearance, 0, sizeof(appearance));
+
+    if (!decode_medication_appearance(data_tuple->value->cstring, &appearance)) {
+      return true;
+    }
+
+    s_pending_medication_appearances[index] = appearance;
+    s_pending_medication_appearance_mask |= (uint16_t)(1u << index);
+    return true;
+  }
+
+  if (
+    command == APPEARANCE_COMMAND_COMMIT &&
+    s_pending_medication_appearance_mask ==
+        expected_pending_mask(s_pending_medication_appearance_count)
+  ) {
+    apply_medication_appearances();
+    reset_pending_medication_appearances(0);
+    return true;
+  }
+
+  return true;
+}
+
 static void settings_inbox_received(
     DictionaryIterator *iterator,
     void *context
 ) {
   (void)context;
+
+  if (handle_appearance_message(iterator)) {
+    return;
+  }
 
   Tuple *command_tuple = dict_find(
     iterator,
