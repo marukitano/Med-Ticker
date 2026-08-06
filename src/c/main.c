@@ -97,9 +97,10 @@
 #define LEGACY_MEDICATION_PERSIST_KEY 201
 #define MEDICATION_LIST_PERSIST_KEY 202
 #define MEDICATION_COUNT_PERSIST_KEY 203
-#define SETTINGS_MESSAGE_BUFFER_SIZE 320
+#define SETTINGS_MESSAGE_BUFFER_SIZE 512
 #define MEDICATION_NAME_LENGTH 32
 #define MEDICATION_LABEL_LENGTH 48
+#define MEDICATION_IMPRINT_LENGTH 6
 #define MAX_MEDICATIONS 8
 #define MAX_LIST_ROWS (MAX_MEDICATIONS + 2)
 
@@ -127,6 +128,25 @@
 #define ALARM_AUDIO_PUMP_INTERVAL_MS 10
 #define ALARM_AUDIO_MAX_WRITES_PER_PUMP 8
 #define ALARM_WAKEUP_COOKIE 0x50494c4c
+#define TRANSFER_CLOSE_DELAY_MS 5000
+#define TRANSFER_ANIMATION_INTERVAL_MS 30
+#define TRANSFER_MORPH_DURATION_MS 450
+#define TRANSFER_SHAFT_DURATION_MS 650
+#define TRANSFER_FALL_DURATION_MS 500
+#define TRANSFER_PROGRESS_MAX 1000
+
+#define PILL_PHYSICS_MAX_BODIES 12
+#define PILL_PHYSICS_FRAME_MS 40
+#define PILL_PHYSICS_Q8 256
+#define PILL_PHYSICS_ACCEL_DIVISOR 8
+#define PILL_PHYSICS_DAMPING_NUM 244
+#define PILL_PHYSICS_DAMPING_DEN 256
+#define PILL_PHYSICS_BOUNCE_NUM 166
+#define PILL_PHYSICS_BOUNCE_DEN 256
+#define PILL_PHYSICS_MAX_VELOCITY_Q8 (9 * PILL_PHYSICS_Q8)
+#define PILL_PHYSICS_EDGE_MARGIN 4
+#define PILL_PHYSICS_DEADZONE_MG 35
+
 
 typedef enum {
   MEDICATION_TIME_MORNING,
@@ -173,6 +193,22 @@ typedef struct {
   uint8_t symbol;
   uint8_t shape;
   uint8_t color;
+  uint8_t icon_set;
+  uint8_t enabled;
+} LegacyMedicationSettingsV2;
+
+typedef struct {
+  char name[MEDICATION_NAME_LENGTH];
+  uint8_t quantity;
+  uint8_t time;
+  uint8_t schedule;
+  uint8_t day;
+  uint8_t symbol;
+  uint8_t shape;
+  uint8_t color;
+  uint8_t color2;
+  uint8_t size;
+  char imprint[MEDICATION_IMPRINT_LENGTH];
   uint8_t icon_set;
   uint8_t enabled;
 } MedicationSettings;
@@ -228,6 +264,9 @@ static const MedicationSettings s_default_medication = {
   .symbol = MEDICATION_SYMBOL_PILL,
   .shape = 2,
   .color = 255,
+  .color2 = 255,
+  .size = 100,
+  .imprint = "",
   .icon_set = 1,
   .enabled = 1
 };
@@ -302,6 +341,43 @@ static int16_t s_frame_height;
 static uint8_t s_animation_tick;
 static int8_t s_taken_hint_phase;
 static bool s_light_theme;
+static bool s_confirmed_screen_active;
+
+typedef enum {
+  TRANSFER_ANIMATION_IDLE,
+  TRANSFER_ANIMATION_MORPHING,
+  TRANSFER_ANIMATION_SHAFT_DROP,
+  TRANSFER_ANIMATION_READY,
+  TRANSFER_ANIMATION_FALLING
+} TransferAnimationState;
+
+static bool s_transfer_screen_active;
+static AppTimer *s_transfer_close_timer;
+static AppTimer *s_transfer_animation_timer;
+static TransferAnimationState s_transfer_animation_state;
+static uint16_t s_transfer_animation_elapsed_ms;
+static int16_t s_transfer_fall_offset;
+
+typedef struct {
+  int32_t x_q8;
+  int32_t y_q8;
+  int32_t vx_q8;
+  int32_t vy_q8;
+  int32_t angle;
+  uint8_t medication_index;
+  uint8_t collision_radius;
+} PillPhysicsBody;
+
+static PillPhysicsBody s_pill_physics_bodies[
+  PILL_PHYSICS_MAX_BODIES
+];
+static uint8_t s_pill_physics_body_count;
+static AppTimer *s_pill_physics_timer;
+static bool s_pill_physics_accel_subscribed;
+static bool s_pill_physics_window_visible;
+static int16_t s_pill_physics_gravity_x;
+static int16_t s_pill_physics_gravity_y;
+
 
 static uint8_t s_alarm_audio_volume =
     DEFAULT_ALARM_AUDIO_VOLUME;
@@ -407,8 +483,16 @@ static void alarm_confirmation_received(
     MedicationSymbol symbol
 );
 static void alarm_reset_after_settings_save(void);
+static void alarm_rearm_after_transfer(void);
 
 static void alarm_refresh_window_state(void);
+static void refresh_app_screen_state(void);
+static void show_transfer_screen(void);
+static void start_transfer_animation(void);
+static void schedule_transfer_close(void);
+static void pill_physics_rebuild(void);
+static void pill_physics_update_activity(void);
+static void pill_physics_stop(void);
 
 
 static void mark_scene_dirty(void) {
@@ -577,8 +661,14 @@ static bool medication_settings_valid(
         MEDICATION_SCHEDULE_MONTHLY ||
     settings->symbol >
         MEDICATION_SYMBOL_PEN ||
-    settings->shape > 3 ||
+    settings->shape > 4 ||
     settings->color < 192 ||
+    settings->color2 < 192 ||
+    settings->size < 60 ||
+    settings->size > 140 ||
+    settings->imprint[
+      MEDICATION_IMPRINT_LENGTH - 1
+    ] != '\0' ||
     settings->icon_set > 1 ||
     settings->enabled > 1 ||
     (settings->enabled && !settings->icon_set)
@@ -605,7 +695,6 @@ static bool medication_settings_valid(
       settings->day <= 31;
 }
 
-
 static MedicationSettings medication_from_legacy(
     const LegacyMedicationSettingsV1 *legacy
 ) {
@@ -630,7 +719,42 @@ static MedicationSettings medication_from_legacy(
   medication.enabled = legacy->enabled;
   medication.shape = 2;
   medication.color = 255;
+  medication.color2 = 255;
+  medication.size = 100;
+  medication.imprint[0] = '\0';
   medication.icon_set = 1;
+
+  return medication;
+}
+
+static MedicationSettings medication_from_legacy_v2(
+    const LegacyMedicationSettingsV2 *legacy
+) {
+  MedicationSettings medication =
+      s_default_medication;
+
+  if (!legacy) {
+    return medication;
+  }
+
+  memcpy(
+    medication.name,
+    legacy->name,
+    sizeof(medication.name)
+  );
+
+  medication.quantity = legacy->quantity;
+  medication.time = legacy->time;
+  medication.schedule = legacy->schedule;
+  medication.day = legacy->day;
+  medication.symbol = legacy->symbol;
+  medication.shape = legacy->shape;
+  medication.color = legacy->color;
+  medication.color2 = legacy->color;
+  medication.size = 100;
+  medication.imprint[0] = '\0';
+  medication.icon_set = legacy->icon_set;
+  medication.enabled = legacy->enabled;
 
   return medication;
 }
@@ -982,16 +1106,7 @@ static void refresh_medication_rows_for_time(void) {
     return;
   }
 
-  reset_medication_confirmations();
-  rebuild_medication_rows();
-
-  if (s_canvas_layer) {
-    reset_ui_state(
-      layer_get_bounds(s_canvas_layer)
-    );
-  }
-
-  mark_scene_dirty();
+  refresh_app_screen_state();
 }
 
 static void daypart_tick_handler(
@@ -1079,20 +1194,12 @@ static void apply_medication_list(
   }
 
   s_medication_count = count;
-  reset_medication_confirmations();
-  rebuild_medication_rows();
 
   if (save) {
     persist_medication_list();
   }
 
-  if (s_canvas_layer) {
-    reset_ui_state(
-      layer_get_bounds(s_canvas_layer)
-    );
-  }
-
-  mark_scene_dirty();
+  refresh_app_screen_state();
 }
 
 static bool load_current_medication_list(void) {
@@ -1141,7 +1248,13 @@ static bool load_current_medication_list(void) {
         stored_count
       );
 
-  const int legacy_size =
+  const int legacy_v2_size =
+      (int)(
+        sizeof(LegacyMedicationSettingsV2) *
+        stored_count
+      );
+
+  const int legacy_v1_size =
       (int)(
         sizeof(LegacyMedicationSettingsV1) *
         stored_count
@@ -1165,7 +1278,36 @@ static bool load_current_medication_list(void) {
     ) {
       return false;
     }
-  } else if (stored_size == legacy_size) {
+  } else if (stored_size == legacy_v2_size) {
+    LegacyMedicationSettingsV2 legacy[
+      MAX_MEDICATIONS
+    ];
+
+    memset(legacy, 0, sizeof(legacy));
+
+    if (
+      persist_read_data(
+        MEDICATION_LIST_PERSIST_KEY,
+        legacy,
+        legacy_v2_size
+      ) != legacy_v2_size
+    ) {
+      return false;
+    }
+
+    for (
+      uint8_t index = 0;
+      index < (uint8_t)stored_count;
+      index++
+    ) {
+      stored[index] =
+          medication_from_legacy_v2(
+            &legacy[index]
+          );
+    }
+
+    needs_persist = true;
+  } else if (stored_size == legacy_v1_size) {
     LegacyMedicationSettingsV1 legacy[
       MAX_MEDICATIONS
     ];
@@ -1176,8 +1318,8 @@ static bool load_current_medication_list(void) {
       persist_read_data(
         MEDICATION_LIST_PERSIST_KEY,
         legacy,
-        legacy_size
-      ) != legacy_size
+        legacy_v1_size
+      ) != legacy_v1_size
     ) {
       return false;
     }
@@ -1415,47 +1557,50 @@ static bool read_medication_from_message(
     iterator,
     MESSAGE_KEY_MED_NAME
   );
-
   Tuple *quantity_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_QUANTITY
   );
-
   Tuple *time_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_TIME
   );
-
   Tuple *schedule_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_SCHEDULE
   );
-
   Tuple *day_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_DAY
   );
-
   Tuple *symbol_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_SYMBOL
   );
-
   Tuple *shape_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_SHAPE
   );
-
   Tuple *color_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_COLOR
   );
-
+  Tuple *color2_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_COLOR2
+  );
+  Tuple *size_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_SIZE
+  );
+  Tuple *imprint_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_MED_IMPRINT
+  );
   Tuple *icon_set_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_ICON_SET
   );
-
   Tuple *enabled_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_ENABLED
@@ -1463,14 +1608,19 @@ static bool read_medication_from_message(
 
   if (
     !name_tuple ||
-    name_tuple->type != TUPLE_CSTRING
+    name_tuple->type != TUPLE_CSTRING ||
+    !imprint_tuple ||
+    imprint_tuple->type != TUPLE_CSTRING
   ) {
     return false;
   }
 
   const char *name =
       name_tuple->value->cstring;
+  const char *imprint =
+      imprint_tuple->value->cstring;
   const size_t name_length = strlen(name);
+  const size_t imprint_length = strlen(imprint);
 
   int32_t quantity;
   int32_t time;
@@ -1479,48 +1629,26 @@ static bool read_medication_from_message(
   int32_t symbol;
   int32_t shape;
   int32_t color;
+  int32_t color2;
+  int32_t size;
   int32_t icon_set;
   int32_t enabled;
 
   if (
     name_length == 0 ||
     name_length >= MEDICATION_NAME_LENGTH ||
-    !tuple_read_int32(
-      quantity_tuple,
-      &quantity
-    ) ||
-    !tuple_read_int32(
-      time_tuple,
-      &time
-    ) ||
-    !tuple_read_int32(
-      schedule_tuple,
-      &schedule
-    ) ||
-    !tuple_read_int32(
-      day_tuple,
-      &day
-    ) ||
-    !tuple_read_int32(
-      symbol_tuple,
-      &symbol
-    ) ||
-    !tuple_read_int32(
-      shape_tuple,
-      &shape
-    ) ||
-    !tuple_read_int32(
-      color_tuple,
-      &color
-    ) ||
-    !tuple_read_int32(
-      icon_set_tuple,
-      &icon_set
-    ) ||
-    !tuple_read_int32(
-      enabled_tuple,
-      &enabled
-    ) ||
+    imprint_length >= MEDICATION_IMPRINT_LENGTH ||
+    !tuple_read_int32(quantity_tuple, &quantity) ||
+    !tuple_read_int32(time_tuple, &time) ||
+    !tuple_read_int32(schedule_tuple, &schedule) ||
+    !tuple_read_int32(day_tuple, &day) ||
+    !tuple_read_int32(symbol_tuple, &symbol) ||
+    !tuple_read_int32(shape_tuple, &shape) ||
+    !tuple_read_int32(color_tuple, &color) ||
+    !tuple_read_int32(color2_tuple, &color2) ||
+    !tuple_read_int32(size_tuple, &size) ||
+    !tuple_read_int32(icon_set_tuple, &icon_set) ||
+    !tuple_read_int32(enabled_tuple, &enabled) ||
     quantity < 1 ||
     quantity > 20 ||
     time < MEDICATION_TIME_MORNING ||
@@ -1530,9 +1658,13 @@ static bool read_medication_from_message(
     symbol < MEDICATION_SYMBOL_PILL ||
     symbol > MEDICATION_SYMBOL_PEN ||
     shape < 0 ||
-    shape > 3 ||
+    shape > 4 ||
     color < 192 ||
     color > 255 ||
+    color2 < 192 ||
+    color2 > 255 ||
+    size < 60 ||
+    size > 140 ||
     icon_set < 0 ||
     icon_set > 1 ||
     enabled < 0 ||
@@ -1567,6 +1699,8 @@ static bool read_medication_from_message(
     .symbol = (uint8_t)symbol,
     .shape = (uint8_t)shape,
     .color = (uint8_t)color,
+    .color2 = (uint8_t)color2,
+    .size = (uint8_t)size,
     .icon_set = (uint8_t)icon_set,
     .enabled = (uint8_t)enabled
   };
@@ -1575,6 +1709,11 @@ static bool read_medication_from_message(
     parsed.name,
     name,
     name_length + 1
+  );
+  memcpy(
+    parsed.imprint,
+    imprint,
+    imprint_length + 1
   );
 
   if (!medication_settings_valid(&parsed)) {
@@ -1653,6 +1792,7 @@ static void settings_inbox_received(
     reset_pending_medications(
       (uint8_t)count
     );
+    show_transfer_screen();
     return;
   }
 
@@ -1687,6 +1827,11 @@ static void settings_inbox_received(
         &medication
       )
     ) {
+      APP_LOG(
+        APP_LOG_LEVEL_WARNING,
+        "Medication %ld transfer invalid",
+        (long)index
+      );
       return;
     }
 
@@ -1789,7 +1934,9 @@ static void settings_inbox_received(
   );
 
   alarm_reset_after_settings_save();
+  alarm_rearm_after_transfer();
   reset_pending_medications(0);
+  schedule_transfer_close();
 }
 
 static void settings_init(void) {
@@ -2439,6 +2586,13 @@ static void alarm_start(void) {
     return;
   }
 
+  if (s_transfer_screen_active) {
+    schedule_next_alarm_wakeup();
+    return;
+  }
+
+  refresh_app_screen_state();
+
   const time_t now = time(NULL);
   const uint8_t due_mask =
       alarm_unconfirmed_symbol_mask_at(now);
@@ -2502,6 +2656,41 @@ static void alarm_handle_minute_tick(
   schedule_next_alarm_wakeup();
 }
 
+static void alarm_rearm_after_transfer(void) {
+  alarm_refresh_window_state();
+
+  time_t window_start = 0;
+  (void)alarm_window_bounds_at(
+    time(NULL),
+    &window_start,
+    NULL,
+    NULL
+  );
+
+  s_alarm_window_state.window_start =
+      (int32_t)window_start;
+  s_alarm_window_state.last_reminder = 0;
+  s_alarm_window_state.confirmed_mask = 0;
+  s_alarm_window_state_loaded = true;
+  persist_alarm_window_state();
+
+  s_pills_confirmed = false;
+  s_pen_confirmed = false;
+
+  wakeup_cancel_all();
+  schedule_next_alarm_wakeup();
+
+  const time_t now = time(NULL);
+  const time_t next =
+      next_alarm_timestamp_after(now);
+
+  APP_LOG(
+    APP_LOG_LEVEL_INFO,
+    "Alarm plan re-armed after transfer: next in %ld seconds",
+    next > now ? (long)(next - now) : -1L
+  );
+}
+
 static void alarm_reset_after_settings_save(void) {
   alarm_stop();
   wakeup_cancel_all();
@@ -2522,17 +2711,9 @@ static void alarm_reset_after_settings_save(void) {
   s_alarm_window_state_loaded = true;
   persist_alarm_window_state();
 
-  s_pills_confirmed = false;
-  s_pen_confirmed = false;
-  rebuild_medication_rows();
-
-  if (s_canvas_layer) {
-    reset_ui_state(
-      layer_get_bounds(s_canvas_layer)
-    );
+  if (!s_transfer_screen_active) {
+    refresh_app_screen_state();
   }
-
-  mark_scene_dirty();
   schedule_next_alarm_wakeup();
 
   APP_LOG(
@@ -2720,6 +2901,852 @@ static int32_t current_pill_y(void) {
       ) /
       2 +
       visual_canvas_offset_y();
+}
+
+static uint8_t pill_physics_size_percent(
+    const MedicationSettings *medication
+) {
+  if (!medication) {
+    return 100;
+  }
+
+  const int value = medication->size;
+
+  return
+      value >= 60 && value <= 140
+          ? (uint8_t)value
+          : 100;
+}
+
+static int16_t pill_physics_scaled_dimension(
+    int16_t base,
+    uint8_t size_percent
+) {
+  int16_t result = (int16_t)(
+    ((int32_t)base * size_percent + 50) / 100
+  );
+
+  return result < 1 ? 1 : result;
+}
+
+static void pill_physics_geometry(
+    const MedicationSettings *medication,
+    int16_t *line_half,
+    int16_t *radius,
+    int16_t *diamond_half
+) {
+  const uint8_t size_percent =
+      pill_physics_size_percent(medication);
+  int16_t local_line_half = 0;
+  int16_t local_radius = 10;
+  int16_t local_diamond_half = 0;
+
+  switch (medication ? medication->shape : 0) {
+    case 1:
+      /* Existing ellipse icon: 26 x 18 px at 100 %. */
+      local_line_half = 4;
+      local_radius = 9;
+      break;
+
+    case 2:
+      /* Existing oblong pill icon: 30 x 14 px at 100 %. */
+      local_line_half = 8;
+      local_radius = 7;
+      break;
+
+    case 3:
+      local_radius = 0;
+      local_diamond_half = 11;
+      break;
+
+    case 4:
+      /* Two-colour capsule: about 42 x 20 px at 100 %. */
+      local_line_half = 11;
+      local_radius = 10;
+      break;
+
+    case 0:
+    default:
+      local_line_half = 0;
+      local_radius = 10;
+      break;
+  }
+
+  if (line_half) {
+    *line_half = pill_physics_scaled_dimension(
+      local_line_half,
+      size_percent
+    );
+  }
+  if (radius) {
+    *radius = pill_physics_scaled_dimension(
+      local_radius,
+      size_percent
+    );
+  }
+  if (diamond_half) {
+    *diamond_half = pill_physics_scaled_dimension(
+      local_diamond_half,
+      size_percent
+    );
+  }
+}
+
+static uint8_t pill_physics_collision_radius(
+    const MedicationSettings *medication
+) {
+  int16_t line_half;
+  int16_t radius;
+  int16_t diamond_half;
+
+  pill_physics_geometry(
+    medication,
+    &line_half,
+    &radius,
+    &diamond_half
+  );
+
+  const int16_t visible_half =
+      diamond_half > 0
+          ? diamond_half
+          : line_half + radius;
+
+  /*
+   * Intentionally smaller than the visible pill. This keeps the
+   * calculation circular and permits a little natural overlap.
+   */
+  int16_t result =
+      (visible_half * 68 + 50) / 100;
+
+  if (result < 5) {
+    result = 5;
+  } else if (result > 32) {
+    result = 32;
+  }
+
+  return (uint8_t)result;
+}
+
+static void pill_physics_body_extents(
+    const PillPhysicsBody *body,
+    int16_t *extent_x,
+    int16_t *extent_y
+) {
+  int16_t local_x = 3;
+  int16_t local_y = 3;
+
+  if (
+    body &&
+    body->medication_index < s_medication_count
+  ) {
+    const MedicationSettings *medication =
+        &s_medications[body->medication_index];
+    int16_t line_half;
+    int16_t radius;
+    int16_t diamond_half;
+
+    pill_physics_geometry(
+      medication,
+      &line_half,
+      &radius,
+      &diamond_half
+    );
+
+    int32_t cosine = cos_lookup(body->angle);
+    int32_t sine = sin_lookup(body->angle);
+
+    if (cosine < 0) {
+      cosine = -cosine;
+    }
+    if (sine < 0) {
+      sine = -sine;
+    }
+
+    if (diamond_half > 0) {
+      const int32_t maximum =
+          cosine > sine ? cosine : sine;
+      local_x = (int16_t)(
+        ((int32_t)diamond_half * maximum) /
+        TRIG_MAX_RATIO
+      ) + 2;
+      local_y = local_x;
+    } else {
+      local_x = (int16_t)(
+        ((int32_t)line_half * cosine) /
+        TRIG_MAX_RATIO
+      ) + radius + 2;
+      local_y = (int16_t)(
+        ((int32_t)line_half * sine) /
+        TRIG_MAX_RATIO
+      ) + radius + 2;
+    }
+  }
+
+  if (extent_x) {
+    *extent_x = local_x;
+  }
+  if (extent_y) {
+    *extent_y = local_y;
+  }
+}
+
+static bool pill_physics_medication_is_visible(
+    const MedicationSettings *medication
+) {
+  return
+      medication &&
+      medication->enabled &&
+      medication->icon_set &&
+      medication->symbol == MEDICATION_SYMBOL_PILL &&
+      medication->time ==
+          (uint8_t)current_medication_time() &&
+      !s_pills_confirmed;
+}
+
+static void pill_physics_initialize_body(
+    PillPhysicsBody *body,
+    uint8_t medication_index,
+    uint8_t body_index
+) {
+  if (!body || medication_index >= s_medication_count) {
+    return;
+  }
+
+  const MedicationSettings *medication =
+      &s_medications[medication_index];
+  const uint8_t collision_radius =
+      pill_physics_collision_radius(medication);
+
+  int16_t arena_width = 228;
+  int16_t arena_height = 228;
+
+  if (s_canvas_layer) {
+    const GRect bounds =
+        layer_get_bounds(s_canvas_layer);
+    arena_width = bounds.size.w;
+    arena_height = bounds.size.h;
+  }
+
+  const uint8_t column = body_index % 4;
+  const uint8_t row = body_index / 4;
+  const int16_t cell_width = arena_width / 4;
+  const int16_t cell_height = arena_height / 3;
+  int16_t x =
+      column * cell_width +
+      cell_width / 2;
+  int16_t y =
+      row * cell_height +
+      cell_height / 2;
+
+  x += (int16_t)((body_index * 7u) % 7u) - 3;
+  y += (int16_t)((body_index * 5u) % 5u) - 2;
+
+  const int16_t minimum_x =
+      collision_radius + PILL_PHYSICS_EDGE_MARGIN;
+  const int16_t maximum_x =
+      arena_width - collision_radius -
+      PILL_PHYSICS_EDGE_MARGIN;
+  const int16_t minimum_y =
+      collision_radius + PILL_PHYSICS_EDGE_MARGIN;
+  const int16_t maximum_y =
+      arena_height - collision_radius -
+      PILL_PHYSICS_EDGE_MARGIN;
+
+  if (x < minimum_x) {
+    x = minimum_x;
+  } else if (x > maximum_x) {
+    x = maximum_x;
+  }
+
+  if (y < minimum_y) {
+    y = minimum_y;
+  } else if (y > maximum_y) {
+    y = maximum_y;
+  }
+
+  *body = (PillPhysicsBody) {
+    .x_q8 = (int32_t)x * PILL_PHYSICS_Q8,
+    .y_q8 = (int32_t)y * PILL_PHYSICS_Q8,
+    .vx_q8 =
+        ((int32_t)(body_index % 3) - 1) *
+        (PILL_PHYSICS_Q8 / 3),
+    .vy_q8 =
+        ((int32_t)((body_index + 1) % 3) - 1) *
+        (PILL_PHYSICS_Q8 / 4),
+    .angle =
+        ((int32_t)body_index *
+         TRIG_MAX_ANGLE) /
+        PILL_PHYSICS_MAX_BODIES,
+    .medication_index = medication_index,
+    .collision_radius = collision_radius
+  };
+}
+
+static bool pill_physics_add_body(
+    uint8_t medication_index
+) {
+  if (
+    s_pill_physics_body_count >=
+        PILL_PHYSICS_MAX_BODIES
+  ) {
+    return false;
+  }
+
+  pill_physics_initialize_body(
+    &s_pill_physics_bodies[
+      s_pill_physics_body_count
+    ],
+    medication_index,
+    s_pill_physics_body_count
+  );
+
+  s_pill_physics_body_count++;
+  return true;
+}
+
+static void pill_physics_distribute_bodies(void) {
+  if (s_pill_physics_body_count == 0) {
+    return;
+  }
+
+  int16_t arena_width = 228;
+  int16_t arena_height = 228;
+
+  if (s_canvas_layer) {
+    const GRect bounds =
+        layer_get_bounds(s_canvas_layer);
+    arena_width = bounds.size.w;
+    arena_height = bounds.size.h;
+  }
+
+  uint8_t columns;
+
+  if (s_pill_physics_body_count <= 3) {
+    columns = s_pill_physics_body_count;
+  } else if (s_pill_physics_body_count <= 6) {
+    columns = 3;
+  } else {
+    columns = 4;
+  }
+
+  const uint8_t rows =
+      (s_pill_physics_body_count + columns - 1) /
+      columns;
+  const int16_t cell_width =
+      arena_width / columns;
+  const int16_t cell_height =
+      arena_height / rows;
+  static const int8_t jitter_x[] = {
+    -5, 4, -2, 6, 1, -6, 5, -3, 3, -4, 2, 0
+  };
+  static const int8_t jitter_y[] = {
+    3, -4, 5, -2, -5, 2, -3, 4, -1, 5, -4, 1
+  };
+
+  for (
+    uint8_t index = 0;
+    index < s_pill_physics_body_count;
+    index++
+  ) {
+    PillPhysicsBody *body =
+        &s_pill_physics_bodies[index];
+    const uint8_t column = index % columns;
+    const uint8_t row = index / columns;
+    int16_t x =
+        column * cell_width +
+        cell_width / 2 +
+        jitter_x[index];
+    int16_t y =
+        row * cell_height +
+        cell_height / 2 +
+        jitter_y[index];
+    int16_t extent_x;
+    int16_t extent_y;
+
+    pill_physics_body_extents(
+      body,
+      &extent_x,
+      &extent_y
+    );
+
+    const int16_t minimum_x =
+        extent_x + PILL_PHYSICS_EDGE_MARGIN;
+    const int16_t maximum_x =
+        arena_width - extent_x -
+        PILL_PHYSICS_EDGE_MARGIN;
+    const int16_t minimum_y =
+        extent_y + PILL_PHYSICS_EDGE_MARGIN;
+    const int16_t maximum_y =
+        arena_height - extent_y -
+        PILL_PHYSICS_EDGE_MARGIN;
+
+    if (x < minimum_x) {
+      x = minimum_x;
+    } else if (x > maximum_x) {
+      x = maximum_x;
+    }
+
+    if (y < minimum_y) {
+      y = minimum_y;
+    } else if (y > maximum_y) {
+      y = maximum_y;
+    }
+
+    body->x_q8 =
+        (int32_t)x * PILL_PHYSICS_Q8;
+    body->y_q8 =
+        (int32_t)y * PILL_PHYSICS_Q8;
+    body->vx_q8 =
+        ((int32_t)(index % 3) - 1) *
+        (PILL_PHYSICS_Q8 / 4);
+    body->vy_q8 =
+        ((int32_t)((index + 1) % 3) - 1) *
+        (PILL_PHYSICS_Q8 / 5);
+  }
+}
+
+static void pill_physics_rebuild(void) {
+  memset(
+    s_pill_physics_bodies,
+    0,
+    sizeof(s_pill_physics_bodies)
+  );
+  s_pill_physics_body_count = 0;
+
+  uint8_t remaining[MAX_MEDICATIONS] = { 0 };
+
+  /*
+   * First pass: every due tablet medication gets at least one visible body.
+   * This keeps different medicines visible even when one has a high quantity.
+   */
+  for (
+    uint8_t index = 0;
+    index < s_medication_count &&
+    s_pill_physics_body_count <
+        PILL_PHYSICS_MAX_BODIES;
+    index++
+  ) {
+    const MedicationSettings *medication =
+        &s_medications[index];
+
+    if (!pill_physics_medication_is_visible(medication)) {
+      continue;
+    }
+
+    (void)pill_physics_add_body(index);
+    remaining[index] =
+        medication->quantity > 0
+            ? medication->quantity - 1
+            : 0;
+  }
+
+  /* Additional prescribed pieces are distributed round-robin. */
+  bool added = true;
+
+  while (
+    added &&
+    s_pill_physics_body_count <
+        PILL_PHYSICS_MAX_BODIES
+  ) {
+    added = false;
+
+    for (
+      uint8_t index = 0;
+      index < s_medication_count &&
+      s_pill_physics_body_count <
+          PILL_PHYSICS_MAX_BODIES;
+      index++
+    ) {
+      if (remaining[index] == 0) {
+        continue;
+      }
+
+      if (pill_physics_add_body(index)) {
+        remaining[index]--;
+        added = true;
+      }
+    }
+  }
+
+  pill_physics_distribute_bodies();
+
+  s_pill_physics_gravity_x = 0;
+  s_pill_physics_gravity_y = 0;
+
+  if (s_canvas_layer) {
+    layer_mark_dirty(s_canvas_layer);
+  }
+}
+
+static int16_t pill_physics_integer_sqrt(
+    int32_t value
+) {
+  if (value <= 0) {
+    return 0;
+  }
+
+  int16_t root = 0;
+
+  while (
+    (int32_t)(root + 1) * (root + 1) <= value &&
+    root < 181
+  ) {
+    root++;
+  }
+
+  return root;
+}
+
+static void pill_physics_resolve_body_collisions(void) {
+  for (
+    uint8_t left_index = 0;
+    left_index < s_pill_physics_body_count;
+    left_index++
+  ) {
+    PillPhysicsBody *left =
+        &s_pill_physics_bodies[left_index];
+
+    for (
+      uint8_t right_index = left_index + 1;
+      right_index < s_pill_physics_body_count;
+      right_index++
+    ) {
+      PillPhysicsBody *right =
+          &s_pill_physics_bodies[right_index];
+      int16_t dx = (int16_t)(
+        (right->x_q8 - left->x_q8) /
+        PILL_PHYSICS_Q8
+      );
+      int16_t dy = (int16_t)(
+        (right->y_q8 - left->y_q8) /
+        PILL_PHYSICS_Q8
+      );
+
+      if (dx == 0 && dy == 0) {
+        dx = (right_index & 1) ? 1 : -1;
+        dy = (right_index & 2) ? 1 : -1;
+      }
+
+      const int16_t minimum_distance =
+          left->collision_radius +
+          right->collision_radius;
+      const int32_t distance_squared =
+          (int32_t)dx * dx +
+          (int32_t)dy * dy;
+
+      if (
+        distance_squared >=
+            (int32_t)minimum_distance *
+            minimum_distance
+      ) {
+        continue;
+      }
+
+      int16_t distance =
+          pill_physics_integer_sqrt(
+            distance_squared
+          );
+
+      if (distance < 1) {
+        distance = 1;
+      }
+
+      const int16_t overlap =
+          minimum_distance - distance;
+      const int32_t push_q8 =
+          ((int32_t)overlap *
+           PILL_PHYSICS_Q8) /
+          2;
+      const int32_t push_x_q8 =
+          push_q8 * dx / distance;
+      const int32_t push_y_q8 =
+          push_q8 * dy / distance;
+
+      left->x_q8 -= push_x_q8;
+      left->y_q8 -= push_y_q8;
+      right->x_q8 += push_x_q8;
+      right->y_q8 += push_y_q8;
+
+      const int32_t relative_vx =
+          right->vx_q8 - left->vx_q8;
+      const int32_t relative_vy =
+          right->vy_q8 - left->vy_q8;
+      const int32_t normal_velocity =
+          (relative_vx * dx +
+           relative_vy * dy) /
+          distance;
+
+      if (normal_velocity < 0) {
+        const int32_t impulse =
+            -normal_velocity * 3 / 8;
+        const int32_t impulse_x =
+            impulse * dx / distance;
+        const int32_t impulse_y =
+            impulse * dy / distance;
+
+        left->vx_q8 -= impulse_x;
+        left->vy_q8 -= impulse_y;
+        right->vx_q8 += impulse_x;
+        right->vy_q8 += impulse_y;
+      }
+    }
+  }
+}
+
+static void pill_physics_apply_edge_collision(
+    PillPhysicsBody *body,
+    int16_t arena_width,
+    int16_t arena_height
+) {
+  int16_t extent_x;
+  int16_t extent_y;
+
+  pill_physics_body_extents(
+    body,
+    &extent_x,
+    &extent_y
+  );
+
+  const int32_t minimum_x_q8 =
+      (extent_x + PILL_PHYSICS_EDGE_MARGIN) *
+      PILL_PHYSICS_Q8;
+  const int32_t maximum_x_q8 =
+      (arena_width - extent_x -
+       PILL_PHYSICS_EDGE_MARGIN) *
+      PILL_PHYSICS_Q8;
+  const int32_t minimum_y_q8 =
+      (extent_y + PILL_PHYSICS_EDGE_MARGIN) *
+      PILL_PHYSICS_Q8;
+  const int32_t maximum_y_q8 =
+      (arena_height - extent_y -
+       PILL_PHYSICS_EDGE_MARGIN) *
+      PILL_PHYSICS_Q8;
+
+  if (body->x_q8 < minimum_x_q8) {
+    body->x_q8 = minimum_x_q8;
+    if (body->vx_q8 < 0) {
+      body->vx_q8 =
+          -body->vx_q8 *
+          PILL_PHYSICS_BOUNCE_NUM /
+          PILL_PHYSICS_BOUNCE_DEN;
+    }
+  } else if (body->x_q8 > maximum_x_q8) {
+    body->x_q8 = maximum_x_q8;
+    if (body->vx_q8 > 0) {
+      body->vx_q8 =
+          -body->vx_q8 *
+          PILL_PHYSICS_BOUNCE_NUM /
+          PILL_PHYSICS_BOUNCE_DEN;
+    }
+  }
+
+  if (body->y_q8 < minimum_y_q8) {
+    body->y_q8 = minimum_y_q8;
+    if (body->vy_q8 < 0) {
+      body->vy_q8 =
+          -body->vy_q8 *
+          PILL_PHYSICS_BOUNCE_NUM /
+          PILL_PHYSICS_BOUNCE_DEN;
+    }
+  } else if (body->y_q8 > maximum_y_q8) {
+    body->y_q8 = maximum_y_q8;
+    if (body->vy_q8 > 0) {
+      body->vy_q8 =
+          -body->vy_q8 *
+          PILL_PHYSICS_BOUNCE_NUM /
+          PILL_PHYSICS_BOUNCE_DEN;
+    }
+  }
+}
+
+static void pill_physics_tick(void *context) {
+  (void)context;
+  s_pill_physics_timer = NULL;
+
+  if (
+    !s_pill_physics_window_visible ||
+    s_confirmed_screen_active ||
+    s_transfer_screen_active ||
+    s_pill_physics_body_count == 0
+  ) {
+    pill_physics_update_activity();
+    return;
+  }
+
+  int16_t arena_width = 228;
+  int16_t arena_height = 228;
+
+  if (s_canvas_layer) {
+    const GRect bounds =
+        layer_get_bounds(s_canvas_layer);
+    arena_width = bounds.size.w;
+    arena_height = bounds.size.h;
+  }
+
+  for (
+    uint8_t index = 0;
+    index < s_pill_physics_body_count;
+    index++
+  ) {
+    PillPhysicsBody *body =
+        &s_pill_physics_bodies[index];
+
+    body->vx_q8 +=
+        s_pill_physics_gravity_x /
+        PILL_PHYSICS_ACCEL_DIVISOR;
+    body->vy_q8 +=
+        s_pill_physics_gravity_y /
+        PILL_PHYSICS_ACCEL_DIVISOR;
+
+    body->vx_q8 =
+        body->vx_q8 *
+        PILL_PHYSICS_DAMPING_NUM /
+        PILL_PHYSICS_DAMPING_DEN;
+    body->vy_q8 =
+        body->vy_q8 *
+        PILL_PHYSICS_DAMPING_NUM /
+        PILL_PHYSICS_DAMPING_DEN;
+
+    body->vx_q8 = clamp_symmetric(
+      body->vx_q8,
+      PILL_PHYSICS_MAX_VELOCITY_Q8
+    );
+    body->vy_q8 = clamp_symmetric(
+      body->vy_q8,
+      PILL_PHYSICS_MAX_VELOCITY_Q8
+    );
+
+    body->x_q8 += body->vx_q8;
+    body->y_q8 += body->vy_q8;
+
+    body->angle +=
+        body->vx_q8 * 4 -
+        body->vy_q8;
+
+    while (body->angle < 0) {
+      body->angle += TRIG_MAX_ANGLE;
+    }
+    while (body->angle >= TRIG_MAX_ANGLE) {
+      body->angle -= TRIG_MAX_ANGLE;
+    }
+
+    pill_physics_apply_edge_collision(
+      body,
+      arena_width,
+      arena_height
+    );
+  }
+
+  pill_physics_resolve_body_collisions();
+
+  for (
+    uint8_t index = 0;
+    index < s_pill_physics_body_count;
+    index++
+  ) {
+    pill_physics_apply_edge_collision(
+      &s_pill_physics_bodies[index],
+      arena_width,
+      arena_height
+    );
+  }
+
+  if (s_canvas_layer) {
+    layer_mark_dirty(s_canvas_layer);
+  }
+
+  s_pill_physics_timer = app_timer_register(
+    PILL_PHYSICS_FRAME_MS,
+    pill_physics_tick,
+    NULL
+  );
+}
+
+static void pill_physics_accel_handler(
+    AccelData *data,
+    uint32_t num_samples
+) {
+  if (!data || num_samples == 0) {
+    return;
+  }
+
+  const AccelData sample =
+      data[num_samples - 1];
+
+  /* Ignore our own alarm vibration so it does not fling the pills around. */
+  if (sample.did_vibrate) {
+    return;
+  }
+
+  int16_t target_x = sample.x;
+  int16_t target_y = (int16_t)-sample.y;
+
+  if (
+    target_x > -PILL_PHYSICS_DEADZONE_MG &&
+    target_x < PILL_PHYSICS_DEADZONE_MG
+  ) {
+    target_x = 0;
+  }
+  if (
+    target_y > -PILL_PHYSICS_DEADZONE_MG &&
+    target_y < PILL_PHYSICS_DEADZONE_MG
+  ) {
+    target_y = 0;
+  }
+
+  s_pill_physics_gravity_x =
+      (int16_t)(
+        (s_pill_physics_gravity_x * 3 +
+         target_x) /
+        4
+      );
+  s_pill_physics_gravity_y =
+      (int16_t)(
+        (s_pill_physics_gravity_y * 3 +
+         target_y) /
+        4
+      );
+}
+
+static void pill_physics_stop(void) {
+  cancel_timer(&s_pill_physics_timer);
+
+  if (s_pill_physics_accel_subscribed) {
+    accel_data_service_unsubscribe();
+    s_pill_physics_accel_subscribed = false;
+  }
+}
+
+static void pill_physics_update_activity(void) {
+  const bool should_run =
+      s_pill_physics_window_visible &&
+      !s_confirmed_screen_active &&
+      !s_transfer_screen_active &&
+      s_pill_physics_body_count > 0;
+
+  if (!should_run) {
+    pill_physics_stop();
+    return;
+  }
+
+  if (!s_pill_physics_accel_subscribed) {
+    accel_service_set_sampling_rate(
+      ACCEL_SAMPLING_25HZ
+    );
+    accel_data_service_subscribe(
+      1,
+      pill_physics_accel_handler
+    );
+    s_pill_physics_accel_subscribed = true;
+  }
+
+  if (!s_pill_physics_timer) {
+    s_pill_physics_timer = app_timer_register(
+      PILL_PHYSICS_FRAME_MS,
+      pill_physics_tick,
+      NULL
+    );
+  }
 }
 
 static bool scrolling_back_to_pill(void) {
@@ -2947,6 +3974,14 @@ static void update_band_animation_target(void) {
     return;
   }
 
+  if (
+    s_confirmed_screen_active ||
+    s_transfer_screen_active
+  ) {
+    set_band_and_arrow_hidden(true);
+    return;
+  }
+
   const bool visible =
       s_scroll.snap_index > 0 &&
       !scrolling_back_to_pill();
@@ -3099,6 +4134,82 @@ static void draw_tablet_icon(
         GPoint(center_x, center_y + 5)
       );
       break;
+
+    case 4: {
+      const GColor secondary_color = {
+        .argb = medication->color2
+      };
+      const GRect outer = GRect(
+        center_x - 15,
+        center_y - 8,
+        30,
+        16
+      );
+      const GRect inner = GRect(
+        center_x - 13,
+        center_y - 6,
+        26,
+        12
+      );
+
+      graphics_context_set_fill_color(
+        ctx,
+        outline_color
+      );
+      graphics_fill_rect(
+        ctx,
+        outer,
+        8,
+        GCornersAll
+      );
+
+      graphics_context_set_fill_color(
+        ctx,
+        fill_color
+      );
+      graphics_fill_rect(
+        ctx,
+        inner,
+        6,
+        GCornersAll
+      );
+
+      graphics_context_set_fill_color(
+        ctx,
+        secondary_color
+      );
+      graphics_fill_rect(
+        ctx,
+        GRect(
+          center_x,
+          center_y - 6,
+          7,
+          12
+        ),
+        0,
+        GCornerNone
+      );
+      graphics_fill_circle(
+        ctx,
+        GPoint(center_x + 7, center_y),
+        6
+      );
+
+      graphics_context_set_stroke_color(
+        ctx,
+        outline_color
+      );
+      graphics_context_set_stroke_width(
+        ctx,
+        1
+      );
+      graphics_draw_line(
+        ctx,
+        GPoint(center_x, center_y - 6),
+        GPoint(center_x, center_y + 6)
+      );
+      break;
+    }
 
     case 3: {
       GPoint points[] = {
@@ -3261,6 +4372,458 @@ static void draw_medication_icon(
     medication,
     outline_color
   );
+}
+
+static void draw_physics_round_line(
+    GContext *ctx,
+    GPoint start,
+    GPoint end,
+    uint8_t radius,
+    GColor color
+) {
+  const int16_t dx = end.x - start.x;
+  const int16_t dy = end.y - start.y;
+  const int16_t abs_dx = dx < 0 ? -dx : dx;
+  const int16_t abs_dy = dy < 0 ? -dy : dy;
+  const int16_t steps = abs_dx > abs_dy ? abs_dx : abs_dy;
+
+  graphics_context_set_fill_color(ctx, color);
+
+  if (steps <= 0) {
+    graphics_fill_circle(ctx, start, radius);
+    return;
+  }
+
+  for (int16_t step = 0; step <= steps; step++) {
+    graphics_fill_circle(
+      ctx,
+      GPoint(
+        start.x + ((int32_t)dx * step) / steps,
+        start.y + ((int32_t)dy * step) / steps
+      ),
+      radius
+    );
+  }
+}
+
+static void draw_physics_capsule(
+    GContext *ctx,
+    GPoint center,
+    int32_t angle,
+    int16_t half_length,
+    uint8_t radius,
+    GColor first_color,
+    GColor second_color,
+    GColor outline_color,
+    bool two_colours,
+    bool draw_divider
+) {
+  const int16_t dx = (int16_t)(
+    ((int32_t)cos_lookup(angle) *
+     half_length) /
+    TRIG_MAX_RATIO
+  );
+  const int16_t dy = (int16_t)(
+    ((int32_t)sin_lookup(angle) *
+     half_length) /
+    TRIG_MAX_RATIO
+  );
+  const GPoint start = GPoint(
+    center.x - dx,
+    center.y - dy
+  );
+  const GPoint end = GPoint(
+    center.x + dx,
+    center.y + dy
+  );
+
+  draw_physics_round_line(
+    ctx,
+    start,
+    end,
+    radius + 2,
+    outline_color
+  );
+  draw_physics_round_line(
+    ctx,
+    start,
+    end,
+    radius,
+    first_color
+  );
+
+  if (two_colours) {
+    const int16_t unit_dx = (int16_t)(
+      ((int32_t)cos_lookup(angle) * radius) /
+      TRIG_MAX_RATIO
+    );
+    const int16_t unit_dy = (int16_t)(
+      ((int32_t)sin_lookup(angle) * radius) /
+      TRIG_MAX_RATIO
+    );
+
+    draw_physics_round_line(
+      ctx,
+      GPoint(
+        center.x + unit_dx,
+        center.y + unit_dy
+      ),
+      end,
+      radius,
+      second_color
+    );
+  }
+
+  if (draw_divider || two_colours) {
+    const int32_t divider_angle =
+        angle + TRIG_MAX_ANGLE / 4;
+    const int16_t divider_dx = (int16_t)(
+      ((int32_t)cos_lookup(divider_angle) *
+       (radius - 1)) /
+      TRIG_MAX_RATIO
+    );
+    const int16_t divider_dy = (int16_t)(
+      ((int32_t)sin_lookup(divider_angle) *
+       (radius - 1)) /
+      TRIG_MAX_RATIO
+    );
+
+    draw_physics_round_line(
+      ctx,
+      GPoint(
+        center.x - divider_dx,
+        center.y - divider_dy
+      ),
+      GPoint(
+        center.x + divider_dx,
+        center.y + divider_dy
+      ),
+      1,
+      outline_color
+    );
+  }
+}
+
+static void draw_physics_diamond(
+    GContext *ctx,
+    GPoint center,
+    int32_t angle,
+    int16_t half_size,
+    GColor fill_color,
+    GColor outline_color
+) {
+  GPoint points[4];
+
+  for (uint8_t index = 0; index < 4; index++) {
+    const int32_t point_angle =
+        angle +
+        ((int32_t)index * TRIG_MAX_ANGLE) / 4;
+
+    points[index] = GPoint(
+      center.x + (int16_t)(
+        ((int32_t)cos_lookup(point_angle) *
+         half_size) /
+        TRIG_MAX_RATIO
+      ),
+      center.y + (int16_t)(
+        ((int32_t)sin_lookup(point_angle) *
+         half_size) /
+        TRIG_MAX_RATIO
+      )
+    );
+  }
+
+  const GPathInfo path_info = {
+    .num_points = ARRAY_LENGTH(points),
+    .points = points
+  };
+  GPath *path = gpath_create(&path_info);
+
+  if (!path) {
+    return;
+  }
+
+  graphics_context_set_fill_color(ctx, outline_color);
+  graphics_context_set_stroke_color(ctx, outline_color);
+  graphics_context_set_stroke_width(ctx, 3);
+  gpath_draw_filled(ctx, path);
+  gpath_draw_outline(ctx, path);
+
+  const int16_t inner_half =
+      half_size > 3 ? half_size - 3 : 1;
+
+  for (uint8_t index = 0; index < 4; index++) {
+    const int32_t point_angle =
+        angle +
+        ((int32_t)index * TRIG_MAX_ANGLE) / 4;
+
+    points[index] = GPoint(
+      center.x + (int16_t)(
+        ((int32_t)cos_lookup(point_angle) *
+         inner_half) /
+        TRIG_MAX_RATIO
+      ),
+      center.y + (int16_t)(
+        ((int32_t)sin_lookup(point_angle) *
+         inner_half) /
+        TRIG_MAX_RATIO
+      )
+    );
+  }
+
+  graphics_context_set_fill_color(ctx, fill_color);
+  gpath_draw_filled(ctx, path);
+  gpath_destroy(path);
+  graphics_context_set_stroke_width(ctx, 1);
+}
+
+static int16_t pill_physics_colour_brightness(GColor color) {
+  const uint8_t value = color.argb;
+  const uint8_t red = (value >> 4) & 3;
+  const uint8_t green = (value >> 2) & 3;
+  const uint8_t blue = value & 3;
+
+  return
+      red * 30 +
+      green * 59 +
+      blue * 11;
+}
+
+static void draw_physics_imprint(
+    GContext *ctx,
+    GPoint center,
+    const MedicationSettings *medication,
+    int16_t body_width
+) {
+  if (
+    !medication ||
+    medication->imprint[0] == '\0'
+  ) {
+    return;
+  }
+
+  const GColor first_color = {
+    .argb = medication->color
+  };
+  int16_t brightness =
+      pill_physics_colour_brightness(first_color);
+
+  if (medication->shape == 4) {
+    const GColor second_color = {
+      .argb = (uint8_t)medication->color2
+    };
+    brightness = (int16_t)(
+      (brightness +
+       pill_physics_colour_brightness(second_color)) /
+      2
+    );
+  }
+
+  const bool use_dark_text = brightness >= 165;
+  const GColor text_color =
+      use_dark_text ? GColorBlack : GColorWhite;
+  const GColor shadow_color =
+      use_dark_text ? GColorWhite : GColorBlack;
+  const int16_t width =
+      body_width < 24 ? 24 :
+      (body_width > 64 ? 64 : body_width);
+  const GRect frame = GRect(
+    center.x - width / 2,
+    center.y - 9,
+    width,
+    18
+  );
+  const GFont font =
+      fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
+
+  graphics_context_set_text_color(ctx, shadow_color);
+  graphics_draw_text(
+    ctx,
+    medication->imprint,
+    font,
+    GRect(frame.origin.x - 1, frame.origin.y, frame.size.w, frame.size.h),
+    GTextOverflowModeTrailingEllipsis,
+    GTextAlignmentCenter,
+    NULL
+  );
+  graphics_draw_text(
+    ctx,
+    medication->imprint,
+    font,
+    GRect(frame.origin.x + 1, frame.origin.y, frame.size.w, frame.size.h),
+    GTextOverflowModeTrailingEllipsis,
+    GTextAlignmentCenter,
+    NULL
+  );
+
+  graphics_context_set_text_color(ctx, text_color);
+  graphics_draw_text(
+    ctx,
+    medication->imprint,
+    font,
+    frame,
+    GTextOverflowModeTrailingEllipsis,
+    GTextAlignmentCenter,
+    NULL
+  );
+}
+
+static void draw_physics_pill_body(
+    GContext *ctx,
+    const PillPhysicsBody *body,
+    int32_t arena_y,
+    GColor outline_color
+) {
+  if (
+    !body ||
+    body->medication_index >= s_medication_count
+  ) {
+    return;
+  }
+
+  const MedicationSettings *medication =
+      &s_medications[body->medication_index];
+  const GColor fill_color = {
+    .argb = medication->color
+  };
+  const GColor second_color = {
+    .argb = (uint8_t)medication->color2
+  };
+  const GPoint center = GPoint(
+    (int16_t)(body->x_q8 / PILL_PHYSICS_Q8),
+    (int16_t)(
+      arena_y +
+      body->y_q8 / PILL_PHYSICS_Q8
+    )
+  );
+  int16_t line_half;
+  int16_t radius;
+  int16_t diamond_half;
+
+  pill_physics_geometry(
+    medication,
+    &line_half,
+    &radius,
+    &diamond_half
+  );
+
+  switch (medication->shape) {
+    case 1:
+      draw_physics_capsule(
+        ctx,
+        center,
+        body->angle,
+        line_half,
+        (uint8_t)radius,
+        fill_color,
+        fill_color,
+        outline_color,
+        false,
+        false
+      );
+      break;
+
+    case 2:
+      draw_physics_capsule(
+        ctx,
+        center,
+        body->angle,
+        line_half,
+        (uint8_t)radius,
+        fill_color,
+        fill_color,
+        outline_color,
+        false,
+        true
+      );
+      break;
+
+    case 3:
+      draw_physics_diamond(
+        ctx,
+        center,
+        body->angle,
+        diamond_half,
+        fill_color,
+        outline_color
+      );
+      break;
+
+    case 4:
+      draw_physics_capsule(
+        ctx,
+        center,
+        body->angle,
+        line_half,
+        (uint8_t)radius,
+        fill_color,
+        second_color,
+        outline_color,
+        true,
+        true
+      );
+      break;
+
+    case 0:
+    default:
+      graphics_context_set_fill_color(
+        ctx,
+        outline_color
+      );
+      graphics_fill_circle(
+        ctx,
+        center,
+        (uint16_t)(radius + 2)
+      );
+      graphics_context_set_fill_color(
+        ctx,
+        fill_color
+      );
+      graphics_fill_circle(
+        ctx,
+        center,
+        (uint16_t)radius
+      );
+      break;
+  }
+
+  const int16_t body_width =
+      diamond_half > 0
+          ? diamond_half * 2
+          : (line_half + radius) * 2;
+
+  draw_physics_imprint(
+    ctx,
+    center,
+    medication,
+    body_width
+  );
+}
+
+static void draw_physics_pills(
+    GContext *ctx,
+    GRect bounds,
+    int32_t arena_y
+) {
+  if (
+    arena_y <= -bounds.size.h ||
+    arena_y >= bounds.size.h
+  ) {
+    return;
+  }
+
+  for (
+    uint8_t index = 0;
+    index < s_pill_physics_body_count;
+    index++
+  ) {
+    draw_physics_pill_body(
+      ctx,
+      &s_pill_physics_bodies[index],
+      arena_y,
+      theme_foreground_color()
+    );
+  }
 }
 
 static void draw_medications(
@@ -3472,38 +5035,6 @@ static void draw_confirmation_checkmark(
   draw_round_line(ctx, middle, end);
 }
 
-static void draw_pill_if_visible(
-    GContext *ctx,
-    GRect bounds,
-    int32_t pill_y
-) {
-  GBitmap *frame =
-      s_frames[
-        (s_animation_tick / PILL_TICKS_PER_FRAME) % FRAME_COUNT
-      ];
-
-  if (
-    !frame ||
-    pill_y <= -s_frame_height ||
-    pill_y >= bounds.size.h
-  ) {
-    return;
-  }
-
-  graphics_context_set_compositing_mode(ctx, GCompOpSet);
-
-  graphics_draw_bitmap_in_rect(
-    ctx,
-    frame,
-    GRect(
-      (bounds.size.w - s_frame_width) / 2,
-      (int16_t)pill_y,
-      s_frame_width,
-      s_frame_height
-    )
-  );
-}
-
 static void canvas_update_proc(
     Layer *layer,
     GContext *ctx
@@ -3522,7 +5053,11 @@ static void canvas_update_proc(
 
   const int32_t pill_y = current_pill_y();
 
-  draw_pill_if_visible(ctx, bounds, pill_y);
+  draw_physics_pills(
+    ctx,
+    bounds,
+    visual_canvas_offset_y()
+  );
   draw_scroll_hint(ctx, bounds, pill_y);
   draw_medications(
     ctx,
@@ -3654,6 +5189,7 @@ static bool confirmation_prompt_is_active(
     MedicationSymbol *symbol
 ) {
   if (
+    s_transfer_screen_active ||
     !selected_confirmation_symbol(symbol) ||
     s_scroll.mode != SCROLL_IDLE ||
     s_band.animating
@@ -3768,12 +5304,321 @@ static void band_update_proc(
   );
 }
 
+static int16_t transfer_lerp_int16(
+    int16_t from,
+    int16_t to,
+    uint16_t progress
+) {
+  return (int16_t)(
+    from +
+    ((int32_t)(to - from) * progress) /
+        TRANSFER_PROGRESS_MAX
+  );
+}
+
+static GPoint transfer_lerp_point(
+    GPoint from,
+    GPoint to,
+    uint16_t progress
+) {
+  return GPoint(
+    transfer_lerp_int16(
+      from.x,
+      to.x,
+      progress
+    ),
+    transfer_lerp_int16(
+      from.y,
+      to.y,
+      progress
+    )
+  );
+}
+
+static void draw_transfer_round_line(
+    GContext *ctx,
+    GPoint start,
+    GPoint end,
+    int16_t radius
+) {
+  const int16_t dx = end.x - start.x;
+  const int16_t dy = end.y - start.y;
+  const int16_t abs_dx = dx < 0 ? -dx : dx;
+  const int16_t abs_dy = dy < 0 ? -dy : dy;
+  const int16_t steps = abs_dx > abs_dy ? abs_dx : abs_dy;
+
+  if (steps <= 0) {
+    graphics_fill_circle(ctx, start, (uint16_t)radius);
+    return;
+  }
+
+  for (int16_t step = 0; step <= steps; step++) {
+    graphics_fill_circle(
+      ctx,
+      GPoint(
+        start.x + ((int32_t)dx * step) / steps,
+        start.y + ((int32_t)dy * step) / steps
+      ),
+      (uint16_t)radius
+    );
+  }
+}
+
+static uint16_t transfer_progress_for_duration(
+    uint16_t duration_ms
+) {
+  if (
+    duration_ms == 0 ||
+    s_transfer_animation_elapsed_ms >= duration_ms
+  ) {
+    return TRANSFER_PROGRESS_MAX;
+  }
+
+  return (uint16_t)(
+    ((uint32_t)s_transfer_animation_elapsed_ms *
+     TRANSFER_PROGRESS_MAX) /
+    duration_ms
+  );
+}
+
+static int16_t transfer_shaft_bounce_offset(
+    uint16_t progress
+) {
+  if (progress < 760) {
+    const uint16_t local_progress =
+        (uint16_t)(
+          ((uint32_t)progress *
+           TRANSFER_PROGRESS_MAX) /
+          760
+        );
+    const int32_t inverse =
+        TRANSFER_PROGRESS_MAX -
+        local_progress;
+    const int32_t eased =
+        TRANSFER_PROGRESS_MAX -
+        (inverse * inverse) /
+            TRANSFER_PROGRESS_MAX;
+
+    return (int16_t)(
+      -170 +
+      (176 * eased) /
+          TRANSFER_PROGRESS_MAX
+    );
+  }
+
+  if (progress < 890) {
+    const uint16_t local_progress =
+        (uint16_t)(
+          ((uint32_t)(progress - 760) *
+           TRANSFER_PROGRESS_MAX) /
+          130
+        );
+
+    return (int16_t)(
+      6 -
+      (10 * local_progress) /
+          TRANSFER_PROGRESS_MAX
+    );
+  }
+
+  const uint16_t local_progress =
+      (uint16_t)(
+        ((uint32_t)(progress - 890) *
+         TRANSFER_PROGRESS_MAX) /
+        110
+      );
+
+  return (int16_t)(
+    -4 +
+    (4 * local_progress) /
+        TRANSFER_PROGRESS_MAX
+  );
+}
+
+static void draw_transfer_icon(
+    GContext *ctx,
+    GRect bounds
+) {
+  const int16_t center_x =
+      bounds.size.w / 2;
+  const int16_t center_y =
+      bounds.size.h / 2;
+  const int16_t radius = CHECK_STROKE_RADIUS;
+  const int16_t fall_offset =
+      s_transfer_animation_state ==
+          TRANSFER_ANIMATION_FALLING
+          ? s_transfer_fall_offset
+          : 0;
+
+  const int16_t check_size =
+      CHECK_POP_SETTLE_SIZE;
+
+  const GPoint check_start = GPoint(
+    center_x - (check_size * 42) / 100,
+    center_y
+  );
+  const GPoint check_middle = GPoint(
+    center_x - (check_size * 10) / 100,
+    center_y + (check_size * 28) / 100
+  );
+  const GPoint check_end = GPoint(
+    center_x + (check_size * 45) / 100,
+    center_y - (check_size * 30) / 100
+  );
+
+  const GPoint arrow_left = GPoint(
+    center_x - 24,
+    center_y
+  );
+  const GPoint arrow_tip = GPoint(
+    center_x,
+    center_y + 28
+  );
+  const GPoint arrow_right = GPoint(
+    center_x + 24,
+    center_y
+  );
+
+  uint16_t morph_progress =
+      TRANSFER_PROGRESS_MAX;
+
+  if (
+    s_transfer_animation_state ==
+        TRANSFER_ANIMATION_MORPHING
+  ) {
+    morph_progress =
+        transfer_progress_for_duration(
+          TRANSFER_MORPH_DURATION_MS
+        );
+  }
+
+  GPoint left = transfer_lerp_point(
+    check_start,
+    arrow_left,
+    morph_progress
+  );
+  GPoint tip = transfer_lerp_point(
+    check_middle,
+    arrow_tip,
+    morph_progress
+  );
+  GPoint right = transfer_lerp_point(
+    check_end,
+    arrow_right,
+    morph_progress
+  );
+
+  left.y += fall_offset;
+  tip.y += fall_offset;
+  right.y += fall_offset;
+
+  graphics_context_set_fill_color(
+    ctx,
+    GColorWhite
+  );
+
+  draw_transfer_round_line(
+    ctx,
+    left,
+    tip,
+    radius
+  );
+  draw_transfer_round_line(
+    ctx,
+    tip,
+    right,
+    radius
+  );
+
+  if (
+    s_transfer_animation_state ==
+        TRANSFER_ANIMATION_MORPHING
+  ) {
+    return;
+  }
+
+  uint16_t drop_progress =
+      TRANSFER_PROGRESS_MAX;
+
+  if (
+    s_transfer_animation_state ==
+        TRANSFER_ANIMATION_SHAFT_DROP
+  ) {
+    drop_progress =
+        transfer_progress_for_duration(
+          TRANSFER_SHAFT_DURATION_MS
+        );
+  }
+
+  const int16_t shaft_offset =
+      transfer_shaft_bounce_offset(
+        drop_progress
+      );
+
+  const GPoint shaft_top = GPoint(
+    center_x,
+    center_y - 48 +
+        shaft_offset +
+        fall_offset
+  );
+  const GPoint shaft_bottom = GPoint(
+    center_x,
+    center_y + 26 +
+        shaft_offset +
+        fall_offset
+  );
+
+  draw_transfer_round_line(
+    ctx,
+    shaft_top,
+    shaft_bottom,
+    radius
+  );
+
+  const int16_t base_half_width =
+      (int16_t)(
+        (30 * drop_progress) /
+        TRANSFER_PROGRESS_MAX
+      );
+
+  const GPoint base_left = GPoint(
+    center_x - base_half_width,
+    center_y + 49 + fall_offset
+  );
+  const GPoint base_right = GPoint(
+    center_x + base_half_width,
+    center_y + 49 + fall_offset
+  );
+
+  draw_transfer_round_line(
+    ctx,
+    base_left,
+    base_right,
+    radius
+  );
+}
+
 static void confirmation_update_proc(
     Layer *layer,
     GContext *ctx
 ) {
   const GRect bounds =
       layer_get_bounds(layer);
+
+  if (s_transfer_screen_active) {
+    graphics_context_set_fill_color(
+      ctx,
+      GColorGreen
+    );
+    graphics_fill_rect(
+      ctx,
+      bounds,
+      0,
+      GCornerNone
+    );
+    draw_transfer_icon(ctx, bounds);
+    return;
+  }
 
   draw_confirmation_circle(
     ctx,
@@ -3789,7 +5634,11 @@ static void confirmation_update_proc(
 static void ui_timer_callback(void *context) {
   s_ui_timer = NULL;
 
-  if (!s_canvas_layer) {
+  if (
+    !s_canvas_layer ||
+    s_confirmed_screen_active ||
+    s_transfer_screen_active
+  ) {
     return;
   }
 
@@ -3809,6 +5658,13 @@ static void ui_timer_callback(void *context) {
 
 static void start_ui_timer(void) {
   cancel_timer(&s_ui_timer);
+
+  if (
+    s_confirmed_screen_active ||
+    s_transfer_screen_active
+  ) {
+    return;
+  }
 
   s_ui_timer = app_timer_register(
     UI_TICK_MS,
@@ -4508,7 +6364,11 @@ static void scroll_up_handler(
     ClickRecognizerRef recognizer,
     void *context
 ) {
-  if (s_confirmation_state == CONFIRM_IDLE) {
+  if (
+    !s_confirmed_screen_active &&
+    !s_transfer_screen_active &&
+    s_confirmation_state == CONFIRM_IDLE
+  ) {
     step_snap_index(-1);
   }
 }
@@ -4517,7 +6377,11 @@ static void scroll_down_handler(
     ClickRecognizerRef recognizer,
     void *context
 ) {
-  if (s_confirmation_state == CONFIRM_IDLE) {
+  if (
+    !s_confirmed_screen_active &&
+    !s_transfer_screen_active &&
+    s_confirmation_state == CONFIRM_IDLE
+  ) {
     step_snap_index(1);
   }
 }
@@ -4542,8 +6406,186 @@ static void select_button_down(
 }
 
 static void exit_app(void) {
+  cancel_timer(&s_transfer_close_timer);
+  cancel_timer(&s_transfer_animation_timer);
+  s_transfer_screen_active = false;
+  s_transfer_animation_state =
+      TRANSFER_ANIMATION_IDLE;
   alarm_stop();
   window_stack_pop_all(true);
+}
+
+static void schedule_transfer_animation_tick(void);
+
+static void transfer_animation_timer_handler(
+    void *context
+) {
+  (void)context;
+  s_transfer_animation_timer = NULL;
+
+  if (!s_transfer_screen_active) {
+    return;
+  }
+
+  s_transfer_animation_elapsed_ms +=
+      TRANSFER_ANIMATION_INTERVAL_MS;
+
+  if (
+    s_transfer_animation_state ==
+        TRANSFER_ANIMATION_MORPHING &&
+    s_transfer_animation_elapsed_ms >=
+        TRANSFER_MORPH_DURATION_MS
+  ) {
+    s_transfer_animation_state =
+        TRANSFER_ANIMATION_SHAFT_DROP;
+    s_transfer_animation_elapsed_ms = 0;
+  } else if (
+    s_transfer_animation_state ==
+        TRANSFER_ANIMATION_SHAFT_DROP &&
+    s_transfer_animation_elapsed_ms >=
+        TRANSFER_SHAFT_DURATION_MS
+  ) {
+    s_transfer_animation_state =
+        TRANSFER_ANIMATION_READY;
+    s_transfer_animation_elapsed_ms = 0;
+  } else if (
+    s_transfer_animation_state ==
+        TRANSFER_ANIMATION_FALLING
+  ) {
+    uint16_t progress =
+        transfer_progress_for_duration(
+          TRANSFER_FALL_DURATION_MS
+        );
+
+    const int32_t eased =
+        ((int32_t)progress * progress) /
+        TRANSFER_PROGRESS_MAX;
+
+    int16_t travel = 320;
+
+    if (s_confirmation_layer) {
+      travel =
+          layer_get_bounds(
+            s_confirmation_layer
+          ).size.h + 120;
+    }
+
+    s_transfer_fall_offset =
+        (int16_t)(
+          ((int32_t)travel * eased) /
+          TRANSFER_PROGRESS_MAX
+        );
+
+    if (progress >= TRANSFER_PROGRESS_MAX) {
+      APP_LOG(
+        APP_LOG_LEVEL_INFO,
+        "Settings transfer complete: icon left screen"
+      );
+      exit_app();
+      return;
+    }
+  }
+
+  if (s_confirmation_layer) {
+    layer_mark_dirty(
+      s_confirmation_layer
+    );
+  }
+
+  if (
+    s_transfer_animation_state ==
+        TRANSFER_ANIMATION_MORPHING ||
+    s_transfer_animation_state ==
+        TRANSFER_ANIMATION_SHAFT_DROP ||
+    s_transfer_animation_state ==
+        TRANSFER_ANIMATION_FALLING
+  ) {
+    schedule_transfer_animation_tick();
+  }
+}
+
+static void schedule_transfer_animation_tick(void) {
+  if (
+    s_transfer_animation_timer ||
+    !s_transfer_screen_active
+  ) {
+    return;
+  }
+
+  s_transfer_animation_timer = app_timer_register(
+    TRANSFER_ANIMATION_INTERVAL_MS,
+    transfer_animation_timer_handler,
+    NULL
+  );
+
+  if (!s_transfer_animation_timer) {
+    APP_LOG(
+      APP_LOG_LEVEL_ERROR,
+      "Could not schedule transfer animation"
+    );
+  }
+}
+
+static void start_transfer_animation(void) {
+  cancel_timer(&s_transfer_animation_timer);
+
+  s_transfer_animation_state =
+      TRANSFER_ANIMATION_MORPHING;
+  s_transfer_animation_elapsed_ms = 0;
+  s_transfer_fall_offset = 0;
+
+  if (s_confirmation_layer) {
+    layer_mark_dirty(
+      s_confirmation_layer
+    );
+  }
+
+  schedule_transfer_animation_tick();
+}
+
+static void transfer_close_timer_handler(
+    void *context
+) {
+  (void)context;
+  s_transfer_close_timer = NULL;
+
+  if (!s_transfer_screen_active) {
+    return;
+  }
+
+  APP_LOG(
+    APP_LOG_LEVEL_INFO,
+    "Settings transfer complete: dropping icon"
+  );
+
+  alarm_rearm_after_transfer();
+  cancel_timer(&s_transfer_animation_timer);
+  s_transfer_animation_state =
+      TRANSFER_ANIMATION_FALLING;
+  s_transfer_animation_elapsed_ms = 0;
+  s_transfer_fall_offset = 0;
+  schedule_transfer_animation_tick();
+}
+
+static void schedule_transfer_close(void) {
+  cancel_timer(&s_transfer_close_timer);
+
+  if (!s_transfer_screen_active) {
+    return;
+  }
+
+  s_transfer_close_timer = app_timer_register(
+    TRANSFER_CLOSE_DELAY_MS,
+    transfer_close_timer_handler,
+    NULL
+  );
+
+  if (!s_transfer_close_timer) {
+    APP_LOG(
+      APP_LOG_LEVEL_ERROR,
+      "Could not schedule transfer close"
+    );
+  }
 }
 
 static void select_button_up(
@@ -4551,20 +6593,17 @@ static void select_button_up(
     void *context
 ) {
   if (s_confirmation_state == CONFIRM_COMPLETE) {
-    if (
-      unconfirmed_medication_group_is_due() &&
-      s_canvas_layer
-    ) {
-      rebuild_medication_rows();
-      reset_ui_state(
-        layer_get_bounds(s_canvas_layer)
-      );
-      start_ui_timer();
-      mark_scene_dirty();
+    if (unconfirmed_medication_group_is_due()) {
+      refresh_app_screen_state();
       return;
     }
 
-    exit_app();
+    if (s_confirmation_symbol_set) {
+      exit_app();
+      return;
+    }
+
+    refresh_app_screen_state();
     return;
   }
 
@@ -4611,7 +6650,11 @@ static void click_config_provider(void *context) {
 
 #if defined(PBL_TOUCH)
 static void touch_begin(const TouchEvent *event) {
-  if (s_confirmation_state != CONFIRM_IDLE) {
+  if (
+    s_confirmed_screen_active ||
+    s_transfer_screen_active ||
+    s_confirmation_state != CONFIRM_IDLE
+  ) {
     return;
   }
 
@@ -5037,6 +7080,157 @@ static void reset_ui_state(GRect bounds) {
   s_check_state = CHECK_HIDDEN;
 }
 
+static void show_transfer_screen(void) {
+  cancel_timer(&s_transfer_close_timer);
+  alarm_stop();
+
+  s_transfer_screen_active = true;
+  s_confirmed_screen_active = false;
+  pill_physics_update_activity();
+
+  cancel_timer(&s_ui_timer);
+  cancel_timer(&s_confirmation_timer);
+  cancel_timer(&s_band_animation_timer);
+  cancel_scroll_physics();
+
+#if defined(PBL_TOUCH)
+  s_touch.dragging = false;
+#endif
+
+  if (s_canvas_layer) {
+    layer_set_hidden(
+      s_canvas_layer,
+      true
+    );
+  }
+
+  set_band_and_arrow_hidden(true);
+
+  s_confirmation_state = CONFIRM_IDLE;
+  s_confirmation_symbol_set = false;
+  s_confirm_radius = 0;
+  s_check_size = 0;
+  s_check_state = CHECK_HIDDEN;
+
+  start_transfer_animation();
+
+  if (s_confirmation_layer) {
+    layer_set_hidden(
+      s_confirmation_layer,
+      false
+    );
+    layer_mark_dirty(
+      s_confirmation_layer
+    );
+  }
+
+  APP_LOG(
+    APP_LOG_LEVEL_INFO,
+    "App screen: transfer"
+  );
+}
+
+static void refresh_app_screen_state(void) {
+  if (s_transfer_screen_active) {
+    return;
+  }
+
+  reset_medication_confirmations();
+  rebuild_medication_rows();
+  pill_physics_rebuild();
+
+  const bool show_confirmed_screen =
+      alarm_unconfirmed_symbol_mask_at(
+        time(NULL)
+      ) == 0;
+  const bool state_changed =
+      s_confirmed_screen_active !=
+          show_confirmed_screen;
+
+  s_confirmed_screen_active =
+      show_confirmed_screen;
+
+  if (!s_canvas_layer) {
+    return;
+  }
+
+  if (show_confirmed_screen) {
+    cancel_timer(&s_ui_timer);
+    cancel_timer(&s_band_animation_timer);
+    cancel_scroll_physics();
+
+#if defined(PBL_TOUCH)
+    s_touch.dragging = false;
+#endif
+
+    layer_set_hidden(
+      s_canvas_layer,
+      true
+    );
+    set_band_and_arrow_hidden(true);
+
+    if (s_confirmation_layer) {
+      layer_set_hidden(
+        s_confirmation_layer,
+        false
+      );
+
+      /*
+       * Wird der letzte offene Eintrag gerade bestätigt, läuft die
+       * vorhandene Hakenanimation weiter. Bei einem normalen App-Start
+       * wird derselbe Endzustand sofort statisch dargestellt.
+       */
+      if (
+        s_confirmation_state !=
+            CONFIRM_COMPLETE
+      ) {
+        s_confirm_radius =
+            s_confirm_max_radius;
+        s_confirmation_state =
+            CONFIRM_COMPLETE;
+        s_confirmation_symbol_set = false;
+        s_check_size =
+            CHECK_POP_SETTLE_SIZE;
+        s_check_state = CHECK_VISIBLE;
+      }
+
+      layer_mark_dirty(
+        s_confirmation_layer
+      );
+    }
+  } else {
+    layer_set_hidden(
+      s_canvas_layer,
+      false
+    );
+
+    if (s_confirmation_layer) {
+      layer_set_hidden(
+        s_confirmation_layer,
+        false
+      );
+    }
+
+    reset_ui_state(
+      layer_get_bounds(s_canvas_layer)
+    );
+    start_ui_timer();
+    mark_scene_dirty();
+  }
+
+  pill_physics_update_activity();
+
+  if (state_changed) {
+    APP_LOG(
+      APP_LOG_LEVEL_INFO,
+      "App screen: %s",
+      show_confirmed_screen
+          ? "confirmed"
+          : "alert"
+    );
+  }
+}
+
 static void window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   const GRect bounds = layer_get_bounds(root);
@@ -5141,6 +7335,7 @@ static void window_load(Window *window) {
 
 static void window_appear(Window *window) {
   (void)window;
+  s_pill_physics_window_visible = true;
 
   refresh_medication_rows_for_time();
 
@@ -5148,13 +7343,15 @@ static void window_appear(Window *window) {
     s_alarm_launch_pending = false;
     alarm_start();
     schedule_next_alarm_wakeup();
+  } else {
+    refresh_app_screen_state();
   }
 
-  if (s_canvas_layer) {
-    start_ui_timer();
-  }
-
-  if (s_band.animating) {
+  if (
+    !s_confirmed_screen_active &&
+    !s_transfer_screen_active &&
+    s_band.animating
+  ) {
     schedule_band_animation();
   }
 
@@ -5164,6 +7361,9 @@ static void window_appear(Window *window) {
 }
 
 static void window_disappear(Window *window) {
+  s_pill_physics_window_visible = false;
+  pill_physics_update_activity();
+
   cancel_timer(&s_ui_timer);
   cancel_timer(&s_confirmation_timer);
   cancel_timer(&s_band_animation_timer);
@@ -5176,6 +7376,9 @@ static void window_disappear(Window *window) {
 }
 
 static void window_unload(Window *window) {
+  pill_physics_stop();
+  cancel_timer(&s_transfer_close_timer);
+  cancel_timer(&s_transfer_animation_timer);
   cancel_timer(&s_ui_timer);
   cancel_timer(&s_confirmation_timer);
   cancel_timer(&s_band_animation_timer);
@@ -5253,6 +7456,9 @@ static void init(void) {
 }
 
 static void deinit(void) {
+  pill_physics_stop();
+  cancel_timer(&s_transfer_close_timer);
+  cancel_timer(&s_transfer_animation_timer);
   alarm_stop();
   tick_timer_service_unsubscribe();
   settings_deinit();
