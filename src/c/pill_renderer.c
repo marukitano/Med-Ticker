@@ -1643,10 +1643,7 @@ void draw_medications(
   const int32_t label_y =
       pill_y +
       s_frame_height +
-      MEDICATION_GAP - 7 +
-      HINT_POSITION_ADJUST_Y +
-      HINT_HEIGHT +
-      15;
+      MEDICATION_HEADER_OFFSET_Y;
 
   const int32_t rows_y = label_y + MEDICATION_HEADER_HEIGHT;
 

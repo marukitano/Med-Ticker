@@ -16,7 +16,6 @@
 
 static int32_t snap_anchor_for_index(int index);
 static int clamp_snap_index(int index);
-static bool scrolling_back_to_pill(void);
 static void band_animation_tick(
     void *context
 );
@@ -70,10 +69,7 @@ static int32_t snap_anchor_for_index(int index) {
 
   const int32_t row_center_from_pill_center =
       s_frame_height / 2 +
-      MEDICATION_GAP - 7 +
-      HINT_POSITION_ADJUST_Y +
-      HINT_HEIGHT +
-      15 +
+      MEDICATION_HEADER_OFFSET_Y +
       MEDICATION_HEADER_HEIGHT +
       medication_index *
           (MEDICATION_ROW_HEIGHT + MEDICATION_ROW_GAP) +
@@ -108,25 +104,6 @@ int32_t visual_canvas_offset_y(void) {
       SCROLL_Q8;
 }
 
-static bool scrolling_back_to_pill(void) {
-#if defined(PBL_TOUCH)
-  /* Das gehaltene Paar 1↔0 fährt erst bei echter Abwärtsbewegung aus. */
-  if (
-    s_touch.dragging &&
-    s_touch.pair_selected &&
-    s_touch.start_index == 1 &&
-    s_touch.neighbor_index == 0 &&
-    s_touch.total_delta_y > 0
-  ) {
-    return true;
-  }
-#endif
-
-  return
-      s_scroll.mode == SCROLL_SNAP &&
-      s_scroll.snap_index == 0;
-}
-
 void set_band_layer_x_q8(
     int32_t x_q8
 ) {
@@ -156,10 +133,7 @@ void set_band_layer_x_q8(
         (int16_t)(
           current_pill_y() +
           s_frame_height +
-          MEDICATION_GAP - 7 +
-          HINT_POSITION_ADJUST_Y +
-          HINT_HEIGHT +
-          15 +
+          MEDICATION_HEADER_OFFSET_Y +
           MEDICATION_HEADER_HEIGHT
         );
   } else if (s_canvas_layer) {
@@ -339,9 +313,20 @@ void update_band_animation_target(void) {
     return;
   }
 
+  /*
+   * Das Band darf erst starten, wenn die erste
+   * Medikamentenzeile ihre tatsächliche Snap-Position
+   * erreicht hat. Der Zielindex wird bereits zu Beginn
+   * einer Scrollfahrt gesetzt und wäre deshalb zu früh.
+   *
+   * Beim Zurückscrollen zur Pillenseite genügt bereits
+   * ein sichtbarer Pixel oberhalb des ersten Snap-Punkts,
+   * damit Band und Pfeil wieder nach rechts ausfahren.
+   */
   const bool visible =
-      s_scroll.snap_index > 0 &&
-      !scrolling_back_to_pill();
+      LIST_ROW_COUNT > 0 &&
+      visual_canvas_offset_y() <=
+          snap_anchor_for_index(1);
 
   const int32_t target_x_q8 =
       visible

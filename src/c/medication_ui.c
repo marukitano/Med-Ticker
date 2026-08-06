@@ -20,7 +20,7 @@ static void canvas_update_proc(
     Layer *layer,
     GContext *ctx
 );
-static void cover_scrolled_alert_area(
+static void cover_below_pill_arena(
     GContext *ctx,
     GRect bounds
 );
@@ -142,27 +142,35 @@ int32_t pill_arena_origin_y(void) {
       CANVAS_START_OFFSET_Y;
 }
 
+int32_t pill_arena_bottom_y(void) {
+  return
+      pill_arena_origin_y() +
+      s_frame_height +
+      MEDICATION_HEADER_OFFSET_Y -
+      PILL_PHYSICS_TO_HEADER_GAP;
+}
+
 int32_t current_pill_y(void) {
   return
       pill_arena_origin_y() +
       visual_canvas_offset_y();
 }
 
-static void cover_scrolled_alert_area(
+static void cover_below_pill_arena(
     GContext *ctx,
     GRect bounds
 ) {
-  const int32_t alert_bottom =
-      (int32_t)bounds.size.h +
+  const int32_t arena_bottom =
+      pill_arena_bottom_y() +
       visual_canvas_offset_y();
 
-  if (alert_bottom >= bounds.size.h) {
+  if (arena_bottom >= bounds.size.h) {
     return;
   }
 
   const int16_t cover_y =
-      alert_bottom > 0
-          ? (int16_t)alert_bottom
+      arena_bottom > 0
+          ? (int16_t)arena_bottom
           : 0;
 
   graphics_context_set_fill_color(
@@ -201,7 +209,7 @@ static void canvas_update_proc(
   const int32_t pill_y = current_pill_y();
 
   draw_physics_pills(ctx, bounds, pill_y);
-  cover_scrolled_alert_area(ctx, bounds);
+  cover_below_pill_arena(ctx, bounds);
   draw_medications(
     ctx,
     bounds,
