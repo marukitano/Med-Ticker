@@ -4869,8 +4869,13 @@ static void medication_appearance_geometry(
 
   switch (appearance ? appearance->shape : 0) {
     case 1:
-      local_line_half = 4;
-      local_radius = 9;
+      /*
+       * Rounded oval: keep the current width, but make the overall
+       * body noticeably flatter. The phone percentage is still
+       * applied afterwards as before.
+       */
+      local_line_half = 8;
+      local_radius = 13;
       break;
     case 2:
       local_line_half = 8;
@@ -5213,46 +5218,182 @@ static void draw_physics_appearance_imprint(
   );
 }
 
-#define PHYSICS_ELLIPSE_PATH_POINTS 32
-#define PHYSICS_ELLIPSE_OUTLINE_PX 2
+#define PHYSICS_ROUNDED_OVAL_QUADRANT_STEPS 8
+#define PHYSICS_ROUNDED_OVAL_PATH_POINTS \
+  (PHYSICS_ROUNDED_OVAL_QUADRANT_STEPS * 4)
+#define PHYSICS_ROUNDED_OVAL_OUTLINE_PX 2
+#define PHYSICS_ROUNDED_OVAL_Q12 4096
 
-static void draw_physics_ellipse_path_fill(
-    GContext *ctx,
-    GPoint center,
-    int32_t angle,
-    int16_t axis_a,
-    int16_t axis_b,
-    GColor color
+/*
+ * Longer cubic control arms mean larger visual radii:
+ * - 82 % at the left/right ends makes them much rounder.
+ * - 76 % along the top/bottom keeps those arcs noticeably flatter.
+ */
+#define PHYSICS_ROUNDED_OVAL_END_CONTROL_NUM 62
+#define PHYSICS_ROUNDED_OVAL_TOP_CONTROL_NUM 57
+#define PHYSICS_ROUNDED_OVAL_CONTROL_DEN 100
+
+static int16_t pill_physics_cubic_component(
+    int16_t p0,
+    int16_t p1,
+    int16_t p2,
+    int16_t p3,
+    int32_t t_q12
 ) {
-  if (axis_a < 1 || axis_b < 1) {
-    return;
-  }
+  const int64_t scale = PHYSICS_ROUNDED_OVAL_Q12;
+  const int64_t t = t_q12;
+  const int64_t u = scale - t;
+  const int64_t scale_cubed = scale * scale * scale;
 
-  GPoint points[PHYSICS_ELLIPSE_PATH_POINTS];
+  const int64_t value =
+      u * u * u * p0 +
+      3 * u * u * t * p1 +
+      3 * u * t * t * p2 +
+      t * t * t * p3;
 
-  for (
-    uint8_t index = 0;
-    index < PHYSICS_ELLIPSE_PATH_POINTS;
-    index++
-  ) {
-    const int32_t point_angle =
-        ((int32_t)index * TRIG_MAX_ANGLE) /
-        PHYSICS_ELLIPSE_PATH_POINTS;
-
-    points[index] = GPoint(
-      (int16_t)(
-        ((int32_t)cos_lookup(point_angle) * axis_a) /
-        TRIG_MAX_RATIO
-      ),
-      (int16_t)(
-        ((int32_t)sin_lookup(point_angle) * axis_b) /
-        TRIG_MAX_RATIO
-      )
+  if (value >= 0) {
+    return (int16_t)(
+      (value + scale_cubed / 2) /
+      scale_cubed
     );
   }
 
+  return (int16_t)(
+    -((-value + scale_cubed / 2) /
+      scale_cubed)
+  );
+}
+
+static void pill_physics_rounded_oval_quadrant(
+    GPoint *points,
+    uint8_t point_offset,
+    int16_t p0_x,
+    int16_t p0_y,
+    int16_t p1_x,
+    int16_t p1_y,
+    int16_t p2_x,
+    int16_t p2_y,
+    int16_t p3_x,
+    int16_t p3_y
+) {
+  for (
+    uint8_t step = 0;
+    step < PHYSICS_ROUNDED_OVAL_QUADRANT_STEPS;
+    step++
+  ) {
+    /*
+     * The endpoint belongs to the following quadrant. Omitting it here keeps
+     * every vertex unique while the final GPath closes the last gap itself.
+     */
+    const int32_t t_q12 = (int32_t)(
+      ((int64_t)step * PHYSICS_ROUNDED_OVAL_Q12) /
+      PHYSICS_ROUNDED_OVAL_QUADRANT_STEPS
+    );
+
+    points[point_offset + step] = GPoint(
+      pill_physics_cubic_component(
+        p0_x,
+        p1_x,
+        p2_x,
+        p3_x,
+        t_q12
+      ),
+      pill_physics_cubic_component(
+        p0_y,
+        p1_y,
+        p2_y,
+        p3_y,
+        t_q12
+      )
+    );
+  }
+}
+
+static void draw_physics_rounded_oval_fill(
+    GContext *ctx,
+    GPoint center,
+    int32_t angle,
+    int16_t half_width,
+    int16_t half_height,
+    GColor color
+) {
+  if (half_width < 2 || half_height < 2) {
+    return;
+  }
+
+  const int16_t end_control = (int16_t)(
+    ((int32_t)half_height *
+     PHYSICS_ROUNDED_OVAL_END_CONTROL_NUM +
+     PHYSICS_ROUNDED_OVAL_CONTROL_DEN / 2) /
+    PHYSICS_ROUNDED_OVAL_CONTROL_DEN
+  );
+  const int16_t top_control = (int16_t)(
+    ((int32_t)half_width *
+     PHYSICS_ROUNDED_OVAL_TOP_CONTROL_NUM +
+     PHYSICS_ROUNDED_OVAL_CONTROL_DEN / 2) /
+    PHYSICS_ROUNDED_OVAL_CONTROL_DEN
+  );
+
+  GPoint points[PHYSICS_ROUNDED_OVAL_PATH_POINTS];
+
+  /* Right end -> top. */
+  pill_physics_rounded_oval_quadrant(
+    points,
+    0,
+    half_width,
+    0,
+    half_width,
+    (int16_t)-end_control,
+    top_control,
+    (int16_t)-half_height,
+    0,
+    (int16_t)-half_height
+  );
+
+  /* Top -> left end. */
+  pill_physics_rounded_oval_quadrant(
+    points,
+    PHYSICS_ROUNDED_OVAL_QUADRANT_STEPS,
+    0,
+    (int16_t)-half_height,
+    (int16_t)-top_control,
+    (int16_t)-half_height,
+    (int16_t)-half_width,
+    (int16_t)-end_control,
+    (int16_t)-half_width,
+    0
+  );
+
+  /* Left end -> bottom. */
+  pill_physics_rounded_oval_quadrant(
+    points,
+    PHYSICS_ROUNDED_OVAL_QUADRANT_STEPS * 2,
+    (int16_t)-half_width,
+    0,
+    (int16_t)-half_width,
+    end_control,
+    (int16_t)-top_control,
+    half_height,
+    0,
+    half_height
+  );
+
+  /* Bottom -> right end. */
+  pill_physics_rounded_oval_quadrant(
+    points,
+    PHYSICS_ROUNDED_OVAL_QUADRANT_STEPS * 3,
+    0,
+    half_height,
+    top_control,
+    half_height,
+    half_width,
+    end_control,
+    half_width,
+    0
+  );
+
   const GPathInfo path_info = {
-    .num_points = PHYSICS_ELLIPSE_PATH_POINTS,
+    .num_points = PHYSICS_ROUNDED_OVAL_PATH_POINTS,
     .points = points
   };
   GPath *path = gpath_create(&path_info);
@@ -5277,31 +5418,28 @@ static void draw_physics_true_ellipse(
     GColor fill_color,
     GColor outline_color
 ) {
-  const int16_t inner_a = line_half + radius;
-  const int16_t inner_b = radius;
-  const int16_t outer_a =
-      inner_a + PHYSICS_ELLIPSE_OUTLINE_PX;
-  const int16_t outer_b =
-      inner_b + PHYSICS_ELLIPSE_OUTLINE_PX;
+  const int16_t inner_half_width =
+      line_half + radius;
+  const int16_t inner_half_height = radius;
 
   /*
-   * Two geometrically identical ellipse paths provide an even black border:
-   * first the larger black path, then the inset medication-colour path.
+   * The same flatter, strongly rounded outline is drawn twice. The larger
+   * black shape leaves the established two-pixel border around the tablet.
    */
-  draw_physics_ellipse_path_fill(
+  draw_physics_rounded_oval_fill(
     ctx,
     center,
     angle,
-    outer_a,
-    outer_b,
+    inner_half_width + PHYSICS_ROUNDED_OVAL_OUTLINE_PX,
+    inner_half_height + PHYSICS_ROUNDED_OVAL_OUTLINE_PX,
     outline_color
   );
-  draw_physics_ellipse_path_fill(
+  draw_physics_rounded_oval_fill(
     ctx,
     center,
     angle,
-    inner_a,
-    inner_b,
+    inner_half_width,
+    inner_half_height,
     fill_color
   );
 }
@@ -5457,7 +5595,7 @@ static void draw_physics_pills(
       ctx,
       &s_pill_physics_bodies[index],
       arena_y,
-      theme_foreground_color()
+      GColorLightGray
     );
   }
 }
