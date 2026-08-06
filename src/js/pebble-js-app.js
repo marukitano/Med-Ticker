@@ -562,228 +562,62 @@ function sendMedicationAt(
   });
 }
 
-function integerClamped(value, minimum, maximum, fallback) {
-  if (typeof value !== 'number' || isNaN(value)) {
+function appearanceInteger(value, minimum, maximum, fallback) {
+  if (
+    typeof value !== 'number' ||
+    isNaN(value) ||
+    value < minimum ||
+    value > maximum
+  ) {
     return fallback;
   }
-  if (value < minimum) {
-    return minimum;
-  }
-  if (value > maximum) {
-    return maximum;
-  }
+
   return Math.round(value);
 }
 
-function buildEmptyAppearancePixels(width, height) {
-  var pixels = [];
-  var index;
-  for (index = 0; index < width * height; index += 1) {
-    pixels.push(0);
-  }
-  return pixels;
-}
-
-function setAppearancePixel(pixels, width, height, x, y, value) {
-  if (x < 0 || x >= width || y < 0 || y >= height) {
-    return;
-  }
-  pixels[y * width + x] = value;
-}
-
-function getAppearancePixel(pixels, width, height, x, y) {
-  if (x < 0 || x >= width || y < 0 || y >= height) {
+function appearanceAsciiByte(character) {
+  if (!character || character.length === 0) {
     return 0;
   }
-  return pixels[y * width + x];
+
+  var code = character.charCodeAt(0);
+  return code >= 32 && code <= 126 ? code : 63;
 }
 
-function fillAppearanceCircle(pixels, width, height, cx, cy, radius, value) {
-  var x;
-  var y;
-  var rr = radius * radius;
-  for (y = Math.floor(cy - radius); y <= Math.ceil(cy + radius); y += 1) {
-    for (x = Math.floor(cx - radius); x <= Math.ceil(cx + radius); x += 1) {
-      var dx = x - cx;
-      var dy = y - cy;
-      if (dx * dx + dy * dy <= rr) {
-        setAppearancePixel(pixels, width, height, x, y, value);
-      }
-    }
-  }
-}
-
-function fillAppearanceRoundedRect(pixels, width, height, left, top, right, bottom, radius, value) {
-  var x;
-  var y;
-  for (y = top; y <= bottom; y += 1) {
-    for (x = left; x <= right; x += 1) {
-      var inside = false;
-      if (x >= left + radius && x <= right - radius) {
-        inside = true;
-      }
-      if (y >= top + radius && y <= bottom - radius) {
-        inside = true;
-      }
-      if (!inside) {
-        var cx = x < left + radius ? left + radius : right - radius;
-        var cy = y < top + radius ? top + radius : bottom - radius;
-        var dx = x - cx;
-        var dy = y - cy;
-        inside = dx * dx + dy * dy <= radius * radius;
-      }
-      if (inside) {
-        setAppearancePixel(pixels, width, height, x, y, value);
-      }
-    }
-  }
-}
-
-function fillAppearanceDiamond(pixels, width, height, cx, cy, rx, ry, value) {
-  var x;
-  var y;
-  for (y = cy - ry; y <= cy + ry; y += 1) {
-    for (x = cx - rx; x <= cx + rx; x += 1) {
-      var nx = Math.abs(x - cx) / rx;
-      var ny = Math.abs(y - cy) / ry;
-      if (nx + ny <= 1) {
-        setAppearancePixel(pixels, width, height, x, y, value);
-      }
-    }
-  }
-}
-
-function outlineAppearance(pixels, width, height) {
-  var outlined = pixels.slice();
-  var x;
-  var y;
-  for (y = 0; y < height; y += 1) {
-    for (x = 0; x < width; x += 1) {
-      if (getAppearancePixel(pixels, width, height, x, y) === 0) {
-        continue;
-      }
-      if (getAppearancePixel(pixels, width, height, x - 1, y) === 0 ||
-          getAppearancePixel(pixels, width, height, x + 1, y) === 0 ||
-          getAppearancePixel(pixels, width, height, x, y - 1) === 0 ||
-          getAppearancePixel(pixels, width, height, x, y + 1) === 0) {
-        outlined[y * width + x] = 1;
-      }
-    }
-  }
-  return outlined;
-}
-
-function imprintFontColumns(character) {
-  var map = {
-    '0': [0x07, 0x05, 0x05, 0x07],
-    '1': [0x02, 0x06, 0x02, 0x07],
-    '2': [0x07, 0x01, 0x07, 0x04, 0x07],
-    '3': [0x07, 0x01, 0x07, 0x01, 0x07],
-    '4': [0x05, 0x05, 0x07, 0x01, 0x01],
-    '5': [0x07, 0x04, 0x07, 0x01, 0x07],
-    '6': [0x07, 0x04, 0x07, 0x05, 0x07],
-    '7': [0x07, 0x01, 0x02, 0x02, 0x02],
-    '8': [0x07, 0x05, 0x07, 0x05, 0x07],
-    '9': [0x07, 0x05, 0x07, 0x01, 0x07],
-    'M': [0x05, 0x07, 0x07, 0x05, 0x05],
-    'G': [0x07, 0x04, 0x05, 0x05, 0x07],
-    'U': [0x05, 0x05, 0x05, 0x05, 0x07],
-    'I': [0x07, 0x02, 0x02, 0x02, 0x07],
-    'X': [0x05, 0x05, 0x02, 0x05, 0x05],
-    '/': [0x01, 0x01, 0x02, 0x04, 0x04],
-    '-': [0x00, 0x00, 0x07, 0x00, 0x00],
-    '.': [0x00, 0x00, 0x00, 0x00, 0x02],
-    ' ': [0x00, 0x00, 0x00],
-  };
-  return map[character] || [0x07, 0x05, 0x07, 0x05, 0x07];
-}
-
-function drawAppearanceImprint(pixels, width, height, imprint) {
-  if (typeof imprint !== 'string' || imprint.length === 0) {
-    return;
-  }
-  var text = imprint.slice(0, 5).toUpperCase();
-  var glyphs = [];
-  var totalWidth = 0;
-  var index;
-  for (index = 0; index < text.length; index += 1) {
-    var glyph = imprintFontColumns(text[index]);
-    glyphs.push(glyph);
-    totalWidth += glyph.length;
-    if (index < text.length - 1) {
-      totalWidth += 1;
-    }
-  }
-  var startX = Math.floor((width - totalWidth) / 2);
-  var startY = Math.floor((height - 5) / 2);
-  var cursorX = startX;
-  glyphs.forEach(function(glyph, glyphIndex) {
-    glyph.forEach(function(columnBits, columnIndex) {
-      var bit;
-      for (bit = 0; bit < 5; bit += 1) {
-        if (columnBits & (1 << bit)) {
-          setAppearancePixel(pixels, width, height, cursorX + columnIndex, startY + bit, 1);
-        }
-      }
-    });
-    cursorX += glyph.length;
-    if (glyphIndex < glyphs.length - 1) {
-      cursorX += 1;
-    }
-  });
-}
-
-function encodeAppearancePixels(pixels) {
-  var bytes = [];
-  var index;
-  for (index = 0; index < pixels.length; index += 4) {
-    var a = pixels[index] & 0x03;
-    var b = pixels[index + 1] & 0x03;
-    var c = pixels[index + 2] & 0x03;
-    var d = pixels[index + 3] & 0x03;
-    var hex = ((a << 6) | (b << 4) | (c << 2) | d).toString(16);
-    bytes.push(hex.length < 2 ? '0' + hex : hex);
-  }
-  return bytes.join('');
-}
-
-function renderMedicationAppearanceHex(medication) {
-  var width = 24;
-  var height = 14;
-  var pixels = buildEmptyAppearancePixels(width, height);
-  var size = integerClamped(medication.size, 60, 140, 100);
+function encodeMedicationAppearance(medication) {
   var iconSet = medication.iconSet === true;
-  var shape = iconSet && integerInRange(medication.shape, 0, 4) ? medication.shape : 0;
-  var fill1 = 2;
-  var fill2 = 3;
-  var cx = Math.floor(width / 2);
-  var cy = Math.floor(height / 2);
-  var halfW = integerClamped(Math.round(7 * size / 100), 5, 10, 7);
-  var halfH = integerClamped(Math.round(4 * size / 100), 3, 6, 4);
-  var radius = integerClamped(Math.round(halfH - 1), 2, 5, 3);
+  var shape = iconSet && integerInRange(medication.shape, 0, 4)
+      ? medication.shape
+      : DEFAULT_MEDICATION.shape;
+  var primaryColor = iconSet && integerInRange(medication.color, 192, 255)
+      ? medication.color
+      : DEFAULT_MEDICATION.color;
+  var secondaryColor = iconSet && integerInRange(medication.color2, 192, 255)
+      ? medication.color2
+      : primaryColor;
+  var size = iconSet
+      ? appearanceInteger(medication.size, 60, 140, 100)
+      : 100;
+  var imprint = iconSet && typeof medication.imprint === 'string'
+      ? medication.imprint.slice(0, 5)
+      : '';
+  var packet = [
+    shape,
+    primaryColor,
+    secondaryColor,
+    size,
+    imprint.length
+  ];
 
-  if (shape === 3) {
-    fillAppearanceDiamond(pixels, width, height, cx, cy, halfW, halfH, fill1);
-  } else if (shape === 4) {
-    fillAppearanceRoundedRect(pixels, width, height, cx - halfW, cy - halfH, cx + halfW, cy + halfH, radius, fill1);
-    var x;
-    for (x = cx + 1; x <= cx + halfW; x += 1) {
-      var y;
-      for (y = cy - halfH; y <= cy + halfH; y += 1) {
-        if (getAppearancePixel(pixels, width, height, x, y) !== 0) {
-          setAppearancePixel(pixels, width, height, x, y, fill2);
-        }
-      }
-    }
-  } else if (shape === 0) {
-    fillAppearanceCircle(pixels, width, height, cx, cy, halfH + 2, fill1);
-  } else {
-    fillAppearanceRoundedRect(pixels, width, height, cx - halfW, cy - halfH, cx + halfW, cy + halfH, radius, fill1);
+  for (var index = 0; index < 5; index += 1) {
+    packet.push(
+      index < imprint.length
+          ? appearanceAsciiByte(imprint.charAt(index))
+          : 0
+    );
   }
 
-  pixels = outlineAppearance(pixels, width, height);
-  drawAppearanceImprint(pixels, width, height, medication.imprint || '');
-  return encodeAppearancePixels(pixels);
+  return packet;
 }
 
 function sendAppearanceAt(medications, index) {
@@ -799,7 +633,7 @@ function sendAppearanceAt(medications, index) {
   message[APPEAR_COMMAND_KEY] = APPEARANCE_COMMAND_ITEM;
   message[APPEAR_INDEX_KEY] = index;
   message[APPEAR_COUNT_KEY] = medications.length;
-  message[APPEAR_DATA_KEY] = renderMedicationAppearanceHex(medications[index]);
+  message[APPEAR_DATA_KEY] = encodeMedicationAppearance(medications[index]);
   sendMessage(message, function() {
     sendAppearanceAt(medications, index + 1);
   });
