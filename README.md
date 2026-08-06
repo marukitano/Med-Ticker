@@ -1,78 +1,46 @@
 # Pill Reminder
 
-A medication reminder app for the **Pebble Time 2**.
+Pill Reminder is a native medication reminder app for the **Pebble Time 2**
+(`emery`). It combines scheduled reminders with a deliberate hold-to-confirm
+interaction, so an accidental button press does not mark medication as taken.
 
-I am building this because forgetting medication is easy — especially during
-busy or irregular days. Pill Reminder is designed to make dismissing a reminder
-quick, while making an accidental “taken” confirmation difficult.
+> **Status:** active pre-release development. Do not use this app as the only
+> safeguard for medication that must be taken at an exact time.
 
-> **Current status:** Early UI prototype.
->
-> Scheduling, wakeups and phone-side configuration are not implemented yet.
+## Current features
 
-## Current prototype
-
-- Animated rotating pill
-- Scrollable medication list
-- Touch scrolling on Pebble Time 2
-- Up/down button scrolling
-- Deliberate hold-to-confirm interaction
-- Green confirmation animation with a bouncing checkmark
-- Short vibration at the checkmark impact
-- Releasing the middle button too early deflates the green circle
-- Back exits without confirming the medication as taken
-
-The medication names currently shown are placeholder data.
-
-## Interaction
-
-### Confirm medication as taken
-
-Hold the middle button.
-
-A green circle expands from the button. When it fills the display, a white
-checkmark appears and bounces toward the viewer. The confirmation is completed
-at that moment.
-
-Keep holding to view the result. Releasing the middle button afterwards closes
-the app.
-
-### Cancel the confirmation
-
-Release the middle button before the checkmark appears.
-
-The green circle shrinks back down and the app remains open.
-
-### View the medication list
-
-Scroll using either the touchscreen or the upper and lower buttons.
-
-### Leave without confirming
-
-Press the back button.
-
-In the finished app, leaving without confirmation will keep the repeating
-reminder active.
-
-## Planned functionality
-
-- Medication configuration through the Pebble phone app
+- Up to eight configurable medications
 - Daily, weekly and monthly schedules
-- Multiple reminders per day
-- Automatic repeat reminder every 15 minutes
-- Repeat reminder cancelled only after deliberate confirmation
-- Correct handling of short months for reminders on days 29, 30 and 31
-- Persistent reminder state across app exits and watch restarts
+- Four configurable dayparts: morning, noon, evening and night
+- Phone-side configuration stored locally and transferred with AppMessage
+- Pill and insulin-pen medication types
+- Round, elliptical, tablet, rhombus and capsule pill shapes
+- Configurable colors, size and tablet imprint
+- Touch and button scrolling on Pebble Time 2
+- Hold-to-confirm interaction with animated visual feedback
+- Persistent reminder windows and Pebble wakeups
+- Repeating reminders with configurable interval
+- Optional vibration and PCM alarm audio with configurable volume
+- Animated pills driven by the watch accelerometer
+- Light and dark themes
 
-## Development
-
-Target platform:
+## Repository layout
 
 ```text
-emery
+package.json                 Pebble manifest and AppMessage keys
+resources/                   Runtime images and alarm audio
+src/c/main.c                 Watch application
+src/js/pebble-js-app.js      Phone configuration and settings transfer
+wscript                      Pebble SDK build definition
 ```
 
-Build:
+The watch application is currently still a large single translation unit. The
+first cleanup pass deliberately removes dead code without splitting that file,
+so behaviour can be verified before architecture changes are introduced.
+
+## Build
+
+The project targets the Pebble SDK 3 toolchain and the `emery` platform.
 
 ```bash
 pebble clean
@@ -85,13 +53,14 @@ Install on a connected watch:
 pebble install --phone WATCH_IP
 ```
 
-The generated app bundle is located at:
+The generated bundle is written to:
 
 ```text
 build/Pill-Reminder.pbw
 ```
 
-## Project state
+## Development notes
 
-This project is under active development. The current code focuses on getting
-the interaction and visual feedback right before adding the reminder engine.
+Settings are sent as a reset/item/commit transaction. Keep the numeric
+AppMessage keys in `package.json`, `src/c/main.c`, and
+`src/js/pebble-js-app.js` synchronized when adding fields.

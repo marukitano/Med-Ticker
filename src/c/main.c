@@ -135,32 +135,9 @@
 #define TRANSFER_PROGRESS_MAX 1000
 
 #define PILL_PHYSICS_MAX_BODIES 12
-#define PILL_PHYSICS_FRAME_MS 60
-#define PILL_PHYSICS_ALARM_FRAME_MS 60
 #define PILL_PHYSICS_SCROLL_PAUSE_MS 80
 #define PILL_PHYSICS_Q8 256
-#define PILL_PHYSICS_ACCEL_DIVISOR 1
-#define PILL_PHYSICS_BOUNCE_NUM 120
-#define PILL_PHYSICS_BOUNCE_DEN 256
-#define PILL_PHYSICS_MAX_VELOCITY_Q8 (28 * PILL_PHYSICS_Q8)
 #define PILL_PHYSICS_EDGE_MARGIN 4
-#define PILL_PHYSICS_STATIC_FRICTION_MG 220
-#define PILL_PHYSICS_SIZE_STATIC_FRICTION_MIN_MG 160
-#define PILL_PHYSICS_SIZE_STATIC_FRICTION_MAX_MG 280
-#define PILL_PHYSICS_KINETIC_FRICTION_MG 35
-#define PILL_PHYSICS_WAKE_DELTA_MG 45
-#define PILL_PHYSICS_REST_FRICTION_Q8 (PILL_PHYSICS_Q8 * 3 / 4)
-#define PILL_PHYSICS_ROLLING_FRICTION_Q8 (PILL_PHYSICS_Q8 / 128)
-#define PILL_PHYSICS_COLLISION_INTERVAL 1
-#define PILL_PHYSICS_CONTACT_SLOP_PX 5
-#define PILL_PHYSICS_SENSOR_STILL_SAMPLES 5
-#define PILL_PHYSICS_SLEEP_FRAMES 4
-#define PILL_PHYSICS_SLEEP_VELOCITY_Q8 (PILL_PHYSICS_Q8 / 5)
-#define PILL_PHYSICS_PILE_SLEEP_TRAVEL_Q8 (PILL_PHYSICS_Q8 / 2)
-#define PILL_PHYSICS_SOLVER_ITERATIONS 3
-#define PILL_PHYSICS_Q4_PER_PIXEL 16
-#define PILL_PHYSICS_Q8_PER_Q4 (PILL_PHYSICS_Q8 / PILL_PHYSICS_Q4_PER_PIXEL)
-#define PILL_PHYSICS_SETTLE_VELOCITY_Q8 (PILL_PHYSICS_Q8 / 2)
 #define PILL_PHYSICS_ANGLE_BUCKET (TRIG_MAX_ANGLE / 32)
 /* Capsule rigid-body physics. Positions and linear velocities use Q8. */
 #define PILL_RB_FRAME_MS 40
@@ -190,10 +167,6 @@
 #define PILL_RB_TILT_WAKE_HYSTERESIS_MG 10
 #define PILL_RB_REST_TRAVEL_Q8 (PILL_PHYSICS_Q8)
 #define PILL_RB_REST_ANGLE (TRIG_MAX_ANGLE / 180)
-
-#define PILL_PHYSICS_ROTATION_MIN_TRAVEL_Q8 (PILL_PHYSICS_Q8)
-#define PILL_PHYSICS_ROTATION_DIVISOR 4
-
 
 typedef enum {
   MEDICATION_TIME_MORNING,
@@ -413,7 +386,6 @@ static uint8_t s_pill_physics_quiet_frames;
 static uint8_t s_pill_physics_collision_phase;
 static uint8_t s_pill_physics_sensor_quiet_samples;
 
-
 static uint8_t s_alarm_audio_volume =
     DEFAULT_ALARM_AUDIO_VOLUME;
 static bool s_alarm_vibration_enabled =
@@ -527,13 +499,6 @@ static void schedule_transfer_close(void);
 static void pill_physics_rebuild(void);
 static void pill_physics_update_activity(void);
 static void pill_physics_stop(void);
-static uint8_t pill_physics_radius_for_shape(
-    uint8_t shape
-);
-static uint8_t medication_appearance_collision_radius(
-    uint8_t medication_index
-);
-
 
 static void mark_scene_dirty(void) {
   update_band_animation_target();
@@ -728,7 +693,6 @@ static bool medication_settings_valid(
       settings->day >= 1 &&
       settings->day <= 31;
 }
-
 
 static MedicationSettings medication_from_legacy(
     const LegacyMedicationSettingsV1 *legacy
@@ -1912,83 +1876,6 @@ static void load_medication_appearances(void) {
   }
 }
 
-static uint8_t medication_appearance_collision_radius(
-    uint8_t medication_index
-) {
-  if (medication_index >= s_medication_count) {
-    return 11;
-  }
-
-  const MedicationSettings *medication =
-      &s_medications[medication_index];
-  const MedicationAppearance *appearance =
-      medication_index <
-              s_medication_appearance_count
-          ? &s_medication_appearances[
-              medication_index
-            ]
-          : NULL;
-
-  if (!appearance || !appearance->valid) {
-    return pill_physics_radius_for_shape(
-      medication->shape
-    );
-  }
-
-  int16_t base_radius;
-
-  switch (appearance->shape) {
-    case 1:
-      /* ellipse */
-      base_radius = 21;
-      break;
-    case 2:
-      /* tablet */
-      base_radius = 22;
-      break;
-    case 3:
-      /* rhombus */
-      base_radius = 15;
-      break;
-    case 4:
-      /* capsule */
-      base_radius = 24;
-      break;
-    case 0:
-    default:
-      /* round */
-      base_radius = 14;
-      break;
-  }
-
-  int16_t radius = (int16_t)(
-    ((int32_t)base_radius * appearance->size + 50) / 100
-  );
-
-  /*
-   * Use a deliberately larger broad-phase collider than the visual body.
-   * This keeps the pills from sinking too deeply into each other while still
-   * remaining cheap enough for the watch.
-   */
-  if (
-    appearance->shape == 1 ||
-    appearance->shape == 2 ||
-    appearance->shape == 4
-  ) {
-    radius += (radius + 2) / 4; /* about +25 % */
-  } else {
-    radius += (radius + 4) / 5; /* about +20 % */
-  }
-
-  if (radius < 6) {
-    radius = 6;
-  } else if (radius > 48) {
-    radius = 48;
-  }
-
-  return (uint8_t)radius;
-}
-
 static void apply_medication_appearances(void) {
   memcpy(
     s_medication_appearances,
@@ -3155,22 +3042,6 @@ static int32_t current_pill_y(void) {
       ) /
       2 +
       visual_canvas_offset_y();
-}
-
-static uint8_t pill_physics_radius_for_shape(
-    uint8_t shape
-) {
-  switch (shape) {
-    case 1:
-      return 15;
-    case 2:
-      return 9;
-    case 3:
-      return 14;
-    case 0:
-    default:
-      return 12;
-  }
 }
 
 static bool pill_physics_medication_is_visible(
