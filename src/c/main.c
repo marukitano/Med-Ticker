@@ -4882,12 +4882,13 @@ static void medication_appearance_geometry(
       break;
     case 4:
       /*
-       * Real-capsule calibration: 50 % larger than the coupled 100-% base.
-       * medication_appearance_scaled() still applies the phone percentage,
-       * so a configured 125 % remains directly coupled to these values.
+       * 20 % thinner while keeping the same total capsule length:
+       * old half extent 23 + 15 = 38 px
+       * new half extent 26 + 12 = 38 px
+       * The phone size percentage is still applied afterwards.
        */
-      local_line_half = 23;
-      local_radius = 15;
+      local_line_half = 26;
+      local_radius = 12;
       break;
     case 0:
     default:
