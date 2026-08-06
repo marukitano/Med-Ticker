@@ -2,6 +2,7 @@ var THEME_STORAGE_KEY = 'pill-reminder-theme';
 var LEGACY_MEDICATION_STORAGE_KEY = 'pill-reminder-medication-v1';
 var MEDICATIONS_STORAGE_KEY = 'pill-reminder-medications-v2';
 var DAYPART_STORAGE_KEY = 'pill-reminder-dayparts-v1';
+var ALARM_STORAGE_KEY = 'pill-reminder-alarm-v1';
 
 var MAX_MEDICATIONS = 8;
 var MINUTES_PER_DAY = 1440;
@@ -24,17 +25,31 @@ var DAYPART_NIGHT_KEY = 14;
 var MED_SHAPE_KEY = 15;
 var MED_COLOR_KEY = 16;
 var MED_ICON_SET_KEY = 17;
+var AUDIO_VOLUME_KEY = 18;
+var VIBRATION_ENABLED_KEY = 19;
+var REMINDER_INTERVAL_KEY = 20;
 
 var COMMAND_RESET = 0;
 var COMMAND_ITEM = 1;
 var COMMAND_COMMIT = 2;
 
-var DEFAULT_DAYPARTS = {
+var LEGACY_DEFAULT_DAYPARTS = {
   morning: 5 * 60,
   noon: 11 * 60,
   evening: 16 * 60,
   night: 21 * 60
 };
+
+var DEFAULT_DAYPARTS = {
+  morning: 6 * 60,
+  noon: 12 * 60,
+  evening: 18 * 60,
+  night: 22 * 60
+};
+
+var DEFAULT_AUDIO_VOLUME = 100;
+var REMINDER_INTERVALS = [1, 5, 10, 15, 20, 30, 60];
+var DEFAULT_REMINDER_INTERVAL = 15;
 
 var DEFAULT_MEDICATION = {
   name: 'Xarelto 20 mg',
@@ -118,9 +133,20 @@ function currentDayparts() {
   }
 
   try {
-    return normalizeDayparts(
+    var normalized = normalizeDayparts(
       JSON.parse(stored)
     );
+
+    if (
+      normalized.morning === LEGACY_DEFAULT_DAYPARTS.morning &&
+      normalized.noon === LEGACY_DEFAULT_DAYPARTS.noon &&
+      normalized.evening === LEGACY_DEFAULT_DAYPARTS.evening &&
+      normalized.night === LEGACY_DEFAULT_DAYPARTS.night
+    ) {
+      return cloneDefaultDayparts();
+    }
+
+    return normalized;
   } catch (error) {
     console.log(
       'Could not read dayparts: ' +
@@ -128,6 +154,63 @@ function currentDayparts() {
     );
 
     return cloneDefaultDayparts();
+  }
+}
+
+function reminderIntervalIndex(value) {
+  for (var index = 0; index < REMINDER_INTERVALS.length; index++) {
+    if (REMINDER_INTERVALS[index] === value) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function normalizeAlarmSettings(value) {
+  var volume = value && integerInRange(
+    value.audioVolume,
+    0,
+    100
+  )
+    ? value.audioVolume
+    : DEFAULT_AUDIO_VOLUME;
+
+  var reminderInterval =
+      value && reminderIntervalIndex(
+        value.reminderInterval
+      ) >= 0
+          ? value.reminderInterval
+          : DEFAULT_REMINDER_INTERVAL;
+
+  return {
+    audioVolume: volume,
+    vibrationEnabled:
+        !value || value.vibrationEnabled !== false,
+    reminderInterval: reminderInterval
+  };
+}
+
+function currentAlarmSettings() {
+  var stored = localStorage.getItem(
+    ALARM_STORAGE_KEY
+  );
+
+  if (!stored) {
+    return normalizeAlarmSettings(null);
+  }
+
+  try {
+    return normalizeAlarmSettings(
+      JSON.parse(stored)
+    );
+  } catch (error) {
+    console.log(
+      'Could not read alarm settings: ' +
+      error.message
+    );
+
+    return normalizeAlarmSettings(null);
   }
 }
 
@@ -400,7 +483,10 @@ function sendMessage(message, next) {
   );
 }
 
-function sendMedicationList(medications) {
+function sendMedicationList(
+    medications,
+    commitSettings
+) {
   var reset = {};
   reset[MED_COMMAND_KEY] = COMMAND_RESET;
   reset[MED_COUNT_KEY] = medications.length;
@@ -408,17 +494,19 @@ function sendMedicationList(medications) {
   sendMessage(reset, function() {
     sendMedicationAt(
       medications,
-      0
+      0,
+      commitSettings
     );
   });
 }
 
 function sendMedicationAt(
     medications,
-    index
+    index,
+    commitSettings
 ) {
   if (index >= medications.length) {
-    var commit = {};
+    var commit = commitSettings;
     commit[MED_COMMAND_KEY] = COMMAND_COMMIT;
     commit[MED_COUNT_KEY] = medications.length;
     sendMessage(commit);
@@ -457,7 +545,8 @@ function sendMedicationAt(
   sendMessage(message, function() {
     sendMedicationAt(
       medications,
-      index + 1
+      index + 1,
+      commitSettings
     );
   });
 }
@@ -465,24 +554,32 @@ function sendMedicationAt(
 function sendAllSettings(
     theme,
     dayparts,
-    medications
+    medications,
+    alarm
 ) {
-  var settingsMessage = {};
+  var commitSettings = {};
 
-  settingsMessage[THEME_KEY] =
+  commitSettings[THEME_KEY] =
       theme === 'light' ? 1 : 0;
-  settingsMessage[DAYPART_MORNING_KEY] =
+  commitSettings[DAYPART_MORNING_KEY] =
       dayparts.morning;
-  settingsMessage[DAYPART_NOON_KEY] =
+  commitSettings[DAYPART_NOON_KEY] =
       dayparts.noon;
-  settingsMessage[DAYPART_EVENING_KEY] =
+  commitSettings[DAYPART_EVENING_KEY] =
       dayparts.evening;
-  settingsMessage[DAYPART_NIGHT_KEY] =
+  commitSettings[DAYPART_NIGHT_KEY] =
       dayparts.night;
+  commitSettings[AUDIO_VOLUME_KEY] =
+      alarm.audioVolume;
+  commitSettings[VIBRATION_ENABLED_KEY] =
+      alarm.vibrationEnabled ? 1 : 0;
+  commitSettings[REMINDER_INTERVAL_KEY] =
+      alarm.reminderInterval;
 
-  sendMessage(settingsMessage, function() {
-    sendMedicationList(medications);
-  });
+  sendMedicationList(
+    medications,
+    commitSettings
+  );
 }
 
 function safeJsonForScript(value) {
@@ -534,7 +631,8 @@ function timeToMinutes(value) {
 function configurationPage(
     theme,
     dayparts,
-    medications
+    medications,
+    alarm
 ) {
   var initialDayparts =
       safeJsonForScript(dayparts);
@@ -547,6 +645,14 @@ function configurationPage(
       theme === 'dark' ? ' selected' : '';
   var bodyClass =
       theme === 'dark' ? ' class="dark"' : '';
+  var alarmSettings = normalizeAlarmSettings(alarm);
+  var alarmVolume = alarmSettings.audioVolume;
+  var vibrationChecked =
+      alarmSettings.vibrationEnabled ? ' checked' : '';
+  var reminderIntervalSlider =
+      reminderIntervalIndex(
+        alarmSettings.reminderInterval
+      );
 
   return [
     '<!doctype html>',
@@ -564,6 +670,9 @@ function configurationPage(
     '.theme-row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:11px 15px}',
     '.theme-row h2{margin:0;font-size:17px}',
     '.theme-row select{box-sizing:border-box;width:auto;min-width:104px;margin:0;padding:7px 30px 7px 10px;font-size:15px}',
+    '.alarm-volume-label{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:0}',
+    '.alarm-volume-value{font-weight:normal;font-variant-numeric:tabular-nums}',
+    '.alarm-check{margin-top:16px}',
     'h2{font-size:18px;margin:0 0 13px}',
     'h3{font-size:17px;margin:0}',
     '.toggle{box-sizing:border-box;width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px;border:0;background:transparent;color:#111;text-align:left;font-size:17px;font-weight:bold}',
@@ -600,7 +709,7 @@ function configurationPage(
     '.copy{background:#eee;color:#111}',
     '.copy:disabled{opacity:.45}',
     '.close-medication{grid-column:1/-1;width:100%;border:0;border-radius:7px;padding:12px;font-size:15px;font-weight:bold;background:#ddd;color:#111}',
-    '.add{width:100%;padding:12px;border:1px solid #111;border-radius:8px;background:#fff;color:#111;font-size:27px;line-height:1;font-weight:bold;margin-bottom:14px}',
+    '.add{display:block;width:auto;margin:2px auto 12px;padding:0 14px;border:0;background:transparent;color:inherit;font-size:36px;line-height:1.1;font-weight:bold}',
     '.save{width:100%;padding:13px;border:0;border-radius:8px;background:#111;color:#fff;font-size:17px;font-weight:bold}',
     '.empty{text-align:center;color:#666;padding:18px 6px}',
     '.note{color:#666;font-size:13px;line-height:1.35;margin-top:12px}',
@@ -638,7 +747,7 @@ function configurationPage(
     'body.dark .summary-icon{border-color:#aaa}',
     'body.dark .summary-pen:before,body.dark .summary-pen:after{background:#aaa}',
     'body.dark .color-tile{border-color:#aaa}',
-    'body.dark .add{border-color:#ddd;background:#202020;color:#f4f4f4}',
+    'body.dark .add{background:transparent;color:#f4f4f4}',
     'body.dark .save{background:#f2f2f2;color:#111}',
     'body.dark .icon-fields{border-color:#505050}',
     'body.dark .color-swatch.selected{outline-color:#fff}',
@@ -649,13 +758,13 @@ function configurationPage(
     '<main>',
     '<h1>Pill Reminder</h1>',
     '<form id="settings">',
-    '<section id="medication-panel" class="collapsed">',
+    '<section id="medication-panel">',
     '<button id="medication-toggle" class="toggle" type="button">',
     '<span><span class="summary-main">Medikamente</span>',
     '<span class="summary-sub">Hinzufügen, bearbeiten und deaktivieren</span></span>',
     '<span class="arrow">›</span>',
     '</button>',
-    '<div id="medication-body" class="body hidden">',
+    '<div id="medication-body" class="body">',
     '<div id="medications"></div>',
     '<button id="add" class="add" type="button">+</button>',
     '</div>',
@@ -679,7 +788,22 @@ function configurationPage(
     '<label>Nacht beginnt',
     '<input id="night" type="time" required value="' + minutesToTime(dayparts.night) + '">',
     '</label>',
-    '<div class="note">Die Zeiten müssen in dieser Reihenfolge liegen. Nacht läuft bis zum Beginn von Früh.</div>',
+    '</div>',
+    '</section>',
+    '<section id="alarm-panel" class="collapsed">',
+    '<button id="alarm-toggle" class="toggle" type="button">',
+    '<span><span class="summary-main">Alarm</span>',
+    '<span class="summary-sub">Ton, Vibration und Erinnerung</span></span>',
+    '<span class="arrow">›</span>',
+    '</button>',
+    '<div id="alarm-body" class="body hidden">',
+    '<label class="alarm-volume-label"><span>Lautstärke</span>',
+    '<span id="audio-volume-value" class="alarm-volume-value">' + alarmVolume + ' %</span></label>',
+    '<input id="audio-volume" type="range" min="0" max="100" step="1" value="' + alarmVolume + '">',
+    '<label class="alarm-volume-label"><span>Erneut erinnern</span>',
+    '<span id="reminder-interval-value" class="alarm-volume-value">' + alarmSettings.reminderInterval + ' min</span></label>',
+    '<input id="reminder-interval" type="range" min="0" max="6" step="1" value="' + reminderIntervalSlider + '">',
+    '<label class="check alarm-check"><input id="vibration-enabled" type="checkbox"' + vibrationChecked + '><span>Vibration</span></label>',
     '</div>',
     '</section>',
     '<section class="plain theme-row">',
@@ -697,6 +821,7 @@ function configurationPage(
     'var dayparts=' + initialDayparts + ';',
     'var medications=' + initialMedications + ';',
     'var timeNames=["Früh","Mittag","Abend","Nacht"];',
+    'var reminderIntervals=[1,5,10,15,20,30,60];',
     'function escapeHtml(value){',
     'return String(value).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");',
     '}',
@@ -1051,12 +1176,20 @@ function configurationPage(
     '}',
     'document.getElementById("add").disabled=medications.length>=MAX_MEDICATIONS;',
     '}',
+    'var audioVolume=document.getElementById("audio-volume");',
+    'audioVolume.oninput=function(){document.getElementById("audio-volume-value").textContent=this.value+" %";};',
+    'var reminderInterval=document.getElementById("reminder-interval");',
+    'reminderInterval.oninput=function(){document.getElementById("reminder-interval-value").textContent=reminderIntervals[parseInt(this.value,10)]+" min";};',
     'document.getElementById("theme").onchange=function(){',
     'document.body.className=this.value==="dark"?"dark":"";',
     '};',
     'document.getElementById("daypart-toggle").onclick=function(){',
     'var body=document.getElementById("daypart-body");',
     'setPanelOpen("daypart-panel","daypart-body",body.className.indexOf("hidden")>=0);',
+    '};',
+    'document.getElementById("alarm-toggle").onclick=function(){',
+    'var body=document.getElementById("alarm-body");',
+    'setPanelOpen("alarm-panel","alarm-body",body.className.indexOf("hidden")>=0);',
     '};',
     'document.getElementById("medication-toggle").onclick=function(){',
     'var body=document.getElementById("medication-body");',
@@ -1084,7 +1217,7 @@ function configurationPage(
     'for(var medicationIndex=0;medicationIndex<medications.length;medicationIndex++){',
     'if(medications[medicationIndex].enabled&&!medications[medicationIndex].iconSet){alert("Ein aktives Medikament benötigt ein vollständiges Icon.");return;}',
     '}',
-    'var result={theme:document.getElementById("theme").value,dayparts:values,medications:medications};',
+    'var result={theme:document.getElementById("theme").value,dayparts:values,medications:medications,alarm:{audioVolume:parseInt(document.getElementById("audio-volume").value,10),vibrationEnabled:document.getElementById("vibration-enabled").checked,reminderInterval:reminderIntervals[parseInt(document.getElementById("reminder-interval").value,10)]}};',
     'document.location="pebblejs://close#"+encodeURIComponent(JSON.stringify(result));',
     '};',
     'window.__timeToMinutes=' + timeToMinutes.toString() + ';',
@@ -1096,18 +1229,15 @@ function configurationPage(
 }
 
 Pebble.addEventListener('ready', function() {
-  sendAllSettings(
-    currentTheme(),
-    currentDayparts(),
-    currentMedications()
-  );
+  console.log('Pill Reminder companion ready');
 });
 
 Pebble.addEventListener('showConfiguration', function() {
   var page = configurationPage(
     currentTheme(),
     currentDayparts(),
-    currentMedications()
+    currentMedications(),
+    currentAlarmSettings()
   );
 
   Pebble.openURL(
@@ -1141,6 +1271,10 @@ Pebble.addEventListener('webviewclosed', function(event) {
       settings.medications
     );
 
+    var alarm = normalizeAlarmSettings(
+      settings.alarm
+    );
+
     localStorage.setItem(
       THEME_STORAGE_KEY,
       settings.theme
@@ -1156,10 +1290,16 @@ Pebble.addEventListener('webviewclosed', function(event) {
       JSON.stringify(medications)
     );
 
+    localStorage.setItem(
+      ALARM_STORAGE_KEY,
+      JSON.stringify(alarm)
+    );
+
     sendAllSettings(
       settings.theme,
       dayparts,
-      medications
+      medications,
+      alarm
     );
   } catch (error) {
     console.log(

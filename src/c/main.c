@@ -104,11 +104,29 @@
 #define MAX_LIST_ROWS (MAX_MEDICATIONS + 2)
 
 #define DAYPART_PERSIST_KEY 204
+#define ALARM_AUDIO_VOLUME_PERSIST_KEY 205
+#define ALARM_VIBRATION_PERSIST_KEY 206
+#define ALARM_INTERVAL_PERSIST_KEY 207
+#define ALARM_WINDOW_STATE_PERSIST_KEY 208
 #define DAYPART_MINUTES_PER_DAY 1440
-#define DEFAULT_MORNING_START_MINUTE (5 * 60)
-#define DEFAULT_NOON_START_MINUTE (11 * 60)
-#define DEFAULT_EVENING_START_MINUTE (16 * 60)
-#define DEFAULT_NIGHT_START_MINUTE (21 * 60)
+#define LEGACY_DEFAULT_MORNING_START_MINUTE (5 * 60)
+#define LEGACY_DEFAULT_NOON_START_MINUTE (11 * 60)
+#define LEGACY_DEFAULT_EVENING_START_MINUTE (16 * 60)
+#define LEGACY_DEFAULT_NIGHT_START_MINUTE (21 * 60)
+#define DEFAULT_MORNING_START_MINUTE (6 * 60)
+#define DEFAULT_NOON_START_MINUTE (12 * 60)
+#define DEFAULT_EVENING_START_MINUTE (18 * 60)
+#define DEFAULT_NIGHT_START_MINUTE (22 * 60)
+
+#define DEFAULT_ALARM_AUDIO_VOLUME 100
+#define DEFAULT_ALARM_VIBRATION_ENABLED true
+#define DEFAULT_ALARM_REMINDER_INTERVAL_MINUTES 15
+#define ALARM_ACTIVE_SECONDS 60
+#define ALARM_VIBE_INTERVAL_MS 2000
+#define ALARM_AUDIO_BUFFER_SIZE 1024
+#define ALARM_AUDIO_PUMP_INTERVAL_MS 10
+#define ALARM_AUDIO_MAX_WRITES_PER_PUMP 8
+#define ALARM_WAKEUP_COOKIE 0x50494c4c
 
 typedef enum {
   MEDICATION_TIME_MORNING,
@@ -165,6 +183,13 @@ typedef struct {
   uint16_t evening;
   uint16_t night;
 } DaypartSettings;
+
+typedef struct {
+  int32_t window_start;
+  int32_t last_reminder;
+  uint8_t confirmed_mask;
+  uint8_t reserved[3];
+} AlarmWindowState;
 
 typedef enum {
   CONFIRM_IDLE,
@@ -278,6 +303,30 @@ static uint8_t s_animation_tick;
 static int8_t s_taken_hint_phase;
 static bool s_light_theme;
 
+static uint8_t s_alarm_audio_volume =
+    DEFAULT_ALARM_AUDIO_VOLUME;
+static bool s_alarm_vibration_enabled =
+    DEFAULT_ALARM_VIBRATION_ENABLED;
+static uint8_t s_alarm_reminder_interval_minutes =
+    DEFAULT_ALARM_REMINDER_INTERVAL_MINUTES;
+static AlarmWindowState s_alarm_window_state;
+static bool s_alarm_window_state_loaded;
+static bool s_alarm_active;
+static bool s_alarm_launch_pending;
+static time_t s_alarm_stop_time;
+static uint8_t s_alarm_due_symbol_mask;
+static AppTimer *s_alarm_pulse_timer;
+static AppTimer *s_alarm_audio_pump_timer;
+static ResHandle s_alarm_audio_resource;
+static size_t s_alarm_audio_resource_size;
+static size_t s_alarm_audio_resource_offset;
+static uint8_t s_alarm_audio_buffer[
+  ALARM_AUDIO_BUFFER_SIZE
+];
+static size_t s_alarm_audio_buffer_size;
+static size_t s_alarm_audio_buffer_offset;
+static bool s_alarm_audio_active;
+
 typedef enum {
   SCROLL_IDLE,
   SCROLL_TOUCH,
@@ -347,6 +396,20 @@ static GColor theme_hint_color(void) {
 static void update_band_animation_target(void);
 static void reset_ui_state(GRect bounds);
 static void refresh_medication_rows_for_time(void);
+static void alarm_audio_stop(void);
+static bool alarm_audio_start(void);
+static void alarm_stop(void);
+static void schedule_next_alarm_wakeup(void);
+static void alarm_handle_minute_tick(
+    const struct tm *tick_time
+);
+static void alarm_confirmation_received(
+    MedicationSymbol symbol
+);
+static void alarm_reset_after_settings_save(void);
+
+static void alarm_refresh_window_state(void);
+
 
 static void mark_scene_dirty(void) {
   update_band_animation_target();
@@ -390,6 +453,105 @@ static void apply_theme(
     layer_mark_dirty(
       s_confirmation_layer
     );
+  }
+}
+
+static bool alarm_reminder_interval_valid(int value) {
+  switch (value) {
+    case 1:
+    case 5:
+    case 10:
+    case 15:
+    case 20:
+    case 30:
+    case 60:
+      return true;
+
+    default:
+      return false;
+  }
+}
+
+static void load_alarm_settings(void) {
+  s_alarm_audio_volume = DEFAULT_ALARM_AUDIO_VOLUME;
+  s_alarm_vibration_enabled =
+      DEFAULT_ALARM_VIBRATION_ENABLED;
+  s_alarm_reminder_interval_minutes =
+      DEFAULT_ALARM_REMINDER_INTERVAL_MINUTES;
+
+  if (persist_exists(ALARM_AUDIO_VOLUME_PERSIST_KEY)) {
+    const int stored_volume = persist_read_int(
+      ALARM_AUDIO_VOLUME_PERSIST_KEY
+    );
+
+    if (stored_volume >= 0 && stored_volume <= 100) {
+      s_alarm_audio_volume = (uint8_t)stored_volume;
+    }
+  }
+
+  if (persist_exists(ALARM_VIBRATION_PERSIST_KEY)) {
+    s_alarm_vibration_enabled =
+        persist_read_int(ALARM_VIBRATION_PERSIST_KEY) != 0;
+  }
+
+  if (persist_exists(ALARM_INTERVAL_PERSIST_KEY)) {
+    const int stored_interval = persist_read_int(
+      ALARM_INTERVAL_PERSIST_KEY
+    );
+
+    if (alarm_reminder_interval_valid(stored_interval)) {
+      s_alarm_reminder_interval_minutes =
+          (uint8_t)stored_interval;
+    }
+  }
+}
+
+static void apply_alarm_settings(
+    uint8_t volume,
+    bool vibration_enabled,
+    uint8_t reminder_interval_minutes,
+    bool save
+) {
+  if (!alarm_reminder_interval_valid(reminder_interval_minutes)) {
+    reminder_interval_minutes =
+        DEFAULT_ALARM_REMINDER_INTERVAL_MINUTES;
+  }
+
+  s_alarm_audio_volume = volume;
+  s_alarm_vibration_enabled = vibration_enabled;
+  s_alarm_reminder_interval_minutes =
+      reminder_interval_minutes;
+
+  if (save) {
+    persist_write_int(
+      ALARM_AUDIO_VOLUME_PERSIST_KEY,
+      s_alarm_audio_volume
+    );
+    persist_write_int(
+      ALARM_VIBRATION_PERSIST_KEY,
+      s_alarm_vibration_enabled ? 1 : 0
+    );
+    persist_write_int(
+      ALARM_INTERVAL_PERSIST_KEY,
+      s_alarm_reminder_interval_minutes
+    );
+  }
+
+  if (!s_alarm_vibration_enabled) {
+    vibes_cancel();
+  }
+
+  if (s_alarm_active) {
+    if (
+      s_alarm_audio_volume == 0 ||
+      speaker_is_muted()
+    ) {
+      alarm_audio_stop();
+    } else if (s_alarm_audio_active) {
+      speaker_set_volume(s_alarm_audio_volume);
+    } else {
+      (void)alarm_audio_start();
+    }
   }
 }
 
@@ -545,7 +707,25 @@ static void load_daypart_settings(void) {
     ) == (int)sizeof(stored) &&
     daypart_settings_valid(&stored)
   ) {
-    s_dayparts = stored;
+    const bool legacy_defaults =
+        stored.morning ==
+            LEGACY_DEFAULT_MORNING_START_MINUTE &&
+        stored.noon ==
+            LEGACY_DEFAULT_NOON_START_MINUTE &&
+        stored.evening ==
+            LEGACY_DEFAULT_EVENING_START_MINUTE &&
+        stored.night ==
+            LEGACY_DEFAULT_NIGHT_START_MINUTE;
+
+    if (legacy_defaults) {
+      persist_write_data(
+        DAYPART_PERSIST_KEY,
+        &s_dayparts,
+        sizeof(s_dayparts)
+      );
+    } else {
+      s_dayparts = stored;
+    }
   }
 }
 
@@ -613,8 +793,13 @@ static MedicationTime current_medication_time(void) {
 }
 
 static void reset_medication_confirmations(void) {
-  s_pills_confirmed = false;
-  s_pen_confirmed = false;
+  alarm_refresh_window_state();
+  s_pills_confirmed =
+      (s_alarm_window_state.confirmed_mask &
+       (1u << MEDICATION_SYMBOL_PILL)) != 0;
+  s_pen_confirmed =
+      (s_alarm_window_state.confirmed_mask &
+       (1u << MEDICATION_SYMBOL_PEN)) != 0;
 }
 
 static bool medication_group_is_confirmed(
@@ -813,10 +998,10 @@ static void daypart_tick_handler(
     struct tm *tick_time,
     TimeUnits units_changed
 ) {
-  (void)tick_time;
   (void)units_changed;
 
   refresh_medication_rows_for_time();
+  alarm_handle_minute_tick(tick_time);
 }
 
 static bool medication_list_valid(
@@ -1430,52 +1615,6 @@ static void settings_inbox_received(
 ) {
   (void)context;
 
-  Tuple *theme_tuple = dict_find(
-    iterator,
-    MESSAGE_KEY_THEME
-  );
-
-  int32_t theme_value;
-
-  if (
-    tuple_read_int32(
-      theme_tuple,
-      &theme_value
-    ) &&
-    (theme_value == 0 || theme_value == 1)
-  ) {
-    apply_theme(
-      theme_value == 1,
-      true
-    );
-  }
-
-  if (
-    dict_find(
-      iterator,
-      MESSAGE_KEY_DAYPART_MORNING
-    )
-  ) {
-    DaypartSettings dayparts;
-
-    if (
-      read_dayparts_from_message(
-        iterator,
-        &dayparts
-      )
-    ) {
-      apply_daypart_settings(
-        &dayparts,
-        true
-      );
-    } else {
-      APP_LOG(
-        APP_LOG_LEVEL_WARNING,
-        "Invalid daypart settings"
-      );
-    }
-  }
-
   Tuple *command_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_COMMAND
@@ -1517,9 +1656,7 @@ static void settings_inbox_received(
     return;
   }
 
-  if (
-    count != s_pending_count
-  ) {
+  if (count != s_pending_count) {
     return;
   }
 
@@ -1572,11 +1709,87 @@ static void settings_inbox_received(
     return;
   }
 
+  Tuple *theme_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_THEME
+  );
+  Tuple *audio_volume_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_AUDIO_VOLUME
+  );
+  Tuple *vibration_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_VIBRATION_ENABLED
+  );
+  Tuple *reminder_interval_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_REMINDER_INTERVAL
+  );
+
+  int32_t theme_value;
+  int32_t audio_volume;
+  int32_t vibration_enabled;
+  int32_t reminder_interval;
+  DaypartSettings dayparts;
+
+  if (
+    !tuple_read_int32(
+      theme_tuple,
+      &theme_value
+    ) ||
+    (theme_value != 0 && theme_value != 1) ||
+    !read_dayparts_from_message(
+      iterator,
+      &dayparts
+    ) ||
+    !tuple_read_int32(
+      audio_volume_tuple,
+      &audio_volume
+    ) ||
+    audio_volume < 0 ||
+    audio_volume > 100 ||
+    !tuple_read_int32(
+      vibration_tuple,
+      &vibration_enabled
+    ) ||
+    (vibration_enabled != 0 && vibration_enabled != 1) ||
+    !tuple_read_int32(
+      reminder_interval_tuple,
+      &reminder_interval
+    ) ||
+    !alarm_reminder_interval_valid(
+      reminder_interval
+    )
+  ) {
+    APP_LOG(
+      APP_LOG_LEVEL_WARNING,
+      "Incomplete settings commit ignored"
+    );
+    return;
+  }
+
+  apply_theme(
+    theme_value == 1,
+    true
+  );
+  apply_daypart_settings(
+    &dayparts,
+    true
+  );
+  apply_alarm_settings(
+    (uint8_t)audio_volume,
+    vibration_enabled == 1,
+    (uint8_t)reminder_interval,
+    true
+  );
   apply_medication_list(
     s_pending_medications,
     s_pending_count,
     true
   );
+
+  alarm_reset_after_settings_save();
+  reset_pending_medications(0);
 }
 
 static void settings_init(void) {
@@ -1585,6 +1798,7 @@ static void settings_init(void) {
       persist_read_int(THEME_PERSIST_KEY) == 1;
 
   load_daypart_settings();
+  load_alarm_settings();
   load_medication_settings();
   reset_pending_medications(0);
 
@@ -1618,6 +1832,738 @@ static void cancel_timer(AppTimer **timer) {
 
   app_timer_cancel(*timer);
   *timer = NULL;
+}
+
+/******************************************************************************
+ * Medication alarm, speaker streaming and wakeups
+ ******************************************************************************/
+
+static void alarm_audio_reset_state(void) {
+  s_alarm_audio_resource = NULL;
+  s_alarm_audio_resource_size = 0;
+  s_alarm_audio_resource_offset = 0;
+  s_alarm_audio_buffer_size = 0;
+  s_alarm_audio_buffer_offset = 0;
+  s_alarm_audio_active = false;
+}
+
+static void alarm_audio_stop(void) {
+  cancel_timer(&s_alarm_audio_pump_timer);
+
+  if (s_alarm_audio_active) {
+    speaker_stop();
+  }
+
+  alarm_audio_reset_state();
+}
+
+static bool alarm_audio_load_next_chunk(void) {
+  if (
+    s_alarm_audio_resource == NULL ||
+    s_alarm_audio_resource_size == 0
+  ) {
+    return false;
+  }
+
+  if (
+    s_alarm_audio_resource_offset >=
+        s_alarm_audio_resource_size
+  ) {
+    s_alarm_audio_resource_offset = 0;
+  }
+
+  const size_t bytes_remaining =
+      s_alarm_audio_resource_size -
+      s_alarm_audio_resource_offset;
+
+  const size_t bytes_requested =
+      bytes_remaining < sizeof(s_alarm_audio_buffer)
+          ? bytes_remaining
+          : sizeof(s_alarm_audio_buffer);
+
+  const size_t bytes_loaded =
+      resource_load_byte_range(
+        s_alarm_audio_resource,
+        (uint32_t)s_alarm_audio_resource_offset,
+        s_alarm_audio_buffer,
+        bytes_requested
+      );
+
+  if (bytes_loaded == 0) {
+    return false;
+  }
+
+  s_alarm_audio_buffer_size = bytes_loaded;
+  s_alarm_audio_buffer_offset = 0;
+  return true;
+}
+
+static void alarm_audio_pump(void *context);
+
+static void alarm_audio_schedule_pump(void) {
+  if (
+    !s_alarm_audio_active ||
+    s_alarm_audio_pump_timer != NULL
+  ) {
+    return;
+  }
+
+  s_alarm_audio_pump_timer = app_timer_register(
+    ALARM_AUDIO_PUMP_INTERVAL_MS,
+    alarm_audio_pump,
+    NULL
+  );
+
+  if (!s_alarm_audio_pump_timer) {
+    alarm_audio_stop();
+  }
+}
+
+static void alarm_audio_pump(void *context) {
+  (void)context;
+  s_alarm_audio_pump_timer = NULL;
+
+  if (!s_alarm_audio_active) {
+    return;
+  }
+
+  for (
+    uint8_t attempt = 0;
+    attempt < ALARM_AUDIO_MAX_WRITES_PER_PUMP;
+    attempt++
+  ) {
+    if (
+      s_alarm_audio_buffer_offset >=
+          s_alarm_audio_buffer_size
+    ) {
+      if (!alarm_audio_load_next_chunk()) {
+        alarm_audio_stop();
+        return;
+      }
+    }
+
+    const size_t bytes_available =
+        s_alarm_audio_buffer_size -
+        s_alarm_audio_buffer_offset;
+
+    const uint32_t bytes_written =
+        speaker_stream_write(
+          s_alarm_audio_buffer +
+              s_alarm_audio_buffer_offset,
+          (uint32_t)bytes_available
+        );
+
+    if (bytes_written == 0) {
+      break;
+    }
+
+    s_alarm_audio_buffer_offset += bytes_written;
+
+    if (
+      s_alarm_audio_buffer_offset >=
+          s_alarm_audio_buffer_size
+    ) {
+      s_alarm_audio_resource_offset +=
+          s_alarm_audio_buffer_size;
+      s_alarm_audio_buffer_size = 0;
+      s_alarm_audio_buffer_offset = 0;
+
+      if (
+        s_alarm_audio_resource_offset >=
+            s_alarm_audio_resource_size
+      ) {
+        s_alarm_audio_resource_offset = 0;
+      }
+    }
+  }
+
+  alarm_audio_schedule_pump();
+}
+
+static bool alarm_audio_start(void) {
+  alarm_audio_stop();
+
+  if (
+    s_alarm_audio_volume == 0 ||
+    speaker_is_muted()
+  ) {
+    return false;
+  }
+
+  s_alarm_audio_resource =
+      resource_get_handle(RESOURCE_ID_ALARM_PCM);
+  s_alarm_audio_resource_size =
+      resource_size(s_alarm_audio_resource);
+
+  if (
+    s_alarm_audio_resource == NULL ||
+    s_alarm_audio_resource_size == 0
+  ) {
+    alarm_audio_reset_state();
+    return false;
+  }
+
+  if (
+    !speaker_stream_open(
+      SpeakerPcmFormat_16kHz_8bit,
+      s_alarm_audio_volume
+    )
+  ) {
+    alarm_audio_reset_state();
+    return false;
+  }
+
+  s_alarm_audio_active = true;
+  alarm_audio_pump(NULL);
+  return s_alarm_audio_active;
+}
+
+static bool medication_due_on_date(
+    const MedicationSettings *medication,
+    const struct tm *local_date
+) {
+  if (!medication || !local_date || !medication->enabled) {
+    return false;
+  }
+
+  if (
+    medication->schedule ==
+        MEDICATION_SCHEDULE_DAILY
+  ) {
+    return true;
+  }
+
+  if (
+    medication->schedule ==
+        MEDICATION_SCHEDULE_WEEKLY
+  ) {
+    const uint8_t monday_based_weekday =
+        (uint8_t)((local_date->tm_wday + 6) % 7);
+
+    return medication->day == monday_based_weekday;
+  }
+
+  if (
+    medication->schedule ==
+        MEDICATION_SCHEDULE_MONTHLY
+  ) {
+    return medication->day == local_date->tm_mday;
+  }
+
+  return false;
+}
+
+static bool alarm_window_bounds_at(
+    time_t timestamp,
+    time_t *window_start,
+    time_t *window_end,
+    MedicationTime *window_slot
+) {
+  struct tm *local_ptr = localtime(&timestamp);
+
+  if (!local_ptr) {
+    return false;
+  }
+
+  const struct tm local = *local_ptr;
+  const int minute = local.tm_hour * 60 + local.tm_min;
+
+  MedicationTime slot;
+  int start_day_offset = 0;
+  int end_day_offset = 0;
+  uint16_t start_minute;
+  uint16_t end_minute;
+
+  if (
+    minute >= s_dayparts.morning &&
+    minute < s_dayparts.noon
+  ) {
+    slot = MEDICATION_TIME_MORNING;
+    start_minute = s_dayparts.morning;
+    end_minute = s_dayparts.noon;
+  } else if (
+    minute >= s_dayparts.noon &&
+    minute < s_dayparts.evening
+  ) {
+    slot = MEDICATION_TIME_NOON;
+    start_minute = s_dayparts.noon;
+    end_minute = s_dayparts.evening;
+  } else if (
+    minute >= s_dayparts.evening &&
+    minute < s_dayparts.night
+  ) {
+    slot = MEDICATION_TIME_EVENING;
+    start_minute = s_dayparts.evening;
+    end_minute = s_dayparts.night;
+  } else if (minute >= s_dayparts.night) {
+    slot = MEDICATION_TIME_NIGHT;
+    start_minute = s_dayparts.night;
+    end_minute = s_dayparts.morning;
+    end_day_offset = 1;
+  } else {
+    slot = MEDICATION_TIME_NIGHT;
+    start_minute = s_dayparts.night;
+    end_minute = s_dayparts.morning;
+    start_day_offset = -1;
+  }
+
+  struct tm start_tm = local;
+  start_tm.tm_mday += start_day_offset;
+  start_tm.tm_hour = start_minute / 60;
+  start_tm.tm_min = start_minute % 60;
+  start_tm.tm_sec = 0;
+  start_tm.tm_isdst = -1;
+
+  struct tm end_tm = local;
+  end_tm.tm_mday += end_day_offset;
+  end_tm.tm_hour = end_minute / 60;
+  end_tm.tm_min = end_minute % 60;
+  end_tm.tm_sec = 0;
+  end_tm.tm_isdst = -1;
+
+  const time_t start = mktime(&start_tm);
+  const time_t end = mktime(&end_tm);
+
+  if (start <= 0 || end <= start) {
+    return false;
+  }
+
+  if (window_start) {
+    *window_start = start;
+  }
+  if (window_end) {
+    *window_end = end;
+  }
+  if (window_slot) {
+    *window_slot = slot;
+  }
+
+  return true;
+}
+
+static void persist_alarm_window_state(void) {
+  persist_write_data(
+    ALARM_WINDOW_STATE_PERSIST_KEY,
+    &s_alarm_window_state,
+    sizeof(s_alarm_window_state)
+  );
+}
+
+static void alarm_refresh_window_state(void) {
+  time_t window_start;
+
+  if (
+    !alarm_window_bounds_at(
+      time(NULL),
+      &window_start,
+      NULL,
+      NULL
+    )
+  ) {
+    return;
+  }
+
+  if (!s_alarm_window_state_loaded) {
+    memset(
+      &s_alarm_window_state,
+      0,
+      sizeof(s_alarm_window_state)
+    );
+
+    if (
+      persist_exists(ALARM_WINDOW_STATE_PERSIST_KEY) &&
+      persist_get_size(ALARM_WINDOW_STATE_PERSIST_KEY) ==
+          (int)sizeof(AlarmWindowState)
+    ) {
+      (void)persist_read_data(
+        ALARM_WINDOW_STATE_PERSIST_KEY,
+        &s_alarm_window_state,
+        sizeof(s_alarm_window_state)
+      );
+    }
+
+    s_alarm_window_state_loaded = true;
+  }
+
+  if (
+    s_alarm_window_state.window_start !=
+        (int32_t)window_start
+  ) {
+    s_alarm_window_state = (AlarmWindowState) {
+      .window_start = (int32_t)window_start,
+      .last_reminder = 0,
+      .confirmed_mask = 0
+    };
+
+    persist_alarm_window_state();
+  }
+}
+
+static uint8_t alarm_symbol_mask_for_window(
+    time_t window_start,
+    MedicationTime slot
+) {
+  struct tm *local_ptr = localtime(&window_start);
+
+  if (!local_ptr) {
+    return 0;
+  }
+
+  const struct tm schedule_date = *local_ptr;
+  uint8_t mask = 0;
+
+  for (
+    uint8_t index = 0;
+    index < s_medication_count;
+    index++
+  ) {
+    const MedicationSettings *medication =
+        &s_medications[index];
+
+    if (
+      medication->time != (uint8_t)slot ||
+      !medication_due_on_date(
+        medication,
+        &schedule_date
+      )
+    ) {
+      continue;
+    }
+
+    mask |= (uint8_t)(1u << medication->symbol);
+  }
+
+  return mask;
+}
+
+static uint8_t alarm_unconfirmed_symbol_mask_at(
+    time_t timestamp
+) {
+  time_t window_start;
+  MedicationTime slot;
+
+  if (
+    !alarm_window_bounds_at(
+      timestamp,
+      &window_start,
+      NULL,
+      &slot
+    )
+  ) {
+    return 0;
+  }
+
+  alarm_refresh_window_state();
+
+  return
+      alarm_symbol_mask_for_window(
+        window_start,
+        slot
+      ) &
+      (uint8_t)~s_alarm_window_state.confirmed_mask;
+}
+
+static time_t next_due_window_start_after(time_t now) {
+  struct tm *today_ptr = localtime(&now);
+
+  if (!today_ptr) {
+    return 0;
+  }
+
+  const struct tm today = *today_ptr;
+  const uint16_t starts[] = {
+    s_dayparts.morning,
+    s_dayparts.noon,
+    s_dayparts.evening,
+    s_dayparts.night
+  };
+
+  for (uint16_t day_offset = 0; day_offset <= 370; day_offset++) {
+    for (uint8_t slot = 0; slot < ARRAY_LENGTH(starts); slot++) {
+      struct tm candidate_tm = today;
+      candidate_tm.tm_mday += day_offset;
+      candidate_tm.tm_hour = starts[slot] / 60;
+      candidate_tm.tm_min = starts[slot] % 60;
+      candidate_tm.tm_sec = 0;
+      candidate_tm.tm_isdst = -1;
+
+      const time_t candidate = mktime(&candidate_tm);
+
+      if (
+        candidate <= now ||
+        alarm_symbol_mask_for_window(
+          candidate,
+          (MedicationTime)slot
+        ) == 0
+      ) {
+        continue;
+      }
+
+      return candidate;
+    }
+  }
+
+  return 0;
+}
+
+static time_t next_alarm_timestamp_after(time_t now) {
+  time_t window_start;
+  time_t window_end;
+
+  if (
+    alarm_window_bounds_at(
+      now,
+      &window_start,
+      &window_end,
+      NULL
+    ) &&
+    alarm_unconfirmed_symbol_mask_at(now) != 0
+  ) {
+    time_t candidate;
+
+    if (
+      s_alarm_window_state.last_reminder <
+          (int32_t)window_start
+    ) {
+      candidate = now + 60;
+    } else {
+      candidate =
+          (time_t)s_alarm_window_state.last_reminder +
+          (time_t)s_alarm_reminder_interval_minutes * 60;
+
+      if (candidate <= now) {
+        candidate = now + 60;
+      }
+    }
+
+    if (candidate < window_end) {
+      return candidate;
+    }
+  }
+
+  return next_due_window_start_after(now);
+}
+
+static void schedule_next_alarm_wakeup(void) {
+  wakeup_cancel_all();
+
+  const time_t now = time(NULL);
+  const time_t candidate =
+      next_alarm_timestamp_after(now);
+
+  if (candidate <= now) {
+    return;
+  }
+
+  WakeupId result = E_INTERNAL;
+  time_t scheduled = candidate;
+
+  for (
+    uint8_t attempt = 0;
+    attempt <= 120;
+    attempt++, scheduled++
+  ) {
+    result = wakeup_schedule(
+      scheduled,
+      ALARM_WAKEUP_COOKIE,
+      true
+    );
+
+    if (result != E_RANGE) {
+      break;
+    }
+  }
+
+  if (result < 0) {
+    APP_LOG(
+      APP_LOG_LEVEL_WARNING,
+      "Medication wakeup failed: %ld",
+      (long)result
+    );
+  } else {
+    APP_LOG(
+      APP_LOG_LEVEL_INFO,
+      "Medication wakeup scheduled in %ld seconds",
+      (long)(scheduled - now)
+    );
+  }
+}
+
+static void alarm_vibrate(void) {
+  if (s_alarm_vibration_enabled) {
+    vibes_double_pulse();
+  }
+}
+
+static void alarm_stop(void) {
+  cancel_timer(&s_alarm_pulse_timer);
+  vibes_cancel();
+  alarm_audio_stop();
+  s_alarm_active = false;
+  s_alarm_stop_time = 0;
+  s_alarm_due_symbol_mask = 0;
+}
+
+static void alarm_pulse_timer_handler(void *context) {
+  (void)context;
+  s_alarm_pulse_timer = NULL;
+
+  if (!s_alarm_active) {
+    return;
+  }
+
+  if (time(NULL) >= s_alarm_stop_time) {
+    alarm_stop();
+    return;
+  }
+
+  alarm_vibrate();
+
+  if (!s_alarm_audio_active) {
+    (void)alarm_audio_start();
+  }
+
+  s_alarm_pulse_timer = app_timer_register(
+    ALARM_VIBE_INTERVAL_MS,
+    alarm_pulse_timer_handler,
+    NULL
+  );
+
+  if (!s_alarm_pulse_timer) {
+    alarm_stop();
+  }
+}
+
+static void alarm_start(void) {
+  if (s_alarm_active) {
+    return;
+  }
+
+  const time_t now = time(NULL);
+  const uint8_t due_mask =
+      alarm_unconfirmed_symbol_mask_at(now);
+
+  if (due_mask == 0) {
+    schedule_next_alarm_wakeup();
+    return;
+  }
+
+  alarm_refresh_window_state();
+  s_alarm_window_state.last_reminder =
+      (int32_t)now;
+  persist_alarm_window_state();
+
+  s_alarm_due_symbol_mask = due_mask;
+  s_alarm_active = true;
+  s_alarm_stop_time = now + ALARM_ACTIVE_SECONDS;
+
+  alarm_pulse_timer_handler(NULL);
+}
+
+static void alarm_wakeup_handler(
+    WakeupId wakeup_id,
+    int32_t cookie
+) {
+  (void)wakeup_id;
+
+  if (cookie != ALARM_WAKEUP_COOKIE) {
+    return;
+  }
+
+  refresh_medication_rows_for_time();
+  alarm_start();
+  schedule_next_alarm_wakeup();
+}
+
+static bool minute_is_daypart_start(int minute) {
+  return
+      minute == s_dayparts.morning ||
+      minute == s_dayparts.noon ||
+      minute == s_dayparts.evening ||
+      minute == s_dayparts.night;
+}
+
+static void alarm_handle_minute_tick(
+    const struct tm *tick_time
+) {
+  if (!tick_time) {
+    return;
+  }
+
+  const int minute =
+      tick_time->tm_hour * 60 +
+      tick_time->tm_min;
+
+  if (minute_is_daypart_start(minute)) {
+    alarm_refresh_window_state();
+    alarm_start();
+  }
+
+  schedule_next_alarm_wakeup();
+}
+
+static void alarm_reset_after_settings_save(void) {
+  alarm_stop();
+  wakeup_cancel_all();
+
+  time_t window_start = 0;
+  (void)alarm_window_bounds_at(
+    time(NULL),
+    &window_start,
+    NULL,
+    NULL
+  );
+
+  s_alarm_window_state = (AlarmWindowState) {
+    .window_start = (int32_t)window_start,
+    .last_reminder = 0,
+    .confirmed_mask = 0
+  };
+  s_alarm_window_state_loaded = true;
+  persist_alarm_window_state();
+
+  s_pills_confirmed = false;
+  s_pen_confirmed = false;
+  rebuild_medication_rows();
+
+  if (s_canvas_layer) {
+    reset_ui_state(
+      layer_get_bounds(s_canvas_layer)
+    );
+  }
+
+  mark_scene_dirty();
+  schedule_next_alarm_wakeup();
+
+  APP_LOG(
+    APP_LOG_LEVEL_INFO,
+    "Settings saved: alarm plan reset"
+  );
+}
+
+static void alarm_confirmation_received(
+    MedicationSymbol symbol
+) {
+  alarm_refresh_window_state();
+
+  const uint8_t symbol_mask =
+      (uint8_t)(1u << symbol);
+
+  s_alarm_window_state.confirmed_mask |=
+      symbol_mask;
+  persist_alarm_window_state();
+
+  s_alarm_due_symbol_mask &=
+      (uint8_t)~symbol_mask;
+
+  if (
+    s_alarm_active &&
+    s_alarm_due_symbol_mask == 0
+  ) {
+    alarm_stop();
+  }
+
+  schedule_next_alarm_wakeup();
 }
 
 static int32_t abs_int32(int32_t value) {
@@ -2634,11 +3580,43 @@ static void band_arrow_update_proc(
   }
 }
 
-static bool selected_confirmation_symbol(
+static bool first_unconfirmed_due_symbol(
     MedicationSymbol *symbol
 ) {
   if (
-    s_scroll.snap_index <= 0 ||
+    medication_group_is_due(
+      MEDICATION_SYMBOL_PILL
+    )
+  ) {
+    if (symbol) {
+      *symbol = MEDICATION_SYMBOL_PILL;
+    }
+    return true;
+  }
+
+  if (
+    medication_group_is_due(
+      MEDICATION_SYMBOL_PEN
+    )
+  ) {
+    if (symbol) {
+      *symbol = MEDICATION_SYMBOL_PEN;
+    }
+    return true;
+  }
+
+  return false;
+}
+
+static bool selected_confirmation_symbol(
+    MedicationSymbol *symbol
+) {
+  if (s_scroll.snap_index == 0) {
+    return first_unconfirmed_due_symbol(symbol);
+  }
+
+  if (
+    s_scroll.snap_index < 1 ||
     s_scroll.snap_index > LIST_ROW_COUNT
   ) {
     return false;
@@ -2675,11 +3653,20 @@ static bool selected_confirmation_symbol(
 static bool confirmation_prompt_is_active(
     MedicationSymbol *symbol
 ) {
+  if (
+    !selected_confirmation_symbol(symbol) ||
+    s_scroll.mode != SCROLL_IDLE ||
+    s_band.animating
+  ) {
+    return false;
+  }
+
+  if (s_scroll.snap_index == 0) {
+    return true;
+  }
+
   return
-      selected_confirmation_symbol(symbol) &&
-      s_scroll.mode == SCROLL_IDLE &&
       s_band.target_visible &&
-      !s_band.animating &&
       s_band_layer &&
       !layer_get_hidden(
         s_band_layer
@@ -2834,6 +3821,7 @@ static void confirm_medication_group(
     MedicationSymbol symbol
 ) {
   mark_medication_group_confirmed(symbol);
+  alarm_confirmation_received(symbol);
 
   /*
    * TODO: Den späteren Wiederholungs-Wakeup nur
@@ -3554,6 +4542,7 @@ static void select_button_down(
 }
 
 static void exit_app(void) {
+  alarm_stop();
   window_stack_pop_all(true);
 }
 
@@ -4155,6 +5144,12 @@ static void window_appear(Window *window) {
 
   refresh_medication_rows_for_time();
 
+  if (s_alarm_launch_pending) {
+    s_alarm_launch_pending = false;
+    alarm_start();
+    schedule_next_alarm_wakeup();
+  }
+
   if (s_canvas_layer) {
     start_ui_timer();
   }
@@ -4211,6 +5206,23 @@ static void window_unload(Window *window) {
 static void init(void) {
   settings_init();
 
+  wakeup_service_subscribe(
+    alarm_wakeup_handler
+  );
+
+  WakeupId launch_wakeup_id;
+  int32_t launch_cookie;
+
+  s_alarm_launch_pending =
+      launch_reason() == APP_LAUNCH_WAKEUP &&
+      wakeup_get_launch_event(
+        &launch_wakeup_id,
+        &launch_cookie
+      ) &&
+      launch_cookie == ALARM_WAKEUP_COOKIE;
+
+  schedule_next_alarm_wakeup();
+
   tick_timer_service_subscribe(
     MINUTE_UNIT,
     daypart_tick_handler
@@ -4241,6 +5253,7 @@ static void init(void) {
 }
 
 static void deinit(void) {
+  alarm_stop();
   tick_timer_service_unsubscribe();
   settings_deinit();
   window_destroy(s_window);

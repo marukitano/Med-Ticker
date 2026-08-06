@@ -28,7 +28,10 @@
       "DAYPART_NIGHT": 14,
       "MED_SHAPE": 15,
       "MED_COLOR": 16,
-      "MED_ICON_SET": 17
+      "MED_ICON_SET": 17,
+      "AUDIO_VOLUME": 18,
+      "VIBRATION_ENABLED": 19,
+      "REMINDER_INTERVAL": 20
     },
     "projectType": "native",
     "resources": {
@@ -37,6 +40,11 @@
           "file": "images/pill_rotate_sheet.png",
           "name": "IMAGE_PILL_SHEET",
           "type": "bitmap"
+        },
+        {
+          "type": "raw",
+          "name": "ALARM_PCM",
+          "file": "sounds/alarm.pcm"
         }
       ]
     },
@@ -52,5 +60,5 @@
       "configurable"
     ]
   },
-  "version": "0.1.24"
+  "version": "0.1.28"
 }
