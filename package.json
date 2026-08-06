@@ -31,10 +31,7 @@
       "MED_ICON_SET": 17,
       "AUDIO_VOLUME": 18,
       "VIBRATION_ENABLED": 19,
-      "REMINDER_INTERVAL": 20,
-      "MED_COLOR2": 21,
-      "MED_SIZE": 22,
-      "MED_IMPRINT": 23
+      "REMINDER_INTERVAL": 20
     },
     "projectType": "native",
     "resources": {
@@ -63,5 +60,5 @@
       "configurable"
     ]
   },
-  "version": "0.1.36"
+  "version": "0.1.41"
 }

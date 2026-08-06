@@ -28,9 +28,6 @@ var MED_ICON_SET_KEY = 17;
 var AUDIO_VOLUME_KEY = 18;
 var VIBRATION_ENABLED_KEY = 19;
 var REMINDER_INTERVAL_KEY = 20;
-var MED_COLOR2_KEY = 21;
-var MED_SIZE_KEY = 22;
-var MED_IMPRINT_KEY = 23;
 
 var COMMAND_RESET = 0;
 var COMMAND_ITEM = 1;
@@ -518,7 +515,6 @@ function sendMedicationAt(
 
   var medication = medications[index];
   var message = {};
-  var iconSet = medication.iconSet === true;
 
   message[MED_COMMAND_KEY] = COMMAND_ITEM;
   message[MED_INDEX_KEY] = index;
@@ -527,31 +523,21 @@ function sendMedicationAt(
   message[MED_QUANTITY_KEY] = medication.quantity;
   message[MED_TIME_KEY] = medication.time;
   message[MED_SCHEDULE_KEY] = medication.schedule;
+  var iconSet = medication.iconSet === true;
+
   message[MED_DAY_KEY] = medication.day;
   message[MED_SYMBOL_KEY] = iconSet &&
       integerInRange(medication.symbol, 0, 1)
       ? medication.symbol
       : 0;
   message[MED_SHAPE_KEY] = iconSet &&
-      integerInRange(medication.shape, 0, 4)
+      integerInRange(medication.shape, 0, 3)
       ? medication.shape
       : DEFAULT_MEDICATION.shape;
   message[MED_COLOR_KEY] = iconSet &&
       integerInRange(medication.color, 192, 255)
       ? medication.color
       : DEFAULT_MEDICATION.color;
-  message[MED_COLOR2_KEY] = iconSet &&
-      integerInRange(medication.color2, 192, 255)
-      ? medication.color2
-      : message[MED_COLOR_KEY];
-  message[MED_SIZE_KEY] = iconSet &&
-      integerInRange(medication.size, 60, 140)
-      ? medication.size
-      : 100;
-  message[MED_IMPRINT_KEY] = iconSet &&
-      typeof medication.imprint === 'string'
-      ? medication.imprint.slice(0, 5)
-      : '';
   message[MED_ICON_SET_KEY] = iconSet ? 1 : 0;
   message[MED_ENABLED_KEY] =
       medication.enabled && iconSet ? 1 : 0;

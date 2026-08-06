@@ -97,10 +97,9 @@
 #define LEGACY_MEDICATION_PERSIST_KEY 201
 #define MEDICATION_LIST_PERSIST_KEY 202
 #define MEDICATION_COUNT_PERSIST_KEY 203
-#define SETTINGS_MESSAGE_BUFFER_SIZE 512
+#define SETTINGS_MESSAGE_BUFFER_SIZE 320
 #define MEDICATION_NAME_LENGTH 32
 #define MEDICATION_LABEL_LENGTH 48
-#define MEDICATION_IMPRINT_LENGTH 6
 #define MAX_MEDICATIONS 8
 #define MAX_LIST_ROWS (MAX_MEDICATIONS + 2)
 
@@ -136,16 +135,32 @@
 #define TRANSFER_PROGRESS_MAX 1000
 
 #define PILL_PHYSICS_MAX_BODIES 12
-#define PILL_PHYSICS_FRAME_MS 40
+#define PILL_PHYSICS_FRAME_MS 60
+#define PILL_PHYSICS_ALARM_FRAME_MS 60
+#define PILL_PHYSICS_SCROLL_PAUSE_MS 80
 #define PILL_PHYSICS_Q8 256
-#define PILL_PHYSICS_ACCEL_DIVISOR 8
-#define PILL_PHYSICS_DAMPING_NUM 244
-#define PILL_PHYSICS_DAMPING_DEN 256
-#define PILL_PHYSICS_BOUNCE_NUM 166
+#define PILL_PHYSICS_ACCEL_DIVISOR 1
+#define PILL_PHYSICS_BOUNCE_NUM 120
 #define PILL_PHYSICS_BOUNCE_DEN 256
-#define PILL_PHYSICS_MAX_VELOCITY_Q8 (9 * PILL_PHYSICS_Q8)
+#define PILL_PHYSICS_MAX_VELOCITY_Q8 (22 * PILL_PHYSICS_Q8)
 #define PILL_PHYSICS_EDGE_MARGIN 4
-#define PILL_PHYSICS_DEADZONE_MG 35
+#define PILL_PHYSICS_STATIC_FRICTION_MG 220
+#define PILL_PHYSICS_KINETIC_FRICTION_MG 70
+#define PILL_PHYSICS_WAKE_DELTA_MG 60
+#define PILL_PHYSICS_REST_FRICTION_Q8 (PILL_PHYSICS_Q8 * 5 / 4)
+#define PILL_PHYSICS_ROLLING_FRICTION_Q8 (PILL_PHYSICS_Q8 / 64)
+#define PILL_PHYSICS_COLLISION_INTERVAL 1
+#define PILL_PHYSICS_CONTACT_SLOP_PX 5
+#define PILL_PHYSICS_SENSOR_STILL_SAMPLES 5
+#define PILL_PHYSICS_SLEEP_FRAMES 4
+#define PILL_PHYSICS_SLEEP_VELOCITY_Q8 (PILL_PHYSICS_Q8 / 5)
+#define PILL_PHYSICS_PILE_SLEEP_TRAVEL_Q8 (PILL_PHYSICS_Q8 / 2)
+#define PILL_PHYSICS_SOLVER_ITERATIONS 3
+#define PILL_PHYSICS_Q4_PER_PIXEL 16
+#define PILL_PHYSICS_Q8_PER_Q4 (PILL_PHYSICS_Q8 / PILL_PHYSICS_Q4_PER_PIXEL)
+#define PILL_PHYSICS_SETTLE_VELOCITY_Q8 (PILL_PHYSICS_Q8 / 2)
+#define PILL_PHYSICS_ANGLE_BUCKET (TRIG_MAX_ANGLE / 32)
+#define PILL_PHYSICS_ROTATION_MIN_TRAVEL_Q8 (PILL_PHYSICS_Q8 / 2)
 
 
 typedef enum {
@@ -193,22 +208,6 @@ typedef struct {
   uint8_t symbol;
   uint8_t shape;
   uint8_t color;
-  uint8_t icon_set;
-  uint8_t enabled;
-} LegacyMedicationSettingsV2;
-
-typedef struct {
-  char name[MEDICATION_NAME_LENGTH];
-  uint8_t quantity;
-  uint8_t time;
-  uint8_t schedule;
-  uint8_t day;
-  uint8_t symbol;
-  uint8_t shape;
-  uint8_t color;
-  uint8_t color2;
-  uint8_t size;
-  char imprint[MEDICATION_IMPRINT_LENGTH];
   uint8_t icon_set;
   uint8_t enabled;
 } MedicationSettings;
@@ -264,9 +263,6 @@ static const MedicationSettings s_default_medication = {
   .symbol = MEDICATION_SYMBOL_PILL,
   .shape = 2,
   .color = 255,
-  .color2 = 255,
-  .size = 100,
-  .imprint = "",
   .icon_set = 1,
   .enabled = 1
 };
@@ -377,6 +373,11 @@ static bool s_pill_physics_accel_subscribed;
 static bool s_pill_physics_window_visible;
 static int16_t s_pill_physics_gravity_x;
 static int16_t s_pill_physics_gravity_y;
+static int16_t s_pill_physics_last_target_x;
+static int16_t s_pill_physics_last_target_y;
+static uint8_t s_pill_physics_quiet_frames;
+static uint8_t s_pill_physics_collision_phase;
+static uint8_t s_pill_physics_sensor_quiet_samples;
 
 
 static uint8_t s_alarm_audio_volume =
@@ -483,7 +484,6 @@ static void alarm_confirmation_received(
     MedicationSymbol symbol
 );
 static void alarm_reset_after_settings_save(void);
-static void alarm_rearm_after_transfer(void);
 
 static void alarm_refresh_window_state(void);
 static void refresh_app_screen_state(void);
@@ -661,14 +661,8 @@ static bool medication_settings_valid(
         MEDICATION_SCHEDULE_MONTHLY ||
     settings->symbol >
         MEDICATION_SYMBOL_PEN ||
-    settings->shape > 4 ||
+    settings->shape > 3 ||
     settings->color < 192 ||
-    settings->color2 < 192 ||
-    settings->size < 60 ||
-    settings->size > 140 ||
-    settings->imprint[
-      MEDICATION_IMPRINT_LENGTH - 1
-    ] != '\0' ||
     settings->icon_set > 1 ||
     settings->enabled > 1 ||
     (settings->enabled && !settings->icon_set)
@@ -695,6 +689,7 @@ static bool medication_settings_valid(
       settings->day <= 31;
 }
 
+
 static MedicationSettings medication_from_legacy(
     const LegacyMedicationSettingsV1 *legacy
 ) {
@@ -719,42 +714,7 @@ static MedicationSettings medication_from_legacy(
   medication.enabled = legacy->enabled;
   medication.shape = 2;
   medication.color = 255;
-  medication.color2 = 255;
-  medication.size = 100;
-  medication.imprint[0] = '\0';
   medication.icon_set = 1;
-
-  return medication;
-}
-
-static MedicationSettings medication_from_legacy_v2(
-    const LegacyMedicationSettingsV2 *legacy
-) {
-  MedicationSettings medication =
-      s_default_medication;
-
-  if (!legacy) {
-    return medication;
-  }
-
-  memcpy(
-    medication.name,
-    legacy->name,
-    sizeof(medication.name)
-  );
-
-  medication.quantity = legacy->quantity;
-  medication.time = legacy->time;
-  medication.schedule = legacy->schedule;
-  medication.day = legacy->day;
-  medication.symbol = legacy->symbol;
-  medication.shape = legacy->shape;
-  medication.color = legacy->color;
-  medication.color2 = legacy->color;
-  medication.size = 100;
-  medication.imprint[0] = '\0';
-  medication.icon_set = legacy->icon_set;
-  medication.enabled = legacy->enabled;
 
   return medication;
 }
@@ -1248,13 +1208,7 @@ static bool load_current_medication_list(void) {
         stored_count
       );
 
-  const int legacy_v2_size =
-      (int)(
-        sizeof(LegacyMedicationSettingsV2) *
-        stored_count
-      );
-
-  const int legacy_v1_size =
+  const int legacy_size =
       (int)(
         sizeof(LegacyMedicationSettingsV1) *
         stored_count
@@ -1278,36 +1232,7 @@ static bool load_current_medication_list(void) {
     ) {
       return false;
     }
-  } else if (stored_size == legacy_v2_size) {
-    LegacyMedicationSettingsV2 legacy[
-      MAX_MEDICATIONS
-    ];
-
-    memset(legacy, 0, sizeof(legacy));
-
-    if (
-      persist_read_data(
-        MEDICATION_LIST_PERSIST_KEY,
-        legacy,
-        legacy_v2_size
-      ) != legacy_v2_size
-    ) {
-      return false;
-    }
-
-    for (
-      uint8_t index = 0;
-      index < (uint8_t)stored_count;
-      index++
-    ) {
-      stored[index] =
-          medication_from_legacy_v2(
-            &legacy[index]
-          );
-    }
-
-    needs_persist = true;
-  } else if (stored_size == legacy_v1_size) {
+  } else if (stored_size == legacy_size) {
     LegacyMedicationSettingsV1 legacy[
       MAX_MEDICATIONS
     ];
@@ -1318,8 +1243,8 @@ static bool load_current_medication_list(void) {
       persist_read_data(
         MEDICATION_LIST_PERSIST_KEY,
         legacy,
-        legacy_v1_size
-      ) != legacy_v1_size
+        legacy_size
+      ) != legacy_size
     ) {
       return false;
     }
@@ -1557,50 +1482,47 @@ static bool read_medication_from_message(
     iterator,
     MESSAGE_KEY_MED_NAME
   );
+
   Tuple *quantity_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_QUANTITY
   );
+
   Tuple *time_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_TIME
   );
+
   Tuple *schedule_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_SCHEDULE
   );
+
   Tuple *day_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_DAY
   );
+
   Tuple *symbol_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_SYMBOL
   );
+
   Tuple *shape_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_SHAPE
   );
+
   Tuple *color_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_COLOR
   );
-  Tuple *color2_tuple = dict_find(
-    iterator,
-    MESSAGE_KEY_MED_COLOR2
-  );
-  Tuple *size_tuple = dict_find(
-    iterator,
-    MESSAGE_KEY_MED_SIZE
-  );
-  Tuple *imprint_tuple = dict_find(
-    iterator,
-    MESSAGE_KEY_MED_IMPRINT
-  );
+
   Tuple *icon_set_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_ICON_SET
   );
+
   Tuple *enabled_tuple = dict_find(
     iterator,
     MESSAGE_KEY_MED_ENABLED
@@ -1608,19 +1530,14 @@ static bool read_medication_from_message(
 
   if (
     !name_tuple ||
-    name_tuple->type != TUPLE_CSTRING ||
-    !imprint_tuple ||
-    imprint_tuple->type != TUPLE_CSTRING
+    name_tuple->type != TUPLE_CSTRING
   ) {
     return false;
   }
 
   const char *name =
       name_tuple->value->cstring;
-  const char *imprint =
-      imprint_tuple->value->cstring;
   const size_t name_length = strlen(name);
-  const size_t imprint_length = strlen(imprint);
 
   int32_t quantity;
   int32_t time;
@@ -1629,26 +1546,48 @@ static bool read_medication_from_message(
   int32_t symbol;
   int32_t shape;
   int32_t color;
-  int32_t color2;
-  int32_t size;
   int32_t icon_set;
   int32_t enabled;
 
   if (
     name_length == 0 ||
     name_length >= MEDICATION_NAME_LENGTH ||
-    imprint_length >= MEDICATION_IMPRINT_LENGTH ||
-    !tuple_read_int32(quantity_tuple, &quantity) ||
-    !tuple_read_int32(time_tuple, &time) ||
-    !tuple_read_int32(schedule_tuple, &schedule) ||
-    !tuple_read_int32(day_tuple, &day) ||
-    !tuple_read_int32(symbol_tuple, &symbol) ||
-    !tuple_read_int32(shape_tuple, &shape) ||
-    !tuple_read_int32(color_tuple, &color) ||
-    !tuple_read_int32(color2_tuple, &color2) ||
-    !tuple_read_int32(size_tuple, &size) ||
-    !tuple_read_int32(icon_set_tuple, &icon_set) ||
-    !tuple_read_int32(enabled_tuple, &enabled) ||
+    !tuple_read_int32(
+      quantity_tuple,
+      &quantity
+    ) ||
+    !tuple_read_int32(
+      time_tuple,
+      &time
+    ) ||
+    !tuple_read_int32(
+      schedule_tuple,
+      &schedule
+    ) ||
+    !tuple_read_int32(
+      day_tuple,
+      &day
+    ) ||
+    !tuple_read_int32(
+      symbol_tuple,
+      &symbol
+    ) ||
+    !tuple_read_int32(
+      shape_tuple,
+      &shape
+    ) ||
+    !tuple_read_int32(
+      color_tuple,
+      &color
+    ) ||
+    !tuple_read_int32(
+      icon_set_tuple,
+      &icon_set
+    ) ||
+    !tuple_read_int32(
+      enabled_tuple,
+      &enabled
+    ) ||
     quantity < 1 ||
     quantity > 20 ||
     time < MEDICATION_TIME_MORNING ||
@@ -1658,13 +1597,9 @@ static bool read_medication_from_message(
     symbol < MEDICATION_SYMBOL_PILL ||
     symbol > MEDICATION_SYMBOL_PEN ||
     shape < 0 ||
-    shape > 4 ||
+    shape > 3 ||
     color < 192 ||
     color > 255 ||
-    color2 < 192 ||
-    color2 > 255 ||
-    size < 60 ||
-    size > 140 ||
     icon_set < 0 ||
     icon_set > 1 ||
     enabled < 0 ||
@@ -1699,8 +1634,6 @@ static bool read_medication_from_message(
     .symbol = (uint8_t)symbol,
     .shape = (uint8_t)shape,
     .color = (uint8_t)color,
-    .color2 = (uint8_t)color2,
-    .size = (uint8_t)size,
     .icon_set = (uint8_t)icon_set,
     .enabled = (uint8_t)enabled
   };
@@ -1709,11 +1642,6 @@ static bool read_medication_from_message(
     parsed.name,
     name,
     name_length + 1
-  );
-  memcpy(
-    parsed.imprint,
-    imprint,
-    imprint_length + 1
   );
 
   if (!medication_settings_valid(&parsed)) {
@@ -1827,11 +1755,6 @@ static void settings_inbox_received(
         &medication
       )
     ) {
-      APP_LOG(
-        APP_LOG_LEVEL_WARNING,
-        "Medication %ld transfer invalid",
-        (long)index
-      );
       return;
     }
 
@@ -1934,7 +1857,6 @@ static void settings_inbox_received(
   );
 
   alarm_reset_after_settings_save();
-  alarm_rearm_after_transfer();
   reset_pending_medications(0);
   schedule_transfer_close();
 }
@@ -2656,41 +2578,6 @@ static void alarm_handle_minute_tick(
   schedule_next_alarm_wakeup();
 }
 
-static void alarm_rearm_after_transfer(void) {
-  alarm_refresh_window_state();
-
-  time_t window_start = 0;
-  (void)alarm_window_bounds_at(
-    time(NULL),
-    &window_start,
-    NULL,
-    NULL
-  );
-
-  s_alarm_window_state.window_start =
-      (int32_t)window_start;
-  s_alarm_window_state.last_reminder = 0;
-  s_alarm_window_state.confirmed_mask = 0;
-  s_alarm_window_state_loaded = true;
-  persist_alarm_window_state();
-
-  s_pills_confirmed = false;
-  s_pen_confirmed = false;
-
-  wakeup_cancel_all();
-  schedule_next_alarm_wakeup();
-
-  const time_t now = time(NULL);
-  const time_t next =
-      next_alarm_timestamp_after(now);
-
-  APP_LOG(
-    APP_LOG_LEVEL_INFO,
-    "Alarm plan re-armed after transfer: next in %ld seconds",
-    next > now ? (long)(next - now) : -1L
-  );
-}
-
 static void alarm_reset_after_settings_save(void) {
   alarm_stop();
   wakeup_cancel_all();
@@ -2903,190 +2790,19 @@ static int32_t current_pill_y(void) {
       visual_canvas_offset_y();
 }
 
-static uint8_t pill_physics_size_percent(
-    const MedicationSettings *medication
+static uint8_t pill_physics_radius_for_shape(
+    uint8_t shape
 ) {
-  if (!medication) {
-    return 100;
-  }
-
-  const int value = medication->size;
-
-  return
-      value >= 60 && value <= 140
-          ? (uint8_t)value
-          : 100;
-}
-
-static int16_t pill_physics_scaled_dimension(
-    int16_t base,
-    uint8_t size_percent
-) {
-  int16_t result = (int16_t)(
-    ((int32_t)base * size_percent + 50) / 100
-  );
-
-  return result < 1 ? 1 : result;
-}
-
-static void pill_physics_geometry(
-    const MedicationSettings *medication,
-    int16_t *line_half,
-    int16_t *radius,
-    int16_t *diamond_half
-) {
-  const uint8_t size_percent =
-      pill_physics_size_percent(medication);
-  int16_t local_line_half = 0;
-  int16_t local_radius = 10;
-  int16_t local_diamond_half = 0;
-
-  switch (medication ? medication->shape : 0) {
+  switch (shape) {
     case 1:
-      /* Existing ellipse icon: 26 x 18 px at 100 %. */
-      local_line_half = 4;
-      local_radius = 9;
-      break;
-
+      return 14;
     case 2:
-      /* Existing oblong pill icon: 30 x 14 px at 100 %. */
-      local_line_half = 8;
-      local_radius = 7;
-      break;
-
+      return 15;
     case 3:
-      local_radius = 0;
-      local_diamond_half = 11;
-      break;
-
-    case 4:
-      /* Two-colour capsule: about 42 x 20 px at 100 %. */
-      local_line_half = 11;
-      local_radius = 10;
-      break;
-
+      return 12;
     case 0:
     default:
-      local_line_half = 0;
-      local_radius = 10;
-      break;
-  }
-
-  if (line_half) {
-    *line_half = pill_physics_scaled_dimension(
-      local_line_half,
-      size_percent
-    );
-  }
-  if (radius) {
-    *radius = pill_physics_scaled_dimension(
-      local_radius,
-      size_percent
-    );
-  }
-  if (diamond_half) {
-    *diamond_half = pill_physics_scaled_dimension(
-      local_diamond_half,
-      size_percent
-    );
-  }
-}
-
-static uint8_t pill_physics_collision_radius(
-    const MedicationSettings *medication
-) {
-  int16_t line_half;
-  int16_t radius;
-  int16_t diamond_half;
-
-  pill_physics_geometry(
-    medication,
-    &line_half,
-    &radius,
-    &diamond_half
-  );
-
-  const int16_t visible_half =
-      diamond_half > 0
-          ? diamond_half
-          : line_half + radius;
-
-  /*
-   * Intentionally smaller than the visible pill. This keeps the
-   * calculation circular and permits a little natural overlap.
-   */
-  int16_t result =
-      (visible_half * 68 + 50) / 100;
-
-  if (result < 5) {
-    result = 5;
-  } else if (result > 32) {
-    result = 32;
-  }
-
-  return (uint8_t)result;
-}
-
-static void pill_physics_body_extents(
-    const PillPhysicsBody *body,
-    int16_t *extent_x,
-    int16_t *extent_y
-) {
-  int16_t local_x = 3;
-  int16_t local_y = 3;
-
-  if (
-    body &&
-    body->medication_index < s_medication_count
-  ) {
-    const MedicationSettings *medication =
-        &s_medications[body->medication_index];
-    int16_t line_half;
-    int16_t radius;
-    int16_t diamond_half;
-
-    pill_physics_geometry(
-      medication,
-      &line_half,
-      &radius,
-      &diamond_half
-    );
-
-    int32_t cosine = cos_lookup(body->angle);
-    int32_t sine = sin_lookup(body->angle);
-
-    if (cosine < 0) {
-      cosine = -cosine;
-    }
-    if (sine < 0) {
-      sine = -sine;
-    }
-
-    if (diamond_half > 0) {
-      const int32_t maximum =
-          cosine > sine ? cosine : sine;
-      local_x = (int16_t)(
-        ((int32_t)diamond_half * maximum) /
-        TRIG_MAX_RATIO
-      ) + 2;
-      local_y = local_x;
-    } else {
-      local_x = (int16_t)(
-        ((int32_t)line_half * cosine) /
-        TRIG_MAX_RATIO
-      ) + radius + 2;
-      local_y = (int16_t)(
-        ((int32_t)line_half * sine) /
-        TRIG_MAX_RATIO
-      ) + radius + 2;
-    }
-  }
-
-  if (extent_x) {
-    *extent_x = local_x;
-  }
-  if (extent_y) {
-    *extent_y = local_y;
+      return 11;
   }
 }
 
@@ -3114,8 +2830,10 @@ static void pill_physics_initialize_body(
 
   const MedicationSettings *medication =
       &s_medications[medication_index];
-  const uint8_t collision_radius =
-      pill_physics_collision_radius(medication);
+  const uint8_t radius =
+      pill_physics_radius_for_shape(
+        medication->shape
+      );
 
   int16_t arena_width = 228;
   int16_t arena_height = 228;
@@ -3130,27 +2848,36 @@ static void pill_physics_initialize_body(
   const uint8_t column = body_index % 4;
   const uint8_t row = body_index / 4;
   const int16_t cell_width = arena_width / 4;
-  const int16_t cell_height = arena_height / 3;
   int16_t x =
       column * cell_width +
       cell_width / 2;
   int16_t y =
-      row * cell_height +
-      cell_height / 2;
+      13 +
+      row * 24;
 
   x += (int16_t)((body_index * 7u) % 7u) - 3;
   y += (int16_t)((body_index * 5u) % 5u) - 2;
 
   const int16_t minimum_x =
-      collision_radius + PILL_PHYSICS_EDGE_MARGIN;
+      radius + PILL_PHYSICS_EDGE_MARGIN;
   const int16_t maximum_x =
-      arena_width - collision_radius -
+      arena_width - radius -
       PILL_PHYSICS_EDGE_MARGIN;
+  /*
+   * Body-Y bleibt im bisherigen Pillen-Koordinatensystem. Nur dessen
+   * obere und untere Grenze werden auf die echten Displaykanten erweitert.
+   * Dadurch bleiben Zeichnung, Scrollen und die komplette Physik unverändert.
+   */
+  const int16_t arena_origin_y =
+      (arena_height - s_frame_height) / 2 +
+      CANVAS_START_OFFSET_Y;
   const int16_t minimum_y =
-      collision_radius + PILL_PHYSICS_EDGE_MARGIN;
+      radius + PILL_PHYSICS_EDGE_MARGIN -
+      arena_origin_y;
   const int16_t maximum_y =
-      arena_height - collision_radius -
-      PILL_PHYSICS_EDGE_MARGIN;
+      arena_height - radius -
+      PILL_PHYSICS_EDGE_MARGIN -
+      arena_origin_y;
 
   if (x < minimum_x) {
     x = minimum_x;
@@ -3178,7 +2905,7 @@ static void pill_physics_initialize_body(
          TRIG_MAX_ANGLE) /
         PILL_PHYSICS_MAX_BODIES,
     .medication_index = medication_index,
-    .collision_radius = collision_radius
+    .collision_radius = radius
   };
 }
 
@@ -3202,107 +2929,6 @@ static bool pill_physics_add_body(
 
   s_pill_physics_body_count++;
   return true;
-}
-
-static void pill_physics_distribute_bodies(void) {
-  if (s_pill_physics_body_count == 0) {
-    return;
-  }
-
-  int16_t arena_width = 228;
-  int16_t arena_height = 228;
-
-  if (s_canvas_layer) {
-    const GRect bounds =
-        layer_get_bounds(s_canvas_layer);
-    arena_width = bounds.size.w;
-    arena_height = bounds.size.h;
-  }
-
-  uint8_t columns;
-
-  if (s_pill_physics_body_count <= 3) {
-    columns = s_pill_physics_body_count;
-  } else if (s_pill_physics_body_count <= 6) {
-    columns = 3;
-  } else {
-    columns = 4;
-  }
-
-  const uint8_t rows =
-      (s_pill_physics_body_count + columns - 1) /
-      columns;
-  const int16_t cell_width =
-      arena_width / columns;
-  const int16_t cell_height =
-      arena_height / rows;
-  static const int8_t jitter_x[] = {
-    -5, 4, -2, 6, 1, -6, 5, -3, 3, -4, 2, 0
-  };
-  static const int8_t jitter_y[] = {
-    3, -4, 5, -2, -5, 2, -3, 4, -1, 5, -4, 1
-  };
-
-  for (
-    uint8_t index = 0;
-    index < s_pill_physics_body_count;
-    index++
-  ) {
-    PillPhysicsBody *body =
-        &s_pill_physics_bodies[index];
-    const uint8_t column = index % columns;
-    const uint8_t row = index / columns;
-    int16_t x =
-        column * cell_width +
-        cell_width / 2 +
-        jitter_x[index];
-    int16_t y =
-        row * cell_height +
-        cell_height / 2 +
-        jitter_y[index];
-    int16_t extent_x;
-    int16_t extent_y;
-
-    pill_physics_body_extents(
-      body,
-      &extent_x,
-      &extent_y
-    );
-
-    const int16_t minimum_x =
-        extent_x + PILL_PHYSICS_EDGE_MARGIN;
-    const int16_t maximum_x =
-        arena_width - extent_x -
-        PILL_PHYSICS_EDGE_MARGIN;
-    const int16_t minimum_y =
-        extent_y + PILL_PHYSICS_EDGE_MARGIN;
-    const int16_t maximum_y =
-        arena_height - extent_y -
-        PILL_PHYSICS_EDGE_MARGIN;
-
-    if (x < minimum_x) {
-      x = minimum_x;
-    } else if (x > maximum_x) {
-      x = maximum_x;
-    }
-
-    if (y < minimum_y) {
-      y = minimum_y;
-    } else if (y > maximum_y) {
-      y = maximum_y;
-    }
-
-    body->x_q8 =
-        (int32_t)x * PILL_PHYSICS_Q8;
-    body->y_q8 =
-        (int32_t)y * PILL_PHYSICS_Q8;
-    body->vx_q8 =
-        ((int32_t)(index % 3) - 1) *
-        (PILL_PHYSICS_Q8 / 4);
-    body->vy_q8 =
-        ((int32_t)((index + 1) % 3) - 1) *
-        (PILL_PHYSICS_Q8 / 5);
-  }
 }
 
 static void pill_physics_rebuild(void) {
@@ -3368,195 +2994,415 @@ static void pill_physics_rebuild(void) {
     }
   }
 
-  pill_physics_distribute_bodies();
-
   s_pill_physics_gravity_x = 0;
   s_pill_physics_gravity_y = 0;
+  s_pill_physics_last_target_x = 0;
+  s_pill_physics_last_target_y = 0;
+  s_pill_physics_quiet_frames = 0;
+  s_pill_physics_collision_phase = 0;
+  s_pill_physics_sensor_quiet_samples = 0;
 
   if (s_canvas_layer) {
     layer_mark_dirty(s_canvas_layer);
   }
 }
 
-static int16_t pill_physics_integer_sqrt(
-    int32_t value
+static uint32_t pill_physics_integer_sqrt(uint32_t value) {
+  uint32_t result = 0;
+  uint32_t bit = 1u << 30;
+
+  while (bit > value) {
+    bit >>= 2;
+  }
+
+  while (bit != 0) {
+    if (value >= result + bit) {
+      value -= result + bit;
+      result = (result >> 1) + bit;
+    } else {
+      result >>= 1;
+    }
+
+    bit >>= 2;
+  }
+
+  return result;
+}
+
+static bool pill_physics_apply_edge_collision(
+    PillPhysicsBody *body,
+    int16_t arena_width,
+    int16_t arena_height,
+    int16_t drive_x,
+    int16_t drive_y
+);
+
+static bool pill_physics_resolve_body_collisions(
+    int16_t arena_width,
+    int16_t arena_height,
+    int16_t drive_x,
+    int16_t drive_y
 ) {
-  if (value <= 0) {
+  bool had_contact = false;
+
+  /*
+   * Position Based Dynamics: project overlapping circles apart directly.
+   * There is no bounce impulse and no dominant X/Y axis. With five pills
+   * this is only ten pairs per pass, so three passes are still very cheap.
+   */
+  for (
+    uint8_t iteration = 0;
+    iteration < PILL_PHYSICS_SOLVER_ITERATIONS;
+    iteration++
+  ) {
+    bool iteration_had_pair_contact = false;
+
+    for (
+      uint8_t left_index = 0;
+      left_index < s_pill_physics_body_count;
+      left_index++
+    ) {
+      PillPhysicsBody *left =
+          &s_pill_physics_bodies[left_index];
+
+      for (
+        uint8_t right_index = left_index + 1;
+        right_index < s_pill_physics_body_count;
+        right_index++
+      ) {
+        PillPhysicsBody *right =
+            &s_pill_physics_bodies[right_index];
+
+        int32_t dx_q4 =
+            (right->x_q8 - left->x_q8) /
+            PILL_PHYSICS_Q8_PER_Q4;
+        int32_t dy_q4 =
+            (right->y_q8 - left->y_q8) /
+            PILL_PHYSICS_Q8_PER_Q4;
+
+        const int32_t minimum_distance_q4 =
+            (
+              left->collision_radius +
+              right->collision_radius -
+              PILL_PHYSICS_CONTACT_SLOP_PX
+            ) * PILL_PHYSICS_Q4_PER_PIXEL;
+
+        if (minimum_distance_q4 <= 0) {
+          continue;
+        }
+
+        if (dx_q4 == 0 && dy_q4 == 0) {
+          switch ((left_index * 7u + right_index) & 3u) {
+            case 0:
+              dx_q4 = PILL_PHYSICS_Q4_PER_PIXEL;
+              break;
+            case 1:
+              dx_q4 = -PILL_PHYSICS_Q4_PER_PIXEL;
+              break;
+            case 2:
+              dy_q4 = PILL_PHYSICS_Q4_PER_PIXEL;
+              break;
+            default:
+              dy_q4 = -PILL_PHYSICS_Q4_PER_PIXEL;
+              break;
+          }
+        }
+
+        const uint32_t distance_squared_q4 =
+            (uint32_t)(dx_q4 * dx_q4) +
+            (uint32_t)(dy_q4 * dy_q4);
+        const uint32_t minimum_squared_q4 =
+            (uint32_t)(
+              minimum_distance_q4 *
+              minimum_distance_q4
+            );
+
+        if (distance_squared_q4 >= minimum_squared_q4) {
+          continue;
+        }
+
+        const int32_t distance_q4 = (int32_t)
+            pill_physics_integer_sqrt(
+              distance_squared_q4
+            );
+
+        if (distance_q4 <= 0) {
+          continue;
+        }
+
+        had_contact = true;
+        iteration_had_pair_contact = true;
+
+        const int32_t penetration_q4 =
+            minimum_distance_q4 - distance_q4;
+        const int32_t correction_q8 =
+            penetration_q4 *
+            PILL_PHYSICS_Q8_PER_Q4;
+        const int32_t correction_x_q8 = (int32_t)(
+          ((int64_t)correction_q8 * dx_q4) /
+          ((int64_t)distance_q4 * 2)
+        );
+        const int32_t correction_y_q8 = (int32_t)(
+          ((int64_t)correction_q8 * dy_q4) /
+          ((int64_t)distance_q4 * 2)
+        );
+
+        left->x_q8 -= correction_x_q8;
+        left->y_q8 -= correction_y_q8;
+        right->x_q8 += correction_x_q8;
+        right->y_q8 += correction_y_q8;
+
+        /*
+         * Remove only closing speed along the contact normal. Tangential
+         * movement remains untouched, so pills can still slide naturally.
+         */
+        const int32_t relative_vx_q8 =
+            right->vx_q8 - left->vx_q8;
+        const int32_t relative_vy_q8 =
+            right->vy_q8 - left->vy_q8;
+        const int64_t normal_velocity_dot =
+            (int64_t)relative_vx_q8 * dx_q4 +
+            (int64_t)relative_vy_q8 * dy_q4;
+
+        if (normal_velocity_dot < 0) {
+          const int64_t denominator =
+              (int64_t)distance_squared_q4 * 2;
+          const int32_t impulse_x_q8 = (int32_t)(
+            ((-normal_velocity_dot) * dx_q4) /
+            denominator
+          );
+          const int32_t impulse_y_q8 = (int32_t)(
+            ((-normal_velocity_dot) * dy_q4) /
+            denominator
+          );
+
+          left->vx_q8 -= impulse_x_q8;
+          left->vy_q8 -= impulse_y_q8;
+          right->vx_q8 += impulse_x_q8;
+          right->vy_q8 += impulse_y_q8;
+        }
+      }
+    }
+
+    /* Walls are constraints too. Applying them in every pass prevents a
+     * corner pile from being pushed through a wall and corrected next frame.
+     */
+    for (
+      uint8_t index = 0;
+      index < s_pill_physics_body_count;
+      index++
+    ) {
+      had_contact |=
+          pill_physics_apply_edge_collision(
+            &s_pill_physics_bodies[index],
+            arena_width,
+            arena_height,
+            drive_x,
+            drive_y
+          );
+    }
+
+    if (!iteration_had_pair_contact) {
+      break;
+    }
+  }
+
+  return had_contact;
+}
+
+static int32_t pill_physics_bounced_velocity(
+    int32_t velocity
+) {
+  if (
+    abs_int32(velocity) <=
+        PILL_PHYSICS_SETTLE_VELOCITY_Q8
+  ) {
     return 0;
   }
 
-  int16_t root = 0;
-
-  while (
-    (int32_t)(root + 1) * (root + 1) <= value &&
-    root < 181
-  ) {
-    root++;
-  }
-
-  return root;
+  return
+      -velocity *
+      PILL_PHYSICS_BOUNCE_NUM /
+      PILL_PHYSICS_BOUNCE_DEN;
 }
 
-static void pill_physics_resolve_body_collisions(void) {
-  for (
-    uint8_t left_index = 0;
-    left_index < s_pill_physics_body_count;
-    left_index++
-  ) {
-    PillPhysicsBody *left =
-        &s_pill_physics_bodies[left_index];
-
-    for (
-      uint8_t right_index = left_index + 1;
-      right_index < s_pill_physics_body_count;
-      right_index++
-    ) {
-      PillPhysicsBody *right =
-          &s_pill_physics_bodies[right_index];
-      int16_t dx = (int16_t)(
-        (right->x_q8 - left->x_q8) /
-        PILL_PHYSICS_Q8
-      );
-      int16_t dy = (int16_t)(
-        (right->y_q8 - left->y_q8) /
-        PILL_PHYSICS_Q8
-      );
-
-      if (dx == 0 && dy == 0) {
-        dx = (right_index & 1) ? 1 : -1;
-        dy = (right_index & 2) ? 1 : -1;
-      }
-
-      const int16_t minimum_distance =
-          left->collision_radius +
-          right->collision_radius;
-      const int32_t distance_squared =
-          (int32_t)dx * dx +
-          (int32_t)dy * dy;
-
-      if (
-        distance_squared >=
-            (int32_t)minimum_distance *
-            minimum_distance
-      ) {
-        continue;
-      }
-
-      int16_t distance =
-          pill_physics_integer_sqrt(
-            distance_squared
-          );
-
-      if (distance < 1) {
-        distance = 1;
-      }
-
-      const int16_t overlap =
-          minimum_distance - distance;
-      const int32_t push_q8 =
-          ((int32_t)overlap *
-           PILL_PHYSICS_Q8) /
-          2;
-      const int32_t push_x_q8 =
-          push_q8 * dx / distance;
-      const int32_t push_y_q8 =
-          push_q8 * dy / distance;
-
-      left->x_q8 -= push_x_q8;
-      left->y_q8 -= push_y_q8;
-      right->x_q8 += push_x_q8;
-      right->y_q8 += push_y_q8;
-
-      const int32_t relative_vx =
-          right->vx_q8 - left->vx_q8;
-      const int32_t relative_vy =
-          right->vy_q8 - left->vy_q8;
-      const int32_t normal_velocity =
-          (relative_vx * dx +
-           relative_vy * dy) /
-          distance;
-
-      if (normal_velocity < 0) {
-        const int32_t impulse =
-            -normal_velocity * 3 / 8;
-        const int32_t impulse_x =
-            impulse * dx / distance;
-        const int32_t impulse_y =
-            impulse * dy / distance;
-
-        left->vx_q8 -= impulse_x;
-        left->vy_q8 -= impulse_y;
-        right->vx_q8 += impulse_x;
-        right->vy_q8 += impulse_y;
-      }
-    }
-  }
-}
-
-static void pill_physics_apply_edge_collision(
+static bool pill_physics_apply_edge_collision(
     PillPhysicsBody *body,
     int16_t arena_width,
-    int16_t arena_height
+    int16_t arena_height,
+    int16_t drive_x,
+    int16_t drive_y
 ) {
-  int16_t extent_x;
-  int16_t extent_y;
-
-  pill_physics_body_extents(
-    body,
-    &extent_x,
-    &extent_y
-  );
+  bool supported = false;
 
   const int32_t minimum_x_q8 =
-      (extent_x + PILL_PHYSICS_EDGE_MARGIN) *
+      (body->collision_radius +
+       PILL_PHYSICS_EDGE_MARGIN) *
       PILL_PHYSICS_Q8;
   const int32_t maximum_x_q8 =
-      (arena_width - extent_x -
+      (arena_width -
+       body->collision_radius -
        PILL_PHYSICS_EDGE_MARGIN) *
       PILL_PHYSICS_Q8;
+  const int16_t arena_origin_y =
+      (arena_height - s_frame_height) / 2 +
+      CANVAS_START_OFFSET_Y;
   const int32_t minimum_y_q8 =
-      (extent_y + PILL_PHYSICS_EDGE_MARGIN) *
+      (body->collision_radius +
+       PILL_PHYSICS_EDGE_MARGIN -
+       arena_origin_y) *
       PILL_PHYSICS_Q8;
   const int32_t maximum_y_q8 =
-      (arena_height - extent_y -
-       PILL_PHYSICS_EDGE_MARGIN) *
+      (arena_height -
+       body->collision_radius -
+       PILL_PHYSICS_EDGE_MARGIN -
+       arena_origin_y) *
       PILL_PHYSICS_Q8;
 
-  if (body->x_q8 < minimum_x_q8) {
+  if (body->x_q8 <= minimum_x_q8) {
     body->x_q8 = minimum_x_q8;
-    if (body->vx_q8 < 0) {
+    if (drive_x < 0) {
+      body->vx_q8 = 0;
+      supported = true;
+    } else if (body->vx_q8 < 0) {
       body->vx_q8 =
-          -body->vx_q8 *
-          PILL_PHYSICS_BOUNCE_NUM /
-          PILL_PHYSICS_BOUNCE_DEN;
+          pill_physics_bounced_velocity(
+            body->vx_q8
+          );
     }
-  } else if (body->x_q8 > maximum_x_q8) {
+  } else if (body->x_q8 >= maximum_x_q8) {
     body->x_q8 = maximum_x_q8;
-    if (body->vx_q8 > 0) {
+    if (drive_x > 0) {
+      body->vx_q8 = 0;
+      supported = true;
+    } else if (body->vx_q8 > 0) {
       body->vx_q8 =
-          -body->vx_q8 *
-          PILL_PHYSICS_BOUNCE_NUM /
-          PILL_PHYSICS_BOUNCE_DEN;
+          pill_physics_bounced_velocity(
+            body->vx_q8
+          );
     }
   }
 
-  if (body->y_q8 < minimum_y_q8) {
+  if (body->y_q8 <= minimum_y_q8) {
     body->y_q8 = minimum_y_q8;
-    if (body->vy_q8 < 0) {
+    if (drive_y < 0) {
+      body->vy_q8 = 0;
+      supported = true;
+    } else if (body->vy_q8 < 0) {
       body->vy_q8 =
-          -body->vy_q8 *
-          PILL_PHYSICS_BOUNCE_NUM /
-          PILL_PHYSICS_BOUNCE_DEN;
+          pill_physics_bounced_velocity(
+            body->vy_q8
+          );
     }
-  } else if (body->y_q8 > maximum_y_q8) {
+  } else if (body->y_q8 >= maximum_y_q8) {
     body->y_q8 = maximum_y_q8;
-    if (body->vy_q8 > 0) {
+    if (drive_y > 0) {
+      body->vy_q8 = 0;
+      supported = true;
+    } else if (body->vy_q8 > 0) {
       body->vy_q8 =
-          -body->vy_q8 *
-          PILL_PHYSICS_BOUNCE_NUM /
-          PILL_PHYSICS_BOUNCE_DEN;
+          pill_physics_bounced_velocity(
+            body->vy_q8
+          );
     }
   }
+
+  return supported;
+}
+
+/* The scheduler is defined next and needs this callback declaration. */
+static void pill_physics_tick(void *context);
+
+static void pill_physics_schedule_tick(
+    uint32_t delay_ms
+) {
+  if (
+    s_pill_physics_timer ||
+    !s_pill_physics_window_visible ||
+    s_confirmed_screen_active ||
+    s_transfer_screen_active ||
+    s_pill_physics_body_count == 0
+  ) {
+    return;
+  }
+
+  s_pill_physics_timer = app_timer_register(
+    delay_ms,
+    pill_physics_tick,
+    NULL
+  );
+}
+
+static int16_t pill_physics_tilt_magnitude(
+    int16_t x,
+    int16_t y
+) {
+  const int16_t abs_x = x < 0 ? -x : x;
+  const int16_t abs_y = y < 0 ? -y : y;
+  const int16_t maximum =
+      abs_x > abs_y ? abs_x : abs_y;
+  const int16_t minimum =
+      abs_x > abs_y ? abs_y : abs_x;
+
+  /* Fast circular approximation: max + half of min. No square root. */
+  return (int16_t)(maximum + minimum / 2);
+}
+
+static void pill_physics_drive(
+    int16_t *drive_x,
+    int16_t *drive_y
+) {
+  const int16_t magnitude =
+      pill_physics_tilt_magnitude(
+        s_pill_physics_gravity_x,
+        s_pill_physics_gravity_y
+      );
+
+  if (magnitude <= PILL_PHYSICS_STATIC_FRICTION_MG) {
+    *drive_x = 0;
+    *drive_y = 0;
+    return;
+  }
+
+  const int16_t active_magnitude =
+      magnitude - PILL_PHYSICS_KINETIC_FRICTION_MG;
+
+  /*
+   * Static friction is removed once the watch is tilted far enough.
+   * After that, acceleration rises directly and strongly with the tilt.
+   */
+  *drive_x = (int16_t)(
+    ((int32_t)s_pill_physics_gravity_x * active_magnitude) /
+    magnitude
+  );
+  *drive_y = (int16_t)(
+    ((int32_t)s_pill_physics_gravity_y * active_magnitude) /
+    magnitude
+  );
+}
+
+static int32_t pill_physics_apply_friction(
+    int32_t velocity,
+    bool driven
+) {
+  const int32_t friction =
+      driven
+          ? PILL_PHYSICS_ROLLING_FRICTION_Q8
+          : PILL_PHYSICS_REST_FRICTION_Q8;
+
+  if (velocity > 0) {
+    return velocity <= friction
+        ? 0
+        : velocity - friction;
+  }
+
+  if (velocity < 0) {
+    return -velocity <= friction
+        ? 0
+        : velocity + friction;
+  }
+
+  return 0;
 }
 
 static void pill_physics_tick(void *context) {
@@ -3573,6 +3419,14 @@ static void pill_physics_tick(void *context) {
     return;
   }
 
+  if (s_scroll.mode != SCROLL_IDLE) {
+    s_pill_physics_quiet_frames = 0;
+    pill_physics_schedule_tick(
+      PILL_PHYSICS_SCROLL_PAUSE_MS
+    );
+    return;
+  }
+
   int16_t arena_width = 228;
   int16_t arena_height = 228;
 
@@ -3583,6 +3437,16 @@ static void pill_physics_tick(void *context) {
     arena_height = bounds.size.h;
   }
 
+  int16_t drive_x;
+  int16_t drive_y;
+  pill_physics_drive(&drive_x, &drive_y);
+  const bool driven = drive_x != 0 || drive_y != 0;
+
+  int32_t old_x_q8[PILL_PHYSICS_MAX_BODIES];
+  int32_t old_y_q8[PILL_PHYSICS_MAX_BODIES];
+  uint8_t old_angle[PILL_PHYSICS_MAX_BODIES];
+  bool stable_contact = false;
+
   for (
     uint8_t index = 0;
     index < s_pill_physics_body_count;
@@ -3591,21 +3455,27 @@ static void pill_physics_tick(void *context) {
     PillPhysicsBody *body =
         &s_pill_physics_bodies[index];
 
+    old_x_q8[index] = body->x_q8;
+    old_y_q8[index] = body->y_q8;
+    old_angle[index] = (uint8_t)(
+      body->angle / PILL_PHYSICS_ANGLE_BUCKET
+    );
+
     body->vx_q8 +=
-        s_pill_physics_gravity_x /
-        PILL_PHYSICS_ACCEL_DIVISOR;
+        drive_x / PILL_PHYSICS_ACCEL_DIVISOR;
     body->vy_q8 +=
-        s_pill_physics_gravity_y /
-        PILL_PHYSICS_ACCEL_DIVISOR;
+        drive_y / PILL_PHYSICS_ACCEL_DIVISOR;
 
     body->vx_q8 =
-        body->vx_q8 *
-        PILL_PHYSICS_DAMPING_NUM /
-        PILL_PHYSICS_DAMPING_DEN;
+        pill_physics_apply_friction(
+          body->vx_q8,
+          driven
+        );
     body->vy_q8 =
-        body->vy_q8 *
-        PILL_PHYSICS_DAMPING_NUM /
-        PILL_PHYSICS_DAMPING_DEN;
+        pill_physics_apply_friction(
+          body->vy_q8,
+          driven
+        );
 
     body->vx_q8 = clamp_symmetric(
       body->vx_q8,
@@ -3619,9 +3489,67 @@ static void pill_physics_tick(void *context) {
     body->x_q8 += body->vx_q8;
     body->y_q8 += body->vy_q8;
 
+    stable_contact |=
+        pill_physics_apply_edge_collision(
+          body,
+          arena_width,
+          arena_height,
+          drive_x,
+          drive_y
+        );
+  }
+
+  s_pill_physics_collision_phase++;
+  if (
+    s_pill_physics_collision_phase >=
+        PILL_PHYSICS_COLLISION_INTERVAL
+  ) {
+    s_pill_physics_collision_phase = 0;
+    stable_contact |=
+        pill_physics_resolve_body_collisions(
+          arena_width,
+          arena_height,
+          drive_x,
+          drive_y
+        );
+  }
+
+  /*
+   * Rotate only by real final movement. The same real movement is also the
+   * sleep criterion: attempted velocity into a wall must not keep a quiet
+   * pile awake forever.
+   */
+  int32_t maximum_travel_q8 = 0;
+
+  for (
+    uint8_t index = 0;
+    index < s_pill_physics_body_count;
+    index++
+  ) {
+    PillPhysicsBody *body =
+        &s_pill_physics_bodies[index];
+    const int32_t travel_x_q8 =
+        body->x_q8 - old_x_q8[index];
+    const int32_t travel_y_q8 =
+        body->y_q8 - old_y_q8[index];
+    const int32_t travel_q8 =
+        abs_int32(travel_x_q8) +
+        abs_int32(travel_y_q8);
+
+    if (travel_q8 > maximum_travel_q8) {
+      maximum_travel_q8 = travel_q8;
+    }
+
+    if (
+      travel_q8 <
+          PILL_PHYSICS_ROTATION_MIN_TRAVEL_Q8
+    ) {
+      continue;
+    }
+
     body->angle +=
-        body->vx_q8 * 4 -
-        body->vy_q8;
+        travel_x_q8 * 2 -
+        travel_y_q8;
 
     while (body->angle < 0) {
       body->angle += TRIG_MAX_ANGLE;
@@ -3629,36 +3557,99 @@ static void pill_physics_tick(void *context) {
     while (body->angle >= TRIG_MAX_ANGLE) {
       body->angle -= TRIG_MAX_ANGLE;
     }
-
-    pill_physics_apply_edge_collision(
-      body,
-      arena_width,
-      arena_height
-    );
   }
 
-  pill_physics_resolve_body_collisions();
+  bool visual_changed = false;
+  int32_t maximum_velocity_q8 = 0;
 
   for (
     uint8_t index = 0;
     index < s_pill_physics_body_count;
     index++
   ) {
-    pill_physics_apply_edge_collision(
-      &s_pill_physics_bodies[index],
-      arena_width,
-      arena_height
+    PillPhysicsBody *body =
+        &s_pill_physics_bodies[index];
+    const int16_t new_x = (int16_t)(
+      body->x_q8 / PILL_PHYSICS_Q8
     );
+    const int16_t new_y = (int16_t)(
+      body->y_q8 / PILL_PHYSICS_Q8
+    );
+    const uint8_t new_angle = (uint8_t)(
+      body->angle / PILL_PHYSICS_ANGLE_BUCKET
+    );
+    const int32_t speed_x =
+        abs_int32(body->vx_q8);
+    const int32_t speed_y =
+        abs_int32(body->vy_q8);
+
+    if (
+      new_x != (int16_t)(
+        old_x_q8[index] / PILL_PHYSICS_Q8
+      ) ||
+      new_y != (int16_t)(
+        old_y_q8[index] / PILL_PHYSICS_Q8
+      ) ||
+      new_angle != old_angle[index]
+    ) {
+      visual_changed = true;
+    }
+
+    if (speed_x > maximum_velocity_q8) {
+      maximum_velocity_q8 = speed_x;
+    }
+    if (speed_y > maximum_velocity_q8) {
+      maximum_velocity_q8 = speed_y;
+    }
   }
 
-  if (s_canvas_layer) {
+  if (visual_changed && s_canvas_layer) {
     layer_mark_dirty(s_canvas_layer);
   }
 
-  s_pill_physics_timer = app_timer_register(
-    PILL_PHYSICS_FRAME_MS,
-    pill_physics_tick,
-    NULL
+  const bool stable_pile =
+      stable_contact &&
+      s_pill_physics_sensor_quiet_samples >=
+          PILL_PHYSICS_SENSOR_STILL_SAMPLES &&
+      maximum_travel_q8 <=
+          PILL_PHYSICS_PILE_SLEEP_TRAVEL_Q8;
+
+  const bool naturally_still =
+      !visual_changed &&
+      maximum_velocity_q8 <=
+          PILL_PHYSICS_SLEEP_VELOCITY_Q8;
+
+  if (stable_pile || naturally_still) {
+    if (
+      s_pill_physics_quiet_frames <
+          PILL_PHYSICS_SLEEP_FRAMES
+    ) {
+      s_pill_physics_quiet_frames++;
+    }
+  } else {
+    s_pill_physics_quiet_frames = 0;
+  }
+
+  if (
+    s_pill_physics_quiet_frames >=
+        PILL_PHYSICS_SLEEP_FRAMES
+  ) {
+    for (
+      uint8_t index = 0;
+      index < s_pill_physics_body_count;
+      index++
+    ) {
+      s_pill_physics_bodies[index].vx_q8 = 0;
+      s_pill_physics_bodies[index].vy_q8 = 0;
+    }
+
+    return;
+  }
+
+  pill_physics_schedule_tick(
+    s_alarm_active
+        ? PILL_PHYSICS_ALARM_FRAME_MS
+        : PILL_PHYSICS_FRAME_MS
   );
 }
 
@@ -3673,39 +3664,66 @@ static void pill_physics_accel_handler(
   const AccelData sample =
       data[num_samples - 1];
 
-  /* Ignore our own alarm vibration so it does not fling the pills around. */
   if (sample.did_vibrate) {
     return;
   }
 
-  int16_t target_x = sample.x;
-  int16_t target_y = (int16_t)-sample.y;
-
-  if (
-    target_x > -PILL_PHYSICS_DEADZONE_MG &&
-    target_x < PILL_PHYSICS_DEADZONE_MG
-  ) {
-    target_x = 0;
-  }
-  if (
-    target_y > -PILL_PHYSICS_DEADZONE_MG &&
-    target_y < PILL_PHYSICS_DEADZONE_MG
-  ) {
-    target_y = 0;
-  }
-
-  s_pill_physics_gravity_x =
-      (int16_t)(
-        (s_pill_physics_gravity_x * 3 +
-         target_x) /
-        4
+  const int16_t target_x = sample.x;
+  const int16_t target_y = (int16_t)-sample.y;
+  const int16_t old_magnitude =
+      pill_physics_tilt_magnitude(
+        s_pill_physics_gravity_x,
+        s_pill_physics_gravity_y
       );
-  s_pill_physics_gravity_y =
-      (int16_t)(
-        (s_pill_physics_gravity_y * 3 +
-         target_y) /
-        4
+
+  /* 87.5 % neuer Messwert: direkt, aber ohne sichtbares Sensorrauschen. */
+  s_pill_physics_gravity_x = (int16_t)(
+    (s_pill_physics_gravity_x +
+     target_x * 7) /
+    8
+  );
+  s_pill_physics_gravity_y = (int16_t)(
+    (s_pill_physics_gravity_y +
+     target_y * 7) /
+    8
+  );
+
+  const int16_t new_magnitude =
+      pill_physics_tilt_magnitude(
+        s_pill_physics_gravity_x,
+        s_pill_physics_gravity_y
       );
+  const bool threshold_crossed =
+      (old_magnitude > PILL_PHYSICS_STATIC_FRICTION_MG) !=
+      (new_magnitude > PILL_PHYSICS_STATIC_FRICTION_MG);
+  const bool meaningful_change =
+      threshold_crossed ||
+      abs_int32(
+        (int32_t)s_pill_physics_gravity_x -
+        s_pill_physics_last_target_x
+      ) >= PILL_PHYSICS_WAKE_DELTA_MG ||
+      abs_int32(
+        (int32_t)s_pill_physics_gravity_y -
+        s_pill_physics_last_target_y
+      ) >= PILL_PHYSICS_WAKE_DELTA_MG;
+
+  if (!meaningful_change) {
+    if (s_pill_physics_sensor_quiet_samples < 255) {
+      s_pill_physics_sensor_quiet_samples++;
+    }
+    return;
+  }
+
+  s_pill_physics_last_target_x =
+      s_pill_physics_gravity_x;
+  s_pill_physics_last_target_y =
+      s_pill_physics_gravity_y;
+  s_pill_physics_sensor_quiet_samples = 0;
+  s_pill_physics_quiet_frames = 0;
+
+  if (!s_pill_physics_timer) {
+    pill_physics_update_activity();
+  }
 }
 
 static void pill_physics_stop(void) {
@@ -3741,10 +3759,11 @@ static void pill_physics_update_activity(void) {
   }
 
   if (!s_pill_physics_timer) {
-    s_pill_physics_timer = app_timer_register(
-      PILL_PHYSICS_FRAME_MS,
-      pill_physics_tick,
-      NULL
+    s_pill_physics_quiet_frames = 0;
+    pill_physics_schedule_tick(
+      s_alarm_active
+          ? PILL_PHYSICS_ALARM_FRAME_MS
+          : PILL_PHYSICS_FRAME_MS
     );
   }
 }
@@ -4135,82 +4154,6 @@ static void draw_tablet_icon(
       );
       break;
 
-    case 4: {
-      const GColor secondary_color = {
-        .argb = medication->color2
-      };
-      const GRect outer = GRect(
-        center_x - 15,
-        center_y - 8,
-        30,
-        16
-      );
-      const GRect inner = GRect(
-        center_x - 13,
-        center_y - 6,
-        26,
-        12
-      );
-
-      graphics_context_set_fill_color(
-        ctx,
-        outline_color
-      );
-      graphics_fill_rect(
-        ctx,
-        outer,
-        8,
-        GCornersAll
-      );
-
-      graphics_context_set_fill_color(
-        ctx,
-        fill_color
-      );
-      graphics_fill_rect(
-        ctx,
-        inner,
-        6,
-        GCornersAll
-      );
-
-      graphics_context_set_fill_color(
-        ctx,
-        secondary_color
-      );
-      graphics_fill_rect(
-        ctx,
-        GRect(
-          center_x,
-          center_y - 6,
-          7,
-          12
-        ),
-        0,
-        GCornerNone
-      );
-      graphics_fill_circle(
-        ctx,
-        GPoint(center_x + 7, center_y),
-        6
-      );
-
-      graphics_context_set_stroke_color(
-        ctx,
-        outline_color
-      );
-      graphics_context_set_stroke_width(
-        ctx,
-        1
-      );
-      graphics_draw_line(
-        ctx,
-        GPoint(center_x, center_y - 6),
-        GPoint(center_x, center_y + 6)
-      );
-      break;
-    }
-
     case 3: {
       GPoint points[] = {
         GPoint(0, -11),
@@ -4381,29 +4324,22 @@ static void draw_physics_round_line(
     uint8_t radius,
     GColor color
 ) {
-  const int16_t dx = end.x - start.x;
-  const int16_t dy = end.y - start.y;
-  const int16_t abs_dx = dx < 0 ? -dx : dx;
-  const int16_t abs_dy = dy < 0 ? -dy : dy;
-  const int16_t steps = abs_dx > abs_dy ? abs_dx : abs_dy;
+  /*
+   * The previous renderer filled one circle for every pixel along the line.
+   * A thick native line plus two end caps produces the same rounded capsule
+   * with only three drawing primitives.
+   */
+  graphics_context_set_stroke_color(ctx, color);
+  graphics_context_set_stroke_width(
+    ctx,
+    (uint8_t)(radius * 2)
+  );
+  graphics_draw_line(ctx, start, end);
 
   graphics_context_set_fill_color(ctx, color);
-
-  if (steps <= 0) {
-    graphics_fill_circle(ctx, start, radius);
-    return;
-  }
-
-  for (int16_t step = 0; step <= steps; step++) {
-    graphics_fill_circle(
-      ctx,
-      GPoint(
-        start.x + ((int32_t)dx * step) / steps,
-        start.y + ((int32_t)dy * step) / steps
-      ),
-      radius
-    );
-  }
+  graphics_fill_circle(ctx, start, radius);
+  graphics_fill_circle(ctx, end, radius);
+  graphics_context_set_stroke_width(ctx, 1);
 }
 
 static void draw_physics_capsule(
@@ -4412,10 +4348,8 @@ static void draw_physics_capsule(
     int32_t angle,
     int16_t half_length,
     uint8_t radius,
-    GColor first_color,
-    GColor second_color,
+    GColor fill_color,
     GColor outline_color,
-    bool two_colours,
     bool draw_divider
 ) {
   const int16_t dx = (int16_t)(
@@ -4449,32 +4383,10 @@ static void draw_physics_capsule(
     start,
     end,
     radius,
-    first_color
+    fill_color
   );
 
-  if (two_colours) {
-    const int16_t unit_dx = (int16_t)(
-      ((int32_t)cos_lookup(angle) * radius) /
-      TRIG_MAX_RATIO
-    );
-    const int16_t unit_dy = (int16_t)(
-      ((int32_t)sin_lookup(angle) * radius) /
-      TRIG_MAX_RATIO
-    );
-
-    draw_physics_round_line(
-      ctx,
-      GPoint(
-        center.x + unit_dx,
-        center.y + unit_dy
-      ),
-      end,
-      radius,
-      second_color
-    );
-  }
-
-  if (draw_divider || two_colours) {
+  if (draw_divider) {
     const int32_t divider_angle =
         angle + TRIG_MAX_ANGLE / 4;
     const int16_t divider_dx = (int16_t)(
@@ -4504,170 +4416,6 @@ static void draw_physics_capsule(
   }
 }
 
-static void draw_physics_diamond(
-    GContext *ctx,
-    GPoint center,
-    int32_t angle,
-    int16_t half_size,
-    GColor fill_color,
-    GColor outline_color
-) {
-  GPoint points[4];
-
-  for (uint8_t index = 0; index < 4; index++) {
-    const int32_t point_angle =
-        angle +
-        ((int32_t)index * TRIG_MAX_ANGLE) / 4;
-
-    points[index] = GPoint(
-      center.x + (int16_t)(
-        ((int32_t)cos_lookup(point_angle) *
-         half_size) /
-        TRIG_MAX_RATIO
-      ),
-      center.y + (int16_t)(
-        ((int32_t)sin_lookup(point_angle) *
-         half_size) /
-        TRIG_MAX_RATIO
-      )
-    );
-  }
-
-  const GPathInfo path_info = {
-    .num_points = ARRAY_LENGTH(points),
-    .points = points
-  };
-  GPath *path = gpath_create(&path_info);
-
-  if (!path) {
-    return;
-  }
-
-  graphics_context_set_fill_color(ctx, outline_color);
-  graphics_context_set_stroke_color(ctx, outline_color);
-  graphics_context_set_stroke_width(ctx, 3);
-  gpath_draw_filled(ctx, path);
-  gpath_draw_outline(ctx, path);
-
-  const int16_t inner_half =
-      half_size > 3 ? half_size - 3 : 1;
-
-  for (uint8_t index = 0; index < 4; index++) {
-    const int32_t point_angle =
-        angle +
-        ((int32_t)index * TRIG_MAX_ANGLE) / 4;
-
-    points[index] = GPoint(
-      center.x + (int16_t)(
-        ((int32_t)cos_lookup(point_angle) *
-         inner_half) /
-        TRIG_MAX_RATIO
-      ),
-      center.y + (int16_t)(
-        ((int32_t)sin_lookup(point_angle) *
-         inner_half) /
-        TRIG_MAX_RATIO
-      )
-    );
-  }
-
-  graphics_context_set_fill_color(ctx, fill_color);
-  gpath_draw_filled(ctx, path);
-  gpath_destroy(path);
-  graphics_context_set_stroke_width(ctx, 1);
-}
-
-static int16_t pill_physics_colour_brightness(GColor color) {
-  const uint8_t value = color.argb;
-  const uint8_t red = (value >> 4) & 3;
-  const uint8_t green = (value >> 2) & 3;
-  const uint8_t blue = value & 3;
-
-  return
-      red * 30 +
-      green * 59 +
-      blue * 11;
-}
-
-static void draw_physics_imprint(
-    GContext *ctx,
-    GPoint center,
-    const MedicationSettings *medication,
-    int16_t body_width
-) {
-  if (
-    !medication ||
-    medication->imprint[0] == '\0'
-  ) {
-    return;
-  }
-
-  const GColor first_color = {
-    .argb = medication->color
-  };
-  int16_t brightness =
-      pill_physics_colour_brightness(first_color);
-
-  if (medication->shape == 4) {
-    const GColor second_color = {
-      .argb = (uint8_t)medication->color2
-    };
-    brightness = (int16_t)(
-      (brightness +
-       pill_physics_colour_brightness(second_color)) /
-      2
-    );
-  }
-
-  const bool use_dark_text = brightness >= 165;
-  const GColor text_color =
-      use_dark_text ? GColorBlack : GColorWhite;
-  const GColor shadow_color =
-      use_dark_text ? GColorWhite : GColorBlack;
-  const int16_t width =
-      body_width < 24 ? 24 :
-      (body_width > 64 ? 64 : body_width);
-  const GRect frame = GRect(
-    center.x - width / 2,
-    center.y - 9,
-    width,
-    18
-  );
-  const GFont font =
-      fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD);
-
-  graphics_context_set_text_color(ctx, shadow_color);
-  graphics_draw_text(
-    ctx,
-    medication->imprint,
-    font,
-    GRect(frame.origin.x - 1, frame.origin.y, frame.size.w, frame.size.h),
-    GTextOverflowModeTrailingEllipsis,
-    GTextAlignmentCenter,
-    NULL
-  );
-  graphics_draw_text(
-    ctx,
-    medication->imprint,
-    font,
-    GRect(frame.origin.x + 1, frame.origin.y, frame.size.w, frame.size.h),
-    GTextOverflowModeTrailingEllipsis,
-    GTextAlignmentCenter,
-    NULL
-  );
-
-  graphics_context_set_text_color(ctx, text_color);
-  graphics_draw_text(
-    ctx,
-    medication->imprint,
-    font,
-    frame,
-    GTextOverflowModeTrailingEllipsis,
-    GTextAlignmentCenter,
-    NULL
-  );
-}
-
 static void draw_physics_pill_body(
     GContext *ctx,
     const PillPhysicsBody *body,
@@ -4686,25 +4434,12 @@ static void draw_physics_pill_body(
   const GColor fill_color = {
     .argb = medication->color
   };
-  const GColor second_color = {
-    .argb = (uint8_t)medication->color2
-  };
   const GPoint center = GPoint(
     (int16_t)(body->x_q8 / PILL_PHYSICS_Q8),
     (int16_t)(
       arena_y +
       body->y_q8 / PILL_PHYSICS_Q8
     )
-  );
-  int16_t line_half;
-  int16_t radius;
-  int16_t diamond_half;
-
-  pill_physics_geometry(
-    medication,
-    &line_half,
-    &radius,
-    &diamond_half
   );
 
   switch (medication->shape) {
@@ -4713,12 +4448,10 @@ static void draw_physics_pill_body(
         ctx,
         center,
         body->angle,
-        line_half,
-        (uint8_t)radius,
-        fill_color,
+        10,
+        7,
         fill_color,
         outline_color,
-        false,
         false
       );
       break;
@@ -4728,39 +4461,29 @@ static void draw_physics_pill_body(
         ctx,
         center,
         body->angle,
-        line_half,
-        (uint8_t)radius,
-        fill_color,
+        12,
+        5,
         fill_color,
         outline_color,
-        false,
         true
       );
       break;
 
     case 3:
-      draw_physics_diamond(
+      /*
+       * The diamond keeps its crisp configured icon shape. Its center still
+       * follows the full physics simulation; rotation can be added later.
+       */
+      draw_tablet_icon(
         ctx,
-        center,
-        body->angle,
-        diamond_half,
-        fill_color,
+        GRect(
+          center.x - MEDICATION_ICON_SIZE / 2,
+          center.y - MEDICATION_ICON_SIZE / 2,
+          MEDICATION_ICON_SIZE,
+          MEDICATION_ICON_SIZE
+        ),
+        medication,
         outline_color
-      );
-      break;
-
-    case 4:
-      draw_physics_capsule(
-        ctx,
-        center,
-        body->angle,
-        line_half,
-        (uint8_t)radius,
-        fill_color,
-        second_color,
-        outline_color,
-        true,
-        true
       );
       break;
 
@@ -4773,7 +4496,7 @@ static void draw_physics_pill_body(
       graphics_fill_circle(
         ctx,
         center,
-        (uint16_t)(radius + 2)
+        10
       );
       graphics_context_set_fill_color(
         ctx,
@@ -4782,22 +4505,10 @@ static void draw_physics_pill_body(
       graphics_fill_circle(
         ctx,
         center,
-        (uint16_t)radius
+        8
       );
       break;
   }
-
-  const int16_t body_width =
-      diamond_half > 0
-          ? diamond_half * 2
-          : (line_half + radius) * 2;
-
-  draw_physics_imprint(
-    ctx,
-    center,
-    medication,
-    body_width
-  );
 }
 
 static void draw_physics_pills(
@@ -4806,7 +4517,7 @@ static void draw_physics_pills(
     int32_t arena_y
 ) {
   if (
-    arena_y <= -bounds.size.h ||
+    arena_y <= -s_frame_height ||
     arena_y >= bounds.size.h
   ) {
     return;
@@ -5053,11 +4764,7 @@ static void canvas_update_proc(
 
   const int32_t pill_y = current_pill_y();
 
-  draw_physics_pills(
-    ctx,
-    bounds,
-    visual_canvas_offset_y()
-  );
+  draw_physics_pills(ctx, bounds, pill_y);
   draw_scroll_hint(ctx, bounds, pill_y);
   draw_medications(
     ctx,
@@ -6558,7 +6265,6 @@ static void transfer_close_timer_handler(
     "Settings transfer complete: dropping icon"
   );
 
-  alarm_rearm_after_transfer();
   cancel_timer(&s_transfer_animation_timer);
   s_transfer_animation_state =
       TRANSFER_ANIMATION_FALLING;
