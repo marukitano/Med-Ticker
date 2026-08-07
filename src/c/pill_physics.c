@@ -189,6 +189,10 @@ static bool pill_rb_solve_wall(
     int32_t minimum_y_q8,
     int32_t maximum_y_q8
 );
+static bool pill_rb_solve_swiss_emblem(
+    PillPhysicsBody *body,
+    int16_t arena_y
+);
 static int16_t pill_rb_tilt_magnitude(
     int16_t x,
     int16_t y
@@ -869,6 +873,12 @@ static void pill_rb_initialize_body(
           body_index
         )
   };
+
+  /* Keep the static pre-alarm spawn frame clear of the emblem. */
+  (void)pill_rb_solve_swiss_emblem(
+    body,
+    arena_y
+  );
 }
 
 static bool pill_rb_add_body(uint8_t medication_index) {
@@ -1572,6 +1582,137 @@ static bool pill_rb_solve_wall(
   return true;
 }
 
+/*
+ * Fixed collision obstacle around the 13 x 14 emblem at (100,100).
+ * Only the pill receives position correction and impulse.
+ */
+static bool pill_rb_solve_swiss_emblem(
+    PillPhysicsBody *body,
+    int16_t arena_y
+) {
+  if (!body) {
+    return false;
+  }
+
+  const int32_t emblem_x_q8 =
+      SWISS_EMBLEM_PIVOT_X * PILL_PHYSICS_Q8;
+  const int32_t emblem_y_q8 =
+      (SWISS_EMBLEM_PIVOT_Y - arena_y) *
+      PILL_PHYSICS_Q8;
+
+  int32_t axis_start_x_q8;
+  int32_t axis_start_y_q8;
+  int32_t axis_end_x_q8;
+  int32_t axis_end_y_q8;
+  pill_rb_segment_endpoints(
+    body,
+    &axis_start_x_q8,
+    &axis_start_y_q8,
+    &axis_end_x_q8,
+    &axis_end_y_q8
+  );
+
+  int32_t closest_x_q8;
+  int32_t closest_y_q8;
+  pill_rb_closest_point_on_segment(
+    emblem_x_q8,
+    emblem_y_q8,
+    axis_start_x_q8,
+    axis_start_y_q8,
+    axis_end_x_q8,
+    axis_end_y_q8,
+    &closest_x_q8,
+    &closest_y_q8
+  );
+
+  int32_t delta_x_q8 =
+      closest_x_q8 - emblem_x_q8;
+  int32_t delta_y_q8 =
+      closest_y_q8 - emblem_y_q8;
+  uint64_t distance_squared =
+      (uint64_t)((int64_t)delta_x_q8 * delta_x_q8) +
+      (uint64_t)((int64_t)delta_y_q8 * delta_y_q8);
+  int32_t distance_q8 = (int32_t)
+      pill_rb_integer_sqrt64(distance_squared);
+
+  const int32_t minimum_distance_q8 =
+      (body->collision_radius +
+       SWISS_EMBLEM_COLLISION_RADIUS) *
+      PILL_PHYSICS_Q8;
+
+  if (distance_q8 >= minimum_distance_q8) {
+    return false;
+  }
+
+  if (distance_q8 <= 0) {
+    delta_x_q8 = body->x_q8 - emblem_x_q8;
+    delta_y_q8 = body->y_q8 - emblem_y_q8;
+    distance_squared =
+        (uint64_t)((int64_t)delta_x_q8 * delta_x_q8) +
+        (uint64_t)((int64_t)delta_y_q8 * delta_y_q8);
+    distance_q8 = (int32_t)
+        pill_rb_integer_sqrt64(distance_squared);
+
+    if (distance_q8 <= 0) {
+      delta_x_q8 = PILL_PHYSICS_Q8;
+      delta_y_q8 = 0;
+      distance_q8 = PILL_PHYSICS_Q8;
+    }
+  }
+
+  const int32_t normal_x_q12 = (int32_t)(
+    ((int64_t)delta_x_q8 * PILL_RB_PARAMETER_Q12) /
+    distance_q8
+  );
+  const int32_t normal_y_q12 = (int32_t)(
+    ((int64_t)delta_y_q8 * PILL_RB_PARAMETER_Q12) /
+    distance_q8
+  );
+  const int32_t penetration_q8 =
+      minimum_distance_q8 - distance_q8;
+
+  body->x_q8 += (int32_t)(
+    ((int64_t)normal_x_q12 * penetration_q8) /
+    PILL_RB_PARAMETER_Q12
+  );
+  body->y_q8 += (int32_t)(
+    ((int64_t)normal_y_q12 * penetration_q8) /
+    PILL_RB_PARAMETER_Q12
+  );
+
+  const int32_t pill_radius_q8 =
+      body->collision_radius * PILL_PHYSICS_Q8;
+  const int32_t contact_x_q8 =
+      closest_x_q8 - (int32_t)(
+        ((int64_t)normal_x_q12 * pill_radius_q8) /
+        PILL_RB_PARAMETER_Q12
+      );
+  const int32_t contact_y_q8 =
+      closest_y_q8 - (int32_t)(
+        ((int64_t)normal_y_q12 * pill_radius_q8) /
+        PILL_RB_PARAMETER_Q12
+      );
+
+  pill_rb_solve_contact_impulse(
+    body,
+    NULL,
+    (int16_t)(
+      (contact_x_q8 - body->x_q8) /
+      PILL_PHYSICS_Q8
+    ),
+    (int16_t)(
+      (contact_y_q8 - body->y_q8) /
+      PILL_PHYSICS_Q8
+    ),
+    0,
+    0,
+    normal_x_q12,
+    normal_y_q12
+  );
+
+  return true;
+}
+
 static int16_t pill_rb_tilt_magnitude(
     int16_t x,
     int16_t y
@@ -1802,6 +1943,10 @@ static void pill_physics_tick(void *context) {
         maximum_x_q8,
         minimum_y_q8,
         maximum_y_q8
+      );
+      had_contact |= pill_rb_solve_swiss_emblem(
+        body,
+        arena_y
       );
     }
 

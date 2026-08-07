@@ -15,7 +15,6 @@
 #include "medication_ui.h"
 
 #define ALARM_VISUAL_LEAD_IN_MS 160
-#define ALARM_WINDOW_FLAG_AUDIO_CONSUMED 0x01
 
 static AppTimer *s_alarm_intro_timer;
 static bool s_alarm_visuals_are_paused;
@@ -805,26 +804,11 @@ static void alarm_intro_timer_handler(void *context) {
     return;
   }
 
-  const bool audio_already_consumed =
-      (
-        s_alarm_window_state.reserved[0] &
-        ALARM_WINDOW_FLAG_AUDIO_CONSUMED
-      ) != 0;
-
-  if (audio_already_consumed) {
-    alarm_release_visuals();
-    return;
-  }
-
   /*
-   * Consume the acoustic opportunity before attempting playback. This makes
-   * it at-most-once per intake window even after a crash, mute state or later
-   * reminder wakeup. The existing reserved byte keeps persistence compatible.
+   * Exactly one acoustic playback belongs to this reminder event.
+   * The repeating vibration pulse never restarts it. A later scheduled
+   * reminder creates a new alarm event and may therefore play once again.
    */
-  s_alarm_window_state.reserved[0] |=
-      ALARM_WINDOW_FLAG_AUDIO_CONSUMED;
-  persist_alarm_window_state();
-
   if (!alarm_audio_start()) {
     alarm_release_visuals();
   }

@@ -35,6 +35,10 @@ static void draw_alert_background_pattern(
     GContext *ctx,
     GRect bounds
 );
+static void draw_swiss_emblem(
+    GContext *ctx,
+    int32_t scroll_offset_y
+);
 static void destroy_pill_bitmaps(void);
 static void canvas_update_proc(
     Layer *layer,
@@ -329,6 +333,96 @@ static void draw_alert_background_pattern(
   );
 }
 
+/*
+ * Exact 13 x 14 Swiss emblem from FCK_Gravity.
+ * Original pivot: (100, 100), colors: GColorRed / GColorWhite.
+ */
+static void draw_swiss_emblem(
+    GContext *ctx,
+    int32_t scroll_offset_y
+) {
+  static const char *EMBLEM_ROWS[SWISS_EMBLEM_HEIGHT] = {
+    "..RRRRRRRRR..",
+    ".RRRRWWWRRRR.",
+    ".RRRRWWWRRRR.",
+    ".RRRRWWWRRRR.",
+    ".RWWWWWWWWWR.",
+    ".RWWWWWWWWWR.",
+    ".RWWWWWWWWWR.",
+    ".RRRRWWWRRRR.",
+    ".RRRRWWWRRRR.",
+    "..RRRWWWRRR..",
+    "..RRRRRRRRR..",
+    "....RRRRR....",
+    ".....RRR.....",
+    "......R......"
+  };
+
+  const int16_t left =
+      SWISS_EMBLEM_PIVOT_X -
+      SWISS_EMBLEM_WIDTH / 2;
+  const int16_t top = (int16_t)(
+    SWISS_EMBLEM_PIVOT_Y -
+    SWISS_EMBLEM_HEIGHT / 2 +
+    scroll_offset_y
+  );
+
+  for (int16_t row = 0; row < SWISS_EMBLEM_HEIGHT; row++) {
+    int16_t run_start = -1;
+    char current_symbol = '.';
+
+    for (int16_t column = 0; column <= SWISS_EMBLEM_WIDTH; column++) {
+      const char symbol =
+          column < SWISS_EMBLEM_WIDTH
+              ? EMBLEM_ROWS[row][column]
+              : '.';
+      const bool drawable =
+          symbol == 'W' || symbol == 'R';
+
+      if (drawable && run_start < 0) {
+        run_start = column;
+        current_symbol = symbol;
+        continue;
+      }
+
+      if (
+        drawable &&
+        run_start >= 0 &&
+        symbol == current_symbol
+      ) {
+        continue;
+      }
+
+      if (run_start >= 0) {
+        graphics_context_set_fill_color(
+          ctx,
+          current_symbol == 'W'
+              ? GColorWhite
+              : GColorRed
+        );
+        graphics_fill_rect(
+          ctx,
+          GRect(
+            left + run_start,
+            top + row,
+            column - run_start,
+            1
+          ),
+          0,
+          GCornerNone
+        );
+        run_start = -1;
+        current_symbol = '.';
+      }
+
+      if (drawable) {
+        run_start = column;
+        current_symbol = symbol;
+      }
+    }
+  }
+}
+
 static void destroy_pill_bitmaps(void) {
   for (uint8_t index = 0; index < FRAME_COUNT; index++) {
     if (s_frames[index]) {
@@ -533,6 +627,12 @@ static void canvas_update_proc(
   } else {
     draw_physics_pills(ctx, bounds, pill_y);
   }
+
+  /* Fixed foreground emblem; pills physically collide with it. */
+  draw_swiss_emblem(
+    ctx,
+    scroll_offset_y
+  );
 
   cover_scrolled_alert_area(ctx, bounds);
   draw_alert_page_button_hint(ctx, bounds);

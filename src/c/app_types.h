@@ -12,6 +12,13 @@
 
 #define CANVAS_START_OFFSET_Y 0
 
+/* Same Swiss emblem geometry as FCK_Gravity. */
+#define SWISS_EMBLEM_PIVOT_X 100
+#define SWISS_EMBLEM_PIVOT_Y 100
+#define SWISS_EMBLEM_WIDTH 13
+#define SWISS_EMBLEM_HEIGHT 14
+#define SWISS_EMBLEM_COLLISION_RADIUS 7
+
 #define SCROLL_Q8 256
 #define SCROLL_FRAME_MS 16
 
