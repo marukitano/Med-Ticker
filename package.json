@@ -6,9 +6,9 @@
     "medication",
     "pill"
   ],
-  "name": "pill-reminder",
+  "name": "med-ticker",
   "pebble": {
-    "displayName": "Pill Reminder",
+    "displayName": "Med Ticker",
     "enableMultiJS": false,
     "messageKeys": {
       "THEME": 0,

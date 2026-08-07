@@ -30,3 +30,7 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# Local maintenance files
+/ble-nightly/
+/cleanup_med_ticker.py

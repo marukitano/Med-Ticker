@@ -1,23 +1,170 @@
-# Pill Reminder
+# Med Ticker
 
-A native medication reminder app for the **Pebble Time 2**.
+## Deutsch
 
-Pill Reminder keeps medication reminders simple and watch-first: when a medication is due, the watch shows the configured pills or injection pen, alerts you with sound and/or vibration, and waits for a deliberate confirmation before marking it as taken.
+**Med Ticker** ist eine native Medikamenten-Erinnerungs-App für die
+**Pebble Time 2** (`emery`).
 
-<!--
-Add screenshots before release, for example:
+Wenn ein Medikament fällig ist, zeigt die Uhr die konfigurierten
+Tabletten oder den Injektionspen, alarmiert per Ton und/oder Vibration
+und wartet auf eine bewusste Bestätigung, bevor die Einnahme als
+erledigt markiert wird.
 
 <p align="center">
-  <img src="docs/screenshots/pills-dark.png" width="31%" alt="Pill reminder in dark mode">
-  <img src="docs/screenshots/pen.png" width="31%" alt="Injection pen reminder">
-  <img src="docs/screenshots/medication-list.png" width="31%" alt="Medication list">
+  <img src="docs/screenshots/screenshot.png" width="30%" alt="Med Ticker – screenshot">
+  <img src="docs/screenshots/screenshot2.png" width="30%" alt="Med Ticker – screenshot2">
+  <img src="docs/screenshots/screenshot3.png" width="30%" alt="Med Ticker – screenshot3">
+  <img src="docs/screenshots/screenshot4.png" width="30%" alt="Med Ticker – screenshot4">
 </p>
--->
 
-## Highlights
+### Funktionen
+
+- Bis zu **8 Medikamente**
+- Tabletten und **Injektionspens**
+- Tägliche, wöchentliche und monatliche Einnahmepläne
+- Vier konfigurierbare Tageszeiten: Früh, Mittag, Abend und Nacht
+- Einstellbare Tablettenform, Farbe, Größe und Beschriftung
+- Einstellbare Farben für Pen und Akzent
+- Animierte Tabletten mit beschleunigungssensorbasierter Physik
+- **Gedrückthalten zum Bestätigen**
+- Scrollen per Touch und Tasten
+- Wiederholte Erinnerungen mit einstellbarem Intervall
+- Alarmton mit einstellbarer Lautstärke
+- Vibration ein/aus
+- Oberfläche auf **Deutsch und Englisch**
+- **Hell-, Dunkel- und Shake-Theme**
+- Wechsel zwischen Hell und Dunkel per Handgelenkbewegung im Shake-Modus
+- Persistenter Erinnerungsstatus
+- Pebble-Wakeups
+
+### Funktionsweise
+
+Wird ein Medikament fällig, öffnet Med Ticker einen eigenen
+Erinnerungsbildschirm.
+
+Tabletten verhalten sich wie kleine physikalische Objekte und reagieren
+auf die Bewegung der Uhr. Injektionsmedikamente werden als animierter
+Pen dargestellt.
+
+Sind Tabletten und ein Pen gleichzeitig fällig, werden sie als getrennte
+Bestätigungsgruppen angezeigt.
+
+Eine Einnahme wird nicht durch einen kurzen versehentlichen Tastendruck
+bestätigt. Stattdessen ist bewusstes Gedrückthalten mit visueller
+Rückmeldung erforderlich.
+
+### Konfiguration
+
+Über die Begleit-Konfigurationsseite auf dem Smartphone können
+Medikamente verwaltet werden.
+
+Pro Medikament lassen sich unter anderem einstellen:
+
+- Name
+- Wirkung / Beschreibung
+- Dosierung
+- Menge
+- Tageszeit
+- Täglicher, wöchentlicher oder monatlicher Rhythmus
+- Tablette oder Injektionspen
+- Aussehen
+- Aktiv / inaktiv
+
+Allgemeine Einstellungen:
+
+- Beginn von Früh, Mittag, Abend und Nacht
+- Alarmton
+- Alarmlautstärke
+- Vibration
+- Erinnerungsintervall
+- Sprache
+- Theme
+
+Die Einstellungen werden lokal gespeichert und über
+**Pebble AppMessage** an die Uhr übertragen.
+
+### Unterstütztes Gerät
+
+- **Pebble Time 2 (`emery`)**
+
+### Build
+
+```bash
+pebble clean
+pebble build
+```
+
+Installation auf einer verbundenen Uhr:
+
+```bash
+pebble install --phone WATCH_IP
+```
+
+### Projektstruktur
+
+```text
+package.json
+resources/
+docs/
+└── screenshots/
+src/
+├── c/
+│   ├── main.c
+│   ├── app_state.c
+│   ├── app_util.c
+│   ├── watch_settings.c
+│   ├── medication_model.c
+│   ├── medication_alarm.c
+│   ├── medication_ui.c
+│   ├── pill_physics.c
+│   ├── pill_renderer.c
+│   ├── scroll_controller.c
+│   └── confirmation_ui.c
+└── js/
+    └── pebble-js-app.js
+```
+
+Weitere Architekturdetails stehen in
+[`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+### Medizinischer Hinweis
+
+Med Ticker ist ein Komfortwerkzeug und **kein Medizinprodukt**.
+
+Verlasse dich nicht ausschließlich auf diese App, wenn ein Medikament
+exakt zu einem bestimmten Zeitpunkt eingenommen werden muss oder eine
+ausgelassene beziehungsweise falsche Dosis gesundheitliche Folgen
+haben kann.
+
+### Lizenz
+
+Med Ticker ist freie Software unter der
+**GNU General Public License v3.0**.
+
+Siehe [`LICENSE`](LICENSE).
+
+---
+
+## English
+
+**Med Ticker** is a native medication reminder app for the
+**Pebble Time 2** (`emery`).
+
+When medication is due, the watch displays the configured pills or
+injection pen, alerts you with sound and/or vibration, and waits for a
+deliberate confirmation before marking it as taken.
+
+<p align="center">
+  <img src="docs/screenshots/screenshot.png" width="30%" alt="Med Ticker – screenshot">
+  <img src="docs/screenshots/screenshot2.png" width="30%" alt="Med Ticker – screenshot2">
+  <img src="docs/screenshots/screenshot3.png" width="30%" alt="Med Ticker – screenshot3">
+  <img src="docs/screenshots/screenshot4.png" width="30%" alt="Med Ticker – screenshot4">
+</p>
+
+### Features
 
 - Up to **8 medications**
-- Pill and **injection pen** medication types
+- Pills and **injection pens**
 - Daily, weekly and monthly schedules
 - Four configurable dayparts: morning, noon, evening and night
 - Configurable pill shape, color, size and imprint
@@ -25,28 +172,33 @@ Add screenshots before release, for example:
 - Animated pills with accelerometer-driven physics
 - Deliberate **hold-to-confirm** interaction
 - Touch and button scrolling
-- Repeating reminders
-- Alarm sound on/off with configurable volume
+- Repeating reminders with configurable intervals
+- Alarm sound with configurable volume
 - Vibration on/off
 - **German and English** interface
 - **Light, Dark and Shake** themes
-- In Shake mode, a wrist shake switches between Light and Dark
-- Subtle Seigaiha-inspired background pattern on the reminder screen
-- Persistent reminder state and Pebble wakeups
+- Persistent reminder state
+- Pebble wakeups
 
-## How it works
+### How it works
 
-When a medication becomes due, Pill Reminder opens a dedicated reminder screen.
+When medication becomes due, Med Ticker opens a dedicated reminder
+screen.
 
-Pills behave like small physical objects and react to movement of the watch. Injection medications are shown as a large animated pen. If pills and a pen are due at the same time, they are presented as separate confirmation groups.
+Pills behave like small physical objects and react to movement of the
+watch. Injection medications are displayed as an animated pen.
 
-A medication is not marked as taken by a simple accidental tap. Confirmation requires a deliberate press-and-hold action with visual feedback.
+If pills and a pen are due at the same time, they are presented as
+separate confirmation groups.
 
-After all due medication has been confirmed, the app shows the completed state and the full medication list remains available by scrolling.
+Medication is not marked as taken by a short accidental button press.
+Confirmation requires a deliberate press-and-hold action with visual
+feedback.
 
-## Configuration
+### Configuration
 
-The companion configuration page lets you manage medications directly from your phone.
+The companion configuration page lets you manage medications from your
+phone.
 
 For each medication you can configure:
 
@@ -70,58 +222,18 @@ General settings include:
 - Language
 - Theme
 
-Settings are stored locally and transferred to the watch through Pebble AppMessage.
+Settings are stored locally and transferred to the watch through
+**Pebble AppMessage**.
 
-## Themes
-
-Pill Reminder includes three theme modes:
-
-**Dark**  
-Black interface with light text.
-
-**Light**  
-Light interface with dark text.
-
-**Shake**  
-Uses the same Light and Dark themes, but lets you switch between them with a wrist shake while the app is open.
-
-The reminder screen uses a subtle Seigaiha-inspired wave pattern designed for the Pebble Time 2 display.
-
-## Languages
-
-The user interface is available in:
-
-- English
-- German
-
-Medication names, dosage and description are user-provided and are not translated automatically.
-
-## Supported device
-
-Pill Reminder currently targets:
+### Supported device
 
 - **Pebble Time 2 (`emery`)**
 
-The project uses the Pebble SDK 3 application format.
-
-## Build from source
-
-Requirements:
-
-- Pebble SDK with Emery / Pebble Time 2 support
-- Node.js as required by the Pebble SDK
-
-Build:
+### Build
 
 ```bash
 pebble clean
 pebble build
-```
-
-The resulting app bundle is written to:
-
-```text
-build/Pill-Reminder.pbw
 ```
 
 Install on a connected watch:
@@ -130,11 +242,13 @@ Install on a connected watch:
 pebble install --phone WATCH_IP
 ```
 
-## Project structure
+### Project structure
 
 ```text
 package.json
 resources/
+docs/
+└── screenshots/
 src/
 ├── c/
 │   ├── main.c
@@ -152,26 +266,20 @@ src/
     └── pebble-js-app.js
 ```
 
-The watch application is split into separate modules for UI, medication state, alarms, rendering, physics, scrolling, confirmation and settings transfer.
+More details about the internal structure can be found in
+[`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-## Settings transfer
+### Medical disclaimer
 
-Phone-side settings are sent to the watch as a reset/item/commit transaction.
+Med Ticker is a convenience tool and is **not a medical device**.
 
-When adding new settings, keep the numeric AppMessage keys synchronized between:
+Do not rely on this app as the only safeguard for medication that must
+be taken at an exact time or where a missed or incorrect dose could
+cause harm.
 
-- `package.json`
-- watch-side C code
-- `src/js/pebble-js-app.js`
+### License
 
-## Medical disclaimer
+Med Ticker is free software released under the
+**GNU General Public License v3.0**.
 
-Pill Reminder is a convenience tool and is **not a medical device**.
-
-Do not rely on this app as the only safeguard for medication that must be taken at an exact time or where a missed or incorrect dose could cause harm. Always follow the instructions given by your doctor, pharmacist or medication provider.
-
-## License
-
-Pill Reminder is free software released under the **GNU General Public License v3.0**.
-
-See [`LICENSE`](LICENSE) for the full license text.
+See [`LICENSE`](LICENSE).
