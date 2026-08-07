@@ -382,6 +382,23 @@ function normalizeMedication(value) {
     ? value.color2
     : -1;
 
+  /*
+   * Pens reuse the existing two Pebble colour slots:
+   * primary colour = pen body, secondary colour = accent.
+   * Old pen entries did not require colours, so migrate them in memory.
+   */
+  if (symbol === 1) {
+    if (!colorValid) {
+      color = 255;
+      colorValid = true;
+    }
+
+    if (!color2Valid) {
+      color2 = 240;
+      color2Valid = true;
+    }
+  }
+
   var size = integerInRange(
     value.size,
     60,
@@ -397,8 +414,13 @@ function normalizeMedication(value) {
   var iconSet =
       symbolValid &&
       (
-        symbol === 1 ||
         (
+          symbol === 1 &&
+          colorValid &&
+          color2Valid
+        ) ||
+        (
+          symbol === 0 &&
           shapeValid &&
           colorValid &&
           (shape !== 4 || color2Valid)
@@ -543,7 +565,7 @@ function sendMedicationAt(
       : DEFAULT_MEDICATION.color;
   var secondaryColor = iconSet && integerInRange(medication.color2, 192, 255)
       ? medication.color2
-      : primaryColor;
+      : (medication.symbol === 1 ? 240 : primaryColor);
   var size = iconSet && integerInRange(medication.size, 60, 140)
       ? medication.size
       : 100;
@@ -767,6 +789,13 @@ function configurationPage(
     '.pill-preview{width:92px;height:76px;display:flex;align-items:center;justify-content:center}',
     '.pill-shape{display:flex;align-items:center;justify-content:center;border:2px solid #555;background-clip:padding-box;box-shadow:none}',
     '.pill-imprint{display:block;max-width:88%;overflow:hidden;font-size:10px;font-weight:bold;line-height:1;white-space:nowrap;text-align:center}',
+    '.pen-preview-row{height:96px;display:flex;align-items:center;justify-content:center;margin-bottom:4px}',
+    '.pen-preview-row.hidden{display:none}',
+    '.pen-preview{position:relative;display:block;box-sizing:border-box;width:20px;height:72px;border:3px solid #555;border-radius:9px;background:#fff}',
+    '.pen-preview:before{content:"";position:absolute;left:6px;bottom:-22px;width:2px;height:19px;background:#555}',
+    '.pen-preview:after{content:"";position:absolute;left:3px;top:-10px;width:8px;height:5px;border-radius:2px;background:#555}',
+    '.pen-preview-accent{position:absolute;left:2px;right:2px;bottom:5px;height:27px;border-radius:4px;background:#f00}',
+    '.pen-preview-window{position:absolute;left:6px;top:17px;width:3px;height:14px;border-radius:2px;background:#555}',
     '.imprint-input{text-align:center;letter-spacing:.08em}',
     '.shape-0{width:28px;height:28px;border-radius:50%}',
     '.shape-1{width:39px;height:24px;border-radius:50%}',
@@ -947,44 +976,55 @@ function configurationPage(
     'var fields=card.querySelector(".icon-fields");',
     'var symbol=numberValue(card,"symbol");',
     'var isTablet=symbol===0;',
+    'var isPen=symbol===1;',
     'var shape=numberValue(card,"shape");',
     'var isCapsule=shape===4;',
     'var color=numberValue(card,"color");',
     'var color2=numberValue(card,"color2");',
+    'if(isPen&&!(color>=192&&color<=255)){color=255;card.querySelector("[data-field=\\"color\\"]").value=color;}',
+    'if(isPen&&!(color2>=192&&color2<=255)){color2=240;card.querySelector("[data-field=\\"color2\\"]").value=color2;}',
+    'var colorValid=color>=192&&color<=255;',
     'var color2Valid=color2>=192&&color2<=255;',
     'var size=numberValue(card,"size");',
     'var imprint=card.querySelector("[data-field=\\"imprint\\"]").value.trim().slice(0,5);',
     'if(size<60||size>140){size=100;}',
-    'var iconSet=symbol===1||(isTablet&&shape>=0&&shape<=4&&color>=192&&color<=255&&(!isCapsule||color2Valid));',
-    'fields.className=isTablet?"icon-fields":"icon-fields hidden";',
+    'var iconSet=(isPen&&colorValid&&color2Valid)||(isTablet&&shape>=0&&shape<=4&&colorValid&&(!isCapsule||color2Valid));',
+    'fields.className=(isTablet||isPen)?"icon-fields":"icon-fields hidden";',
+    'card.querySelector(".tablet-fields").className=isTablet?"tablet-fields":"tablet-fields hidden";',
+    'card.querySelector(".pen-preview-row").className=isPen?"pen-preview-row":"pen-preview-row hidden";',
     'if(isTablet){',
     'var preview=card.querySelector(".pill-shape");',
     'preview.className=shape>=0&&shape<=4?"pill-shape shape-"+shape:"pill-shape hidden";',
     'if(isCapsule){',
     'preview.style.backgroundColor="transparent";',
-    'preview.style.backgroundImage=color>=192&&color<=255&&color2Valid?"linear-gradient(90deg,"+pebbleColorHex(color)+" 0 50%,"+pebbleColorHex(color2)+" 50% 100%)":"none";',
+    'preview.style.backgroundImage=colorValid&&color2Valid?"linear-gradient(90deg,"+pebbleColorHex(color)+" 0 50%,"+pebbleColorHex(color2)+" 50% 100%)":"none";',
     '}else{',
     'preview.style.backgroundImage="none";',
-    'preview.style.backgroundColor=color>=192&&color<=255?pebbleColorHex(color):"transparent";',
+    'preview.style.backgroundColor=colorValid?pebbleColorHex(color):"transparent";',
     '}',
     'preview.style.transform=(shape===3?"rotate(45deg) ":"")+"scale("+(size/100)+")";',
     'var imprintNode=card.querySelector(".pill-imprint");',
     'imprintNode.textContent=imprint;',
-    'imprintNode.style.color=color>=192&&color<=255?pebbleTextColor(color):"#111";',
+    'imprintNode.style.color=colorValid?pebbleTextColor(color):"#111";',
     'card.querySelector("[data-size-value]").textContent=size+" %";',
-    'card.querySelector(".primary-color-label").textContent=isCapsule?"Farbe 1":"Farbe";',
-    'card.querySelector(".second-color-picker").className=isCapsule?"color-picker second-color-picker":"color-picker second-color-picker hidden";',
+    '}',
+    'if(isPen){',
+    'card.querySelector(".pen-preview").style.backgroundColor=pebbleColorHex(color);',
+    'card.querySelector(".pen-preview-accent").style.backgroundColor=pebbleColorHex(color2);',
+    '}',
+    'card.querySelector(".primary-color-label").textContent=isPen?"Pen-Farbe":(isCapsule?"Farbe 1":"Farbe");',
+    'card.querySelector(".secondary-color-label").textContent=isPen?"Akzent":"Farbe 2";',
+    'card.querySelector(".second-color-picker").className=(isPen||isCapsule)?"color-picker second-color-picker":"color-picker second-color-picker hidden";',
     'var primaryTile=card.querySelector("[data-palette-toggle=\\"color\\"]");',
-    'primaryTile.style.backgroundColor=color>=192&&color<=255?pebbleColorHex(color):"transparent";',
+    'primaryTile.style.backgroundColor=colorValid?pebbleColorHex(color):"transparent";',
     'var secondTile=card.querySelector("[data-palette-toggle=\\"color2\\"]");',
     'secondTile.style.backgroundColor=color2Valid?pebbleColorHex(color2):"transparent";',
-    'if(!isCapsule){card.querySelector("[data-palette-field=\\"color2\\"]").className="palette-panel hidden";}',
+    'if(!(isPen||isCapsule)){card.querySelector("[data-palette-field=\\"color2\\"]").className="palette-panel hidden";}',
     'var swatches=card.querySelectorAll("[data-color]");',
     'for(var i=0;i<swatches.length;i++){',
     'var field=swatches[i].getAttribute("data-color-field");',
     'var selected=parseInt(swatches[i].getAttribute("data-color"),10)===numberValue(card,field);',
     'swatches[i].className=selected?"color-swatch selected":"color-swatch";',
-    '}',
     '}',
     'var active=card.querySelector("[data-field=\\"enabled\\"]");',
     'if(!iconSet){active.checked=false;}',
@@ -1140,6 +1180,7 @@ function configurationPage(
     'html+=option(-1,"Bitte auswählen",med.symbol)+option(0,"Tablette",med.symbol)+option(1,"Pen / Spritze",med.symbol);',
     'html+="</select></label>";',
     'html+="<div class=\\"icon-fields\\">";',
+    'html+="<div class=\\"tablet-fields\\">";',
     'html+="<label>Form<select data-field=\\"shape\\">";',
     'html+=option(-1,"Bitte auswählen",med.shape)+option(0,"Rund",med.shape)+option(1,"Ellipse",med.shape)+option(2,"Pille",med.shape)+option(4,"Kapsel",med.shape)+option(3,"Rhombus",med.shape);',
     'html+="</select></label>";',
@@ -1147,11 +1188,13 @@ function configurationPage(
     'html+="<label class=\\"size-label\\"><span>Grösse</span><span class=\\"size-value\\" data-size-value>"+med.size+" %</span></label>";',
     'html+="<input data-field=\\"size\\" type=\\"range\\" min=\\"60\\" max=\\"140\\" step=\\"5\\" value=\\""+med.size+"\\">";',
     'html+="<label>Beschriftung<input class=\\"imprint-input\\" data-field=\\"imprint\\" type=\\"text\\" maxlength=\\"5\\" value=\\""+escapeHtml(imprint)+"\\" placeholder=\\"z. B. 20\\"></label>";',
+    'html+="</div>";',
+    'html+="<div class=\\"pen-preview-row hidden\\"><span class=\\"pen-preview\\"><span class=\\"pen-preview-accent\\"></span><span class=\\"pen-preview-window\\"></span></span></div>";',
     'html+="<input data-field=\\"color\\" type=\\"hidden\\" value=\\""+med.color+"\\">";',
     'html+="<input data-field=\\"color2\\" type=\\"hidden\\" value=\\""+med.color2+"\\">";',
     'html+="<div class=\\"color-picker-row\\">";',
     'html+="<div class=\\"color-picker\\"><span class=\\"primary-color-label\\">Farbe</span><button class=\\"color-tile\\" type=\\"button\\" data-palette-toggle=\\"color\\" title=\\"Farbpalette öffnen\\"></button></div>";',
-    'html+="<div class=\\"color-picker second-color-picker hidden\\"><span>Farbe 2</span><button class=\\"color-tile\\" type=\\"button\\" data-palette-toggle=\\"color2\\" title=\\"Farbpalette öffnen\\"></button></div>";',
+    'html+="<div class=\\"color-picker second-color-picker hidden\\"><span class=\\"secondary-color-label\\">Farbe 2</span><button class=\\"color-tile\\" type=\\"button\\" data-palette-toggle=\\"color2\\" title=\\"Farbpalette öffnen\\"></button></div>";',
     'html+="</div>";',
     'html+="<div class=\\"palette-panel hidden\\" data-palette-field=\\"color\\"><div class=\\"color-grid\\">"+paletteHtml(med.color,"color")+"</div></div>";',
     'html+="<div class=\\"palette-panel hidden\\" data-palette-field=\\"color2\\"><div class=\\"color-grid\\">"+paletteHtml(med.color2,"color2")+"</div></div>";',

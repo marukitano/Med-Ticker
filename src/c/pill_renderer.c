@@ -126,6 +126,7 @@ static void draw_pen_icon(
     GContext *ctx,
     GRect frame,
     const MedicationSettings *medication,
+    const MedicationAppearance *appearance,
     GColor outline_color
 );
 static void draw_medication_icon(
@@ -433,6 +434,37 @@ static void draw_tablet_icon(
   graphics_context_set_stroke_width(ctx, 1);
 }
 
+static GPoint pen_shape_point(
+    GPoint center,
+    int32_t angle,
+    int16_t along,
+    int16_t normal
+) {
+  const int32_t normal_angle =
+      angle + TRIG_MAX_ANGLE / 4;
+
+  return GPoint(
+    center.x +
+        (int16_t)(
+          ((int32_t)cos_lookup(angle) * along) /
+          TRIG_MAX_RATIO
+        ) +
+        (int16_t)(
+          ((int32_t)cos_lookup(normal_angle) * normal) /
+          TRIG_MAX_RATIO
+        ),
+    center.y +
+        (int16_t)(
+          ((int32_t)sin_lookup(angle) * along) /
+          TRIG_MAX_RATIO
+        ) +
+        (int16_t)(
+          ((int32_t)sin_lookup(normal_angle) * normal) /
+          TRIG_MAX_RATIO
+        )
+  );
+}
+
 static void draw_pen_shape(
     GContext *ctx,
     GPoint center,
@@ -441,81 +473,266 @@ static void draw_pen_shape(
     uint8_t outline_width,
     uint8_t fill_width,
     uint8_t detail_width,
-    GColor fill_color,
+    GColor body_color,
+    GColor accent_color,
     GColor outline_color
 ) {
-  const int16_t dx = (int16_t)(
-    ((int32_t)cos_lookup(angle) * half_length) /
-    TRIG_MAX_RATIO
-  );
-  const int16_t dy = (int16_t)(
-    ((int32_t)sin_lookup(angle) * half_length) /
-    TRIG_MAX_RATIO
-  );
-  const GPoint barrel_start = GPoint(
-    center.x - dx,
-    center.y - dy
-  );
-  const GPoint barrel_end = GPoint(
-    center.x + dx,
-    center.y + dy
-  );
+  const GPoint body_top =
+      pen_shape_point(
+        center,
+        angle,
+        (int16_t)-half_length,
+        0
+      );
+  const GPoint body_bottom =
+      pen_shape_point(
+        center,
+        angle,
+        half_length,
+        0
+      );
 
-  graphics_context_set_stroke_color(ctx, outline_color);
-  graphics_context_set_stroke_width(ctx, outline_width);
-  graphics_draw_line(ctx, barrel_start, barrel_end);
-
-  graphics_context_set_stroke_color(ctx, fill_color);
-  graphics_context_set_stroke_width(ctx, fill_width);
-  graphics_draw_line(ctx, barrel_start, barrel_end);
-
-  const int32_t normal_angle =
-      angle + TRIG_MAX_ANGLE / 4;
-  const int16_t cap_half =
-      outline_width / 2 + 1;
-  const int16_t cap_dx = (int16_t)(
-    ((int32_t)cos_lookup(normal_angle) * cap_half) /
-    TRIG_MAX_RATIO
+  /* Main barrel with rounded ends. */
+  graphics_context_set_stroke_color(
+    ctx,
+    outline_color
   );
-  const int16_t cap_dy = (int16_t)(
-    ((int32_t)sin_lookup(normal_angle) * cap_half) /
-    TRIG_MAX_RATIO
+  graphics_context_set_stroke_width(
+    ctx,
+    outline_width
   );
-
-  graphics_context_set_stroke_color(ctx, outline_color);
-  graphics_context_set_stroke_width(ctx, detail_width);
   graphics_draw_line(
     ctx,
-    GPoint(
-      barrel_start.x - cap_dx,
-      barrel_start.y - cap_dy
-    ),
-    GPoint(
-      barrel_start.x + cap_dx,
-      barrel_start.y + cap_dy
-    )
+    body_top,
+    body_bottom
+  );
+  graphics_context_set_fill_color(
+    ctx,
+    outline_color
+  );
+  graphics_fill_circle(
+    ctx,
+    body_top,
+    outline_width / 2
+  );
+  graphics_fill_circle(
+    ctx,
+    body_bottom,
+    outline_width / 2
+  );
+
+  graphics_context_set_stroke_color(
+    ctx,
+    body_color
+  );
+  graphics_context_set_stroke_width(
+    ctx,
+    fill_width
+  );
+  graphics_draw_line(
+    ctx,
+    body_top,
+    body_bottom
+  );
+  graphics_context_set_fill_color(
+    ctx,
+    body_color
+  );
+  graphics_fill_circle(
+    ctx,
+    body_top,
+    fill_width / 2
+  );
+  graphics_fill_circle(
+    ctx,
+    body_bottom,
+    fill_width / 2
+  );
+
+  /*
+   * Broad coloured dose/grip section. Keeping this broad makes the
+   * configured accent clearly visible on the small colour display.
+   */
+  const GPoint grip_top =
+      pen_shape_point(
+        center,
+        angle,
+        half_length / 5,
+        0
+      );
+  const GPoint grip_bottom =
+      pen_shape_point(
+        center,
+        angle,
+        half_length - 6,
+        0
+      );
+
+  graphics_context_set_stroke_color(
+    ctx,
+    accent_color
+  );
+  graphics_context_set_stroke_width(
+    ctx,
+    fill_width > 4
+        ? fill_width - 4
+        : fill_width
+  );
+  graphics_draw_line(
+    ctx,
+    grip_top,
+    grip_bottom
+  );
+
+  /* Dark dose window in the upper part of the barrel. */
+  const GPoint window_top =
+      pen_shape_point(
+        center,
+        angle,
+        (int16_t)(-half_length / 3),
+        0
+      );
+  const GPoint window_bottom =
+      pen_shape_point(
+        center,
+        angle,
+        (int16_t)(-half_length / 9),
+        0
+      );
+
+  graphics_context_set_stroke_color(
+    ctx,
+    outline_color
+  );
+  graphics_context_set_stroke_width(
+    ctx,
+    detail_width + 2
+  );
+  graphics_draw_line(
+    ctx,
+    window_top,
+    window_bottom
+  );
+
+  /* Plunger and coloured button at the top. */
+  const GPoint plunger_center =
+      pen_shape_point(
+        center,
+        angle,
+        (int16_t)(-half_length - 7),
+        0
+      );
+  const int16_t button_half =
+      fill_width / 2 + 2;
+  const GPoint button_left =
+      pen_shape_point(
+        plunger_center,
+        angle,
+        0,
+        (int16_t)-button_half
+      );
+  const GPoint button_right =
+      pen_shape_point(
+        plunger_center,
+        angle,
+        0,
+        button_half
+      );
+
+  graphics_context_set_stroke_color(
+    ctx,
+    outline_color
+  );
+  graphics_context_set_stroke_width(
+    ctx,
+    detail_width + 2
+  );
+  graphics_draw_line(
+    ctx,
+    body_top,
+    plunger_center
+  );
+
+  graphics_context_set_stroke_color(
+    ctx,
+    accent_color
+  );
+  graphics_context_set_stroke_width(
+    ctx,
+    detail_width + 2
+  );
+  graphics_draw_line(
+    ctx,
+    button_left,
+    button_right
+  );
+
+  /*
+   * Needle hub and needle. `angle` points from the top of the pen towards
+   * the bottom, so the needle always leaves the lower end.
+   */
+  const int16_t collar_half =
+      fill_width / 2 + 1;
+  const GPoint collar_left =
+      pen_shape_point(
+        body_bottom,
+        angle,
+        0,
+        (int16_t)-collar_half
+      );
+  const GPoint collar_right =
+      pen_shape_point(
+        body_bottom,
+        angle,
+        0,
+        collar_half
+      );
+
+  graphics_context_set_stroke_color(
+    ctx,
+    accent_color
+  );
+  graphics_context_set_stroke_width(
+    ctx,
+    detail_width + 1
+  );
+  graphics_draw_line(
+    ctx,
+    collar_left,
+    collar_right
   );
 
   const int16_t needle_length =
       half_length > 20
           ? half_length / 3
-          : 6;
-  const int16_t needle_dx = (int16_t)(
-    ((int32_t)cos_lookup(angle) * needle_length) /
-    TRIG_MAX_RATIO
-  );
-  const int16_t needle_dy = (int16_t)(
-    ((int32_t)sin_lookup(angle) * needle_length) /
-    TRIG_MAX_RATIO
-  );
+          : 7;
+  const GPoint needle_start =
+      pen_shape_point(
+        body_bottom,
+        angle,
+        4,
+        0
+      );
+  const GPoint needle_end =
+      pen_shape_point(
+        body_bottom,
+        angle,
+        needle_length,
+        0
+      );
 
+  graphics_context_set_stroke_color(
+    ctx,
+    outline_color
+  );
+  graphics_context_set_stroke_width(
+    ctx,
+    detail_width
+  );
   graphics_draw_line(
     ctx,
-    barrel_end,
-    GPoint(
-      barrel_end.x + needle_dx,
-      barrel_end.y + needle_dy
-    )
+    needle_start,
+    needle_end
   );
 
   graphics_context_set_stroke_width(ctx, 1);
@@ -525,26 +742,45 @@ static void draw_pen_icon(
     GContext *ctx,
     GRect frame,
     const MedicationSettings *medication,
+    const MedicationAppearance *appearance,
     GColor outline_color
 ) {
-  const GColor fill_color = {
-    .argb = medication->color
+  const bool use_appearance =
+      appearance && appearance->valid;
+  const GColor body_color = {
+    .argb =
+        use_appearance
+            ? appearance->primary_color
+            : medication->color
   };
+  const GColor accent_color = {
+    .argb =
+        use_appearance
+            ? appearance->secondary_color
+            : 240
+  };
+  const GColor body_outline =
+      medication_appearance_darker_color(
+        body_color.argb
+      );
 
   draw_pen_shape(
     ctx,
     GPoint(
       frame.origin.x + frame.size.w / 2,
-      frame.origin.y + frame.size.h / 2
+      frame.origin.y + frame.size.h / 2 - 1
     ),
-    -(TRIG_MAX_ANGLE / 8),
-    11,
+    TRIG_MAX_ANGLE / 4,
     8,
+    7,
     5,
-    2,
-    fill_color,
-    outline_color
+    1,
+    body_color,
+    accent_color,
+    body_outline
   );
+
+  (void)outline_color;
 }
 
 void draw_pen_alert_animation(
@@ -566,6 +802,7 @@ void draw_pen_alert_animation(
   const MedicationTime visible_time =
       current_medication_time();
   const MedicationSettings *pen = NULL;
+  uint8_t pen_index = 0;
 
   for (
     uint8_t index = 0;
@@ -582,6 +819,7 @@ void draw_pen_alert_animation(
       candidate->time == (uint8_t)visible_time
     ) {
       pen = candidate;
+      pen_index = index;
       break;
     }
   }
@@ -600,17 +838,42 @@ void draw_pen_alert_animation(
   );
 
   if (
-    center_y < bounds.origin.y - 64 ||
-    center_y > bounds.origin.y + bounds.size.h + 64
+    center_y < bounds.origin.y - 96 ||
+    center_y > bounds.origin.y + bounds.size.h + 96
   ) {
     return;
   }
 
-  const GColor fill_color = {
-    .argb = pen->color
+  const MedicationAppearance *appearance =
+      pen_index < s_medication_appearance_count
+          ? &s_medication_appearances[pen_index]
+          : NULL;
+  const bool use_appearance =
+      appearance && appearance->valid;
+
+  const GColor body_color = {
+    .argb =
+        use_appearance
+            ? appearance->primary_color
+            : pen->color
   };
+  const GColor accent_color = {
+    .argb =
+        use_appearance
+            ? appearance->secondary_color
+            : 240
+  };
+  const GColor body_outline =
+      medication_appearance_darker_color(
+        body_color.argb
+      );
+
+  /*
+   * The pen points downwards and only rocks a few degrees around vertical.
+   * It is deliberately much larger than the list icon.
+   */
   const int32_t angle =
-      -(TRIG_MAX_ANGLE / 8) +
+      TRIG_MAX_ANGLE / 4 +
       ((int32_t)s_pen_alert_angle_degrees[phase] *
        TRIG_MAX_ANGLE) /
           360;
@@ -619,16 +882,19 @@ void draw_pen_alert_animation(
     ctx,
     GPoint(
       bounds.origin.x + bounds.size.w / 2,
-      center_y
+      center_y - 3
     ),
     angle,
-    44,
+    62,
+    20,
     14,
-    9,
-    3,
-    fill_color,
-    outline_color
+    2,
+    body_color,
+    accent_color,
+    body_outline
   );
+
+  (void)outline_color;
 }
 
 static void draw_medication_icon(
@@ -653,6 +919,7 @@ static void draw_medication_icon(
       ctx,
       frame,
       medication,
+      appearance,
       outline_color
     );
     return;
