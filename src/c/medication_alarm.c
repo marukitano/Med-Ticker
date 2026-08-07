@@ -14,10 +14,18 @@
 #include "confirmation_ui.h"
 #include "medication_ui.h"
 
-#define ALARM_AUDIO_REPEAT_SECONDS 40
+#define ALARM_VISUAL_LEAD_IN_MS 160
+#define ALARM_WINDOW_FLAG_AUDIO_CONSUMED 0x01
 
-static time_t s_alarm_audio_next_allowed = 0;
+static AppTimer *s_alarm_intro_timer;
+static bool s_alarm_visuals_are_paused;
 
+static void alarm_release_visuals(void);
+static void alarm_intro_timer_handler(void *context);
+static void alarm_audio_finish_callback(
+    SpeakerFinishReason reason,
+    void *context
+);
 static void alarm_audio_reset_state(void);
 static void alarm_audio_stop(void);
 static bool alarm_audio_load_next_chunk(void);
@@ -63,6 +71,25 @@ bool alarm_reminder_interval_valid(int value) {
     default:
       return false;
   }
+}
+
+bool alarm_visuals_paused(void) {
+  return s_alarm_visuals_are_paused;
+}
+
+static void alarm_release_visuals(void) {
+  if (!s_alarm_visuals_are_paused) {
+    return;
+  }
+
+  s_alarm_visuals_are_paused = false;
+
+  /*
+   * The static alert frame has already been drawn. From here on the normal
+   * UI animation and pill rigid-body physics may resume.
+   */
+  mark_scene_dirty();
+  pill_physics_update_activity();
 }
 
 void load_alarm_settings(void) {
@@ -139,12 +166,18 @@ void apply_alarm_settings(
       s_alarm_audio_volume == 0 ||
       speaker_is_muted()
     ) {
-      alarm_audio_stop();
+      if (s_alarm_audio_active) {
+        alarm_audio_stop();
+        alarm_release_visuals();
+      }
     } else if (s_alarm_audio_active) {
       speaker_set_volume(s_alarm_audio_volume);
-    } else {
-      (void)alarm_audio_start();
     }
+
+    /*
+     * Never start a fresh sound merely because settings changed while an
+     * alarm is already active. The acoustic alert is strictly one-shot.
+     */
   }
 }
 
@@ -160,11 +193,37 @@ static void alarm_audio_reset_state(void) {
 static void alarm_audio_stop(void) {
   cancel_timer(&s_alarm_audio_pump_timer);
 
-  if (s_alarm_audio_active) {
+  const bool was_active = s_alarm_audio_active;
+
+  /*
+   * Clear this first so a finish callback caused by speaker_stop() cannot
+   * accidentally release an intro that is being cancelled.
+   */
+  s_alarm_audio_active = false;
+
+  if (was_active) {
     speaker_stop();
   }
 
   alarm_audio_reset_state();
+}
+
+static void alarm_audio_finish_callback(
+    SpeakerFinishReason reason,
+    void *context
+) {
+  (void)reason;
+  (void)context;
+
+  if (!s_alarm_audio_active) {
+    return;
+  }
+
+  cancel_timer(&s_alarm_audio_pump_timer);
+  alarm_audio_reset_state();
+
+  /* The speaker has really drained its PCM buffer. Animation may start. */
+  alarm_release_visuals();
 }
 
 static bool alarm_audio_load_next_chunk(void) {
@@ -175,10 +234,7 @@ static bool alarm_audio_load_next_chunk(void) {
     return false;
   }
 
-  /*
-   * Reaching EOF ends this playback. The alarm pulse logic decides
-   * when another complete playback may start.
-   */
+  /* EOF is handled by alarm_audio_pump(), which drains the stream. */
   if (
     s_alarm_audio_resource_offset >=
         s_alarm_audio_resource_size
@@ -228,6 +284,7 @@ static void alarm_audio_schedule_pump(void) {
 
   if (!s_alarm_audio_pump_timer) {
     alarm_audio_stop();
+    alarm_release_visuals();
   }
 }
 
@@ -248,8 +305,22 @@ static void alarm_audio_pump(void *context) {
       s_alarm_audio_buffer_offset >=
           s_alarm_audio_buffer_size
     ) {
+      if (
+        s_alarm_audio_resource_offset >=
+            s_alarm_audio_resource_size
+      ) {
+        /*
+         * Do not call speaker_stop() at EOF: that cuts buffered samples.
+         * close() drains the hardware buffer and the finish callback tells
+         * us when the acoustic intro has actually ended.
+         */
+        speaker_stream_close();
+        return;
+      }
+
       if (!alarm_audio_load_next_chunk()) {
         alarm_audio_stop();
+        alarm_release_visuals();
         return;
       }
     }
@@ -702,13 +773,61 @@ static void alarm_vibrate(void) {
 }
 
 void alarm_stop(void) {
+  cancel_timer(&s_alarm_intro_timer);
   cancel_timer(&s_alarm_pulse_timer);
   vibes_cancel();
+
+  s_alarm_visuals_are_paused = false;
   alarm_audio_stop();
-  s_alarm_audio_next_allowed = 0;
+
   s_alarm_active = false;
   s_alarm_stop_time = 0;
   s_alarm_due_symbol_mask = 0;
+}
+
+static void alarm_intro_timer_handler(void *context) {
+  (void)context;
+  s_alarm_intro_timer = NULL;
+
+  if (!s_alarm_active) {
+    s_alarm_visuals_are_paused = false;
+    return;
+  }
+
+  /*
+   * The event loop has had time to paint the pattern and the first static
+   * medication frame. Start haptics now and keep only haptics repeating.
+   */
+  alarm_pulse_timer_handler(NULL);
+
+  if (!s_alarm_active) {
+    s_alarm_visuals_are_paused = false;
+    return;
+  }
+
+  const bool audio_already_consumed =
+      (
+        s_alarm_window_state.reserved[0] &
+        ALARM_WINDOW_FLAG_AUDIO_CONSUMED
+      ) != 0;
+
+  if (audio_already_consumed) {
+    alarm_release_visuals();
+    return;
+  }
+
+  /*
+   * Consume the acoustic opportunity before attempting playback. This makes
+   * it at-most-once per intake window even after a crash, mute state or later
+   * reminder wakeup. The existing reserved byte keeps persistence compatible.
+   */
+  s_alarm_window_state.reserved[0] |=
+      ALARM_WINDOW_FLAG_AUDIO_CONSUMED;
+  persist_alarm_window_state();
+
+  if (!alarm_audio_start()) {
+    alarm_release_visuals();
+  }
 }
 
 static void alarm_pulse_timer_handler(void *context) {
@@ -726,17 +845,8 @@ static void alarm_pulse_timer_handler(void *context) {
     return;
   }
 
+  /* Vibration may repeat; acoustic playback never does. */
   alarm_vibrate();
-
-  if (
-    !s_alarm_audio_active &&
-    now >= s_alarm_audio_next_allowed
-  ) {
-    if (alarm_audio_start()) {
-      s_alarm_audio_next_allowed =
-          now + ALARM_AUDIO_REPEAT_SECONDS;
-    }
-  }
 
   s_alarm_pulse_timer = app_timer_register(
     ALARM_VIBE_INTERVAL_MS,
@@ -759,13 +869,12 @@ void alarm_start(void) {
     return;
   }
 
-  refresh_app_screen_state();
-
   const time_t now = time(NULL);
   const uint8_t due_mask =
       alarm_unconfirmed_symbol_mask_at(now);
 
   if (due_mask == 0) {
+    refresh_app_screen_state();
     schedule_next_alarm_wakeup();
     return;
   }
@@ -779,7 +888,24 @@ void alarm_start(void) {
   s_alarm_active = true;
   s_alarm_stop_time = now + ALARM_ACTIVE_SECONDS;
 
-  alarm_pulse_timer_handler(NULL);
+  /*
+   * Freeze all dynamic alert work before rebuilding the screen. The first
+   * frame therefore contains the final pattern and rendered medication, but
+   * no pill physics or pen animation yet.
+   */
+  s_alarm_visuals_are_paused = true;
+  refresh_app_screen_state();
+
+  cancel_timer(&s_alarm_intro_timer);
+  s_alarm_intro_timer = app_timer_register(
+    ALARM_VISUAL_LEAD_IN_MS,
+    alarm_intro_timer_handler,
+    NULL
+  );
+
+  if (!s_alarm_intro_timer) {
+    alarm_intro_timer_handler(NULL);
+  }
 }
 
 static void alarm_wakeup_handler(
@@ -928,6 +1054,10 @@ void alarm_confirmation_received(
 void medication_alarm_init(void) {
   load_alarm_settings();
 
+  speaker_set_finish_callback(
+    alarm_audio_finish_callback,
+    NULL
+  );
   wakeup_service_subscribe(alarm_wakeup_handler);
 
   WakeupId launch_wakeup_id;
@@ -946,4 +1076,5 @@ void medication_alarm_init(void) {
 
 void medication_alarm_deinit(void) {
   alarm_stop();
+  speaker_set_finish_callback(NULL, NULL);
 }

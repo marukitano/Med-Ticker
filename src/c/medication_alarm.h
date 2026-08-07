@@ -3,6 +3,7 @@
 #include "app_types.h"
 
 /* Alarm scheduling, wakeups, audio and vibration. */
+bool alarm_visuals_paused(void);
 void medication_alarm_init(void);
 void medication_alarm_deinit(void);
 void alarm_confirmation_received(

@@ -144,7 +144,8 @@ void theme_shake_process_accel(
     sample->did_vibrate ||
     s_theme_mode != THEME_MODE_SHAKE ||
     !s_pill_physics_window_visible ||
-    s_transfer_screen_active
+    s_transfer_screen_active ||
+    alarm_visuals_paused()
   ) {
     reset_theme_shake_detector();
     return;
@@ -682,16 +683,27 @@ static void ui_timer_callback(void *context) {
     return;
   }
 
-  if (!s_confirmed_screen_active) {
-    s_animation_tick =
-        (s_animation_tick + 1) %
-        (FRAME_COUNT * PILL_TICKS_PER_FRAME);
+  const bool visuals_paused =
+      alarm_visuals_paused();
 
-    update_taken_button_hint_pulse();
+  if (!visuals_paused) {
+    if (!s_confirmed_screen_active) {
+      s_animation_tick =
+          (s_animation_tick + 1) %
+          (FRAME_COUNT * PILL_TICKS_PER_FRAME);
+
+      update_taken_button_hint_pulse();
+    }
+
+    sync_medication_marquee(true);
+    mark_scene_dirty();
+  } else {
+    /*
+     * During the one-shot acoustic intro the first alert frame stays
+     * completely static. This keeps redraw work away from PCM streaming.
+     */
+    sync_medication_marquee(false);
   }
-
-  sync_medication_marquee(true);
-  mark_scene_dirty();
 
   s_ui_timer = app_timer_register(
     UI_TICK_MS,
