@@ -13,7 +13,7 @@ void alarm_handle_minute_tick(
 );
 void alarm_refresh_window_state(void);
 bool alarm_reminder_interval_valid(int value);
-void alarm_reset_after_settings_save(void);
+bool alarm_reset_after_settings_save(void);
 void alarm_start(void);
 void alarm_stop(void);
 uint8_t alarm_unconfirmed_symbol_mask_at(

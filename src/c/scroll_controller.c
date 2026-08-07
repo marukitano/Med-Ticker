@@ -14,6 +14,7 @@
 #include "confirmation_ui.h"
 #include "medication_ui.h"
 
+static int16_t scroll_canvas_height(void);
 static int32_t snap_anchor_for_index(int index);
 static int clamp_snap_index(int index);
 static void band_animation_tick(
@@ -60,22 +61,23 @@ static void touch_update(
 static void touch_end(void);
 #endif
 
+static int16_t scroll_canvas_height(void) {
+  if (!s_canvas_layer) {
+    return 228;
+  }
+
+  return layer_get_bounds(s_canvas_layer).size.h;
+}
+
 static int32_t snap_anchor_for_index(int index) {
   if (index <= 0) {
     return CANVAS_START_OFFSET_Y;
   }
 
-  const int medication_index = index - 1;
-
-  const int32_t row_center_from_pill_center =
-      s_frame_height / 2 +
-      MEDICATION_HEADER_OFFSET_Y +
-      MEDICATION_HEADER_HEIGHT +
-      medication_index *
-          (MEDICATION_ROW_HEIGHT + MEDICATION_ROW_GAP) +
-      MEDICATION_ROW_HEIGHT / 2;
-
-  return -row_center_from_pill_center;
+  return MEDICATION_PAGE_SNAP_OFFSET(
+    scroll_canvas_height(),
+    index - 1
+  );
 }
 
 static int clamp_snap_index(int index) {
@@ -107,7 +109,7 @@ int32_t visual_canvas_offset_y(void) {
 void set_band_layer_x_q8(
     int32_t x_q8
 ) {
-  if (!s_band_layer) {
+  if (!s_band_layer || !s_canvas_layer) {
     return;
   }
 
@@ -127,21 +129,20 @@ void set_band_layer_x_q8(
         SCROLL_Q8
       );
 
+  const GRect canvas_bounds =
+      layer_get_bounds(s_canvas_layer);
+
   /* Beim Ausfahren bleibt der Balken an der ersten Zeile. */
   if (!s_band.target_visible) {
     frame.origin.y =
         (int16_t)(
-          current_pill_y() +
-          s_frame_height +
-          MEDICATION_HEADER_OFFSET_Y +
-          MEDICATION_HEADER_HEIGHT
+          MEDICATION_PAGE_ROW_TOP(
+            canvas_bounds.size.h,
+            0
+          ) +
+          visual_canvas_offset_y()
         );
-  } else if (s_canvas_layer) {
-    const GRect canvas_bounds =
-        layer_get_bounds(
-          s_canvas_layer
-        );
-
+  } else {
     frame.origin.y =
         (
           canvas_bounds.size.h -
@@ -305,10 +306,7 @@ void update_band_animation_target(void) {
     return;
   }
 
-  if (
-    s_confirmed_screen_active ||
-    s_transfer_screen_active
-  ) {
+  if (s_transfer_screen_active) {
     set_band_and_arrow_hidden(true);
     return;
   }
@@ -901,7 +899,6 @@ bool step_snap_index(int direction) {
 #if defined(PBL_TOUCH)
 static void touch_begin(const TouchEvent *event) {
   if (
-    s_confirmed_screen_active ||
     s_transfer_screen_active ||
     s_confirmation_state != CONFIRM_IDLE
   ) {

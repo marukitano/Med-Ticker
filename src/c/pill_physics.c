@@ -823,7 +823,7 @@ static void pill_rb_initialize_body(
   if (s_canvas_layer) {
     const GRect bounds = layer_get_bounds(s_canvas_layer);
     arena_width = bounds.size.w;
-    arena_height = (int16_t)pill_arena_bottom_y();
+    arena_height = bounds.size.h;
     arena_y = (int16_t)pill_arena_origin_y();
   }
 
@@ -1687,7 +1687,7 @@ static void pill_physics_tick(void *context) {
   if (s_canvas_layer) {
     const GRect bounds = layer_get_bounds(s_canvas_layer);
     arena_width = bounds.size.w;
-    arena_height = (int16_t)pill_arena_bottom_y();
+    arena_height = bounds.size.h;
     arena_y = (int16_t)pill_arena_origin_y();
   }
 

@@ -3,6 +3,7 @@ var LEGACY_MEDICATION_STORAGE_KEY = 'pill-reminder-medication-v1';
 var MEDICATIONS_STORAGE_KEY = 'pill-reminder-medications-v2';
 var DAYPART_STORAGE_KEY = 'pill-reminder-dayparts-v1';
 var ALARM_STORAGE_KEY = 'pill-reminder-alarm-v1';
+var SETTINGS_TRANSACTION_STORAGE_KEY = 'pill-reminder-settings-transaction-v1';
 
 var MAX_MEDICATIONS = 8;
 var MINUTES_PER_DAY = 1440;
@@ -31,6 +32,10 @@ var REMINDER_INTERVAL_KEY = 20;
 var MED_COLOR2_KEY = 21;
 var MED_SIZE_KEY = 22;
 var MED_IMPRINT_KEY = 23;
+var MED_DOSAGE_KEY = 24;
+var MED_EFFECT_KEY = 25;
+var SETTINGS_TRANSACTION_KEY = 26;
+var SETTINGS_ACK_KEY = 27;
 
 
 var COMMAND_RESET = 0;
@@ -56,8 +61,9 @@ var REMINDER_INTERVALS = [1, 5, 10, 15, 20, 30, 60];
 var DEFAULT_REMINDER_INTERVAL = 15;
 
 var DEFAULT_MEDICATION = {
-  name: 'Xarelto 20 mg',
-  dosage: '',
+  name: 'Xarelto',
+  dosage: '20 mg',
+  effect: 'Blutverdünner',
   quantity: 1,
   time: 0,
   schedule: 0,
@@ -222,6 +228,7 @@ function cloneDefaultMedication() {
   return {
     name: DEFAULT_MEDICATION.name,
     dosage: DEFAULT_MEDICATION.dosage,
+    effect: DEFAULT_MEDICATION.effect,
     quantity: DEFAULT_MEDICATION.quantity,
     time: DEFAULT_MEDICATION.time,
     schedule: DEFAULT_MEDICATION.schedule,
@@ -241,6 +248,7 @@ function blankMedication() {
   return {
     name: '',
     dosage: '',
+    effect: '',
     quantity: 1,
     time: 0,
     schedule: 0,
@@ -303,6 +311,12 @@ function normalizeMedication(value) {
     : '';
 
   dosage = truncateUtf8(dosage, 20);
+
+  var effect = typeof value.effect === 'string'
+    ? value.effect.trim()
+    : '';
+
+  effect = truncateUtf8(effect, 31);
 
   var quantity = integerInRange(value.quantity, 1, 20)
     ? value.quantity
@@ -394,6 +408,7 @@ function normalizeMedication(value) {
   return {
     name: name,
     dosage: dosage,
+    effect: effect,
     quantity: quantity,
     time: time,
     schedule: schedule,
@@ -540,6 +555,8 @@ function sendMedicationAt(
   message[MED_INDEX_KEY] = index;
   message[MED_COUNT_KEY] = medications.length;
   message[MED_NAME_KEY] = medication.name;
+  message[MED_DOSAGE_KEY] = medication.dosage || '';
+  message[MED_EFFECT_KEY] = medication.effect || '';
   message[MED_QUANTITY_KEY] = medication.quantity;
   message[MED_TIME_KEY] = medication.time;
   message[MED_SCHEDULE_KEY] = medication.schedule;
@@ -572,7 +589,21 @@ function sendAllSettings(
     medications,
     alarm
 ) {
+  var transaction = Math.floor(
+    Date.now() % 2147483647
+  );
+
+  if (transaction <= 0) {
+    transaction = 1;
+  }
+
+  localStorage.setItem(
+    SETTINGS_TRANSACTION_STORAGE_KEY,
+    String(transaction)
+  );
+
   var commitSettings = {};
+  commitSettings[SETTINGS_TRANSACTION_KEY] = transaction;
 
   commitSettings[THEME_KEY] =
       theme === 'light' ? 1 : 0;
@@ -844,7 +875,7 @@ function configurationPage(
     'return "<option value=\\""+value+"\\""+(value===current?" selected":"")+">"+label+"</option>";',
     '}',
     'function blankMedication(){',
-    'return {name:"",dosage:"",quantity:1,time:0,schedule:0,day:0,symbol:-1,shape:-1,color:-1,color2:-1,size:100,imprint:"",iconSet:false,enabled:false};',
+    'return {name:"",dosage:"",effect:"",quantity:1,time:0,schedule:0,day:0,symbol:-1,shape:-1,color:-1,color2:-1,size:100,imprint:"",iconSet:false,enabled:false};',
     '}',
     'function numberValue(card,name){',
     'return parseInt(card.querySelector("[data-field=\\""+name+"\\"]").value,10);',
@@ -855,6 +886,7 @@ function configurationPage(
     'for(var i=0;i<cards.length;i++){',
     'var card=cards[i];',
     'var dosage=card.querySelector("[data-field=\\"dosage\\"]").value.trim().slice(0,20);',
+    'var effect=card.querySelector("[data-field=\\"effect\\"]").value.trim().slice(0,31);',
     'var schedule=numberValue(card,"schedule");',
     'var day=schedule===1?numberValue(card,"weekday"):(schedule===2?numberValue(card,"monthday"):0);',
     'var symbol=numberValue(card,"symbol");',
@@ -868,6 +900,7 @@ function configurationPage(
     'result.push({',
     'name:card.querySelector("[data-field=\\"name\\"]").value.trim(),',
     'dosage:dosage,',
+    'effect:effect,',
     'quantity:numberValue(card,"quantity"),',
     'time:numberValue(card,"time"),',
     'schedule:schedule,',
@@ -1070,6 +1103,7 @@ function configurationPage(
     'var med=medications[i];',
     'var title=med.name||"Neues Medikament";',
     'var dosage=typeof med.dosage==="string"?med.dosage.slice(0,20):"";',
+    'var effect=typeof med.effect==="string"?med.effect.slice(0,31):"";',
     'var iconReady=med.iconSet===true;',
     'var imprint=typeof med.imprint==="string"?med.imprint.slice(0,5):"";',
     'var previewClass=med.shape>=0&&med.shape<=4?"pill-shape shape-"+med.shape:"pill-shape hidden";',
@@ -1081,7 +1115,7 @@ function configurationPage(
     '}else{summaryStyle="background-color:"+pebbleColorHex(med.color);}',
     'summaryIcon="<span class=\\"summary-icon summary-shape-"+med.shape+"\\" style=\\""+summaryStyle+"\\"></span>";',
     '}else if(med.symbol===1){summaryIcon="<span class=\\"summary-icon summary-pen\\"></span>";}',
-    'var sub=timeNames[med.time]+(dosage?" · "+dosage:"")+(med.quantity>1?" · x"+med.quantity:"")+(med.enabled?"":" · aus");',
+    'var sub=timeNames[med.time]+(dosage?" · "+dosage:"")+(effect?" · "+effect:"")+(med.quantity>1?" · x"+med.quantity:"")+(med.enabled?"":" · aus");',
     'html+="<section class=\\"card\\" data-index=\\""+i+"\\">";',
     'html+="<div class=\\"card-header\\">";',
     'html+="<button class=\\"drag-handle\\" type=\\"button\\" data-drag=\\""+i+"\\" aria-label=\\"Medikament verschieben\\"><span></span><span></span><span></span></button>";',
@@ -1089,6 +1123,7 @@ function configurationPage(
     'html+="<span><span class=\\"summary-main\\"><span class=\\"summary-name\\">"+escapeHtml(title)+"</span>"+summaryIcon+"</span><span class=\\"summary-sub\\">"+escapeHtml(sub)+"</span></span><span class=\\"arrow\\">›</span></button></div>";',
     'html+="<div class=\\"body hidden\\">";',
     'html+="<label>Name<input data-field=\\"name\\" type=\\"text\\" required maxlength=\\"31\\" value=\\""+escapeHtml(med.name)+"\\"></label>";',
+    'html+="<label>Wirkung<input data-field=\\"effect\\" type=\\"text\\" maxlength=\\"31\\" value=\\""+escapeHtml(effect)+"\\" placeholder=\\"z. B. Blutverdünner\\"></label>";',
     'html+="<label>Dosierung<input data-field=\\"dosage\\" type=\\"text\\" maxlength=\\"20\\" value=\\""+escapeHtml(dosage)+"\\" placeholder=\\"z. B. 20 mg\\"></label>";',
     'html+="<label>Menge<input data-field=\\"quantity\\" type=\\"number\\" min=\\"1\\" max=\\"20\\" required value=\\""+med.quantity+"\\"></label>";',
     'html+="<label>Zeitpunkt<select data-field=\\"time\\">";',
@@ -1258,6 +1293,49 @@ Pebble.addEventListener('showConfiguration', function() {
   Pebble.openURL(
     'data:text/html;charset=utf-8,' +
     encodeURIComponent(page)
+  );
+});
+
+Pebble.addEventListener('appmessage', function(event) {
+  if (!event || !event.payload) {
+    return;
+  }
+
+  var rawAcknowledged =
+      event.payload[SETTINGS_ACK_KEY];
+
+  if (typeof rawAcknowledged === 'undefined') {
+    rawAcknowledged = event.payload.SETTINGS_ACK;
+  }
+
+  var acknowledged = parseInt(
+    rawAcknowledged,
+    10
+  );
+  var pending = parseInt(
+    localStorage.getItem(
+      SETTINGS_TRANSACTION_STORAGE_KEY
+    ),
+    10
+  );
+
+  if (
+    !isFinite(acknowledged) ||
+    acknowledged <= 0 ||
+    !isFinite(pending) ||
+    acknowledged !== pending
+  ) {
+    return;
+  }
+
+  localStorage.removeItem(
+    SETTINGS_TRANSACTION_STORAGE_KEY
+  );
+
+  console.log(
+    'Watch confirmed settings transaction ' +
+    acknowledged +
+    ' including intake reset'
   );
 });
 

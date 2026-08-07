@@ -25,6 +25,9 @@ static MedicationTime medication_time_for_minute(
 static bool medication_group_is_confirmed(
     MedicationSymbol symbol
 );
+static bool medication_name_is_listed(
+    const char *name
+);
 static bool medication_matches_group(
     const MedicationSettings *medication,
     MedicationTime visible_time,
@@ -120,6 +123,36 @@ static bool medication_group_is_confirmed(
       symbol == MEDICATION_SYMBOL_PILL
           ? s_pills_confirmed
           : s_pen_confirmed;
+}
+
+static bool medication_name_is_listed(
+    const char *name
+) {
+  if (!name || name[0] == '\0') {
+    return true;
+  }
+
+  for (
+    uint8_t row_index = 0;
+    row_index < s_list_row_count;
+    row_index++
+  ) {
+    const int8_t medication_index =
+        s_row_medication_indices[row_index];
+
+    if (
+      medication_index >= 0 &&
+      medication_index < (int8_t)s_medication_count &&
+      strcmp(
+        s_medications[medication_index].name,
+        name
+      ) == 0
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 void mark_medication_group_confirmed(
@@ -279,6 +312,51 @@ void rebuild_medication_rows(void) {
     if (group_has_medication) {
       append_confirmation_row(symbol);
     }
+  }
+}
+
+void rebuild_all_medication_rows(void) {
+  s_visible_medication_time =
+      current_medication_time();
+  s_visible_medication_time_set = true;
+  s_list_row_count = 0;
+
+  memset(
+    s_row_medication_indices,
+    -1,
+    sizeof(s_row_medication_indices)
+  );
+
+  for (
+    uint8_t index = 0;
+    index < s_medication_count;
+    index++
+  ) {
+    const MedicationSettings *medication =
+        &s_medications[index];
+
+    /*
+     * Derselbe Medikamentenname kann für mehrere
+     * Einnahmezeiten konfiguriert sein. In der
+     * Übersicht wird er trotzdem nur einmal gezeigt.
+     */
+    if (medication_name_is_listed(medication->name)) {
+      continue;
+    }
+
+    format_medication_label(
+      medication,
+      s_row_labels[s_list_row_count],
+      sizeof(s_row_labels[s_list_row_count])
+    );
+
+    s_rows[s_list_row_count] =
+        s_row_labels[s_list_row_count];
+    s_row_kinds[s_list_row_count] =
+        MEDICATION_ROW_ITEM;
+    s_row_medication_indices[s_list_row_count] =
+        (int8_t)index;
+    s_list_row_count++;
   }
 }
 

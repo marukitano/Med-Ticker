@@ -6,8 +6,9 @@
 void draw_medications(
     GContext *ctx,
     GRect bounds,
-    int32_t pill_y,
-    GColor text_color
+    int32_t scroll_offset_y,
+    GColor text_color,
+    GColor background_color
 );
 void draw_physics_pills(
     GContext *ctx,

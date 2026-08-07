@@ -28,10 +28,17 @@ static void draw_confirmation_circle(
     GRect bounds
 );
 static int16_t current_check_stroke_radius(void);
-static void draw_round_line(
+static void draw_round_line_with_radius(
     GContext *ctx,
     GPoint start,
-    GPoint end
+    GPoint end,
+    int16_t radius
+);
+static void draw_checkmark(
+    GContext *ctx,
+    GRect bounds,
+    int16_t size,
+    int16_t radius
 );
 static void draw_confirmation_checkmark(
     GContext *ctx,
@@ -102,8 +109,11 @@ static void draw_confirmation_circle(
   graphics_fill_circle(
     ctx,
     GPoint(
-      bounds.size.w + CONFIRM_CENTER_OUTSIDE_X,
-      bounds.size.h / 2
+      bounds.origin.x +
+          bounds.size.w +
+          CONFIRM_CENTER_OUTSIDE_X,
+      bounds.origin.y +
+          bounds.size.h / 2
     ),
     (uint16_t)s_confirm_radius
   );
@@ -118,17 +128,17 @@ static int16_t current_check_stroke_radius(void) {
   return radius < 1 ? 1 : radius;
 }
 
-static void draw_round_line(
+static void draw_round_line_with_radius(
     GContext *ctx,
     GPoint start,
-    GPoint end
+    GPoint end,
+    int16_t radius
 ) {
   const int16_t dx = end.x - start.x;
   const int16_t dy = end.y - start.y;
   const int16_t abs_dx = dx < 0 ? -dx : dx;
   const int16_t abs_dy = dy < 0 ? -dy : dy;
   const int16_t steps = abs_dx > abs_dy ? abs_dx : abs_dy;
-  const int16_t radius = current_check_stroke_radius();
 
   if (steps <= 0) {
     graphics_fill_circle(ctx, start, radius);
@@ -147,17 +157,18 @@ static void draw_round_line(
   }
 }
 
-static void draw_confirmation_checkmark(
+static void draw_checkmark(
     GContext *ctx,
-    GRect bounds
+    GRect bounds,
+    int16_t size,
+    int16_t radius
 ) {
-  if (s_check_state == CHECK_HIDDEN || s_check_size <= 0) {
-    return;
-  }
-
-  const int16_t center_x = bounds.size.w / 2;
-  const int16_t center_y = bounds.size.h / 2;
-  const int16_t size = s_check_size;
+  const int16_t center_x =
+      bounds.origin.x +
+      bounds.size.w / 2;
+  const int16_t center_y =
+      bounds.origin.y +
+      bounds.size.h / 2;
 
   const GPoint start = GPoint(
     center_x - (size * 42) / 100,
@@ -175,8 +186,57 @@ static void draw_confirmation_checkmark(
   );
 
   graphics_context_set_fill_color(ctx, GColorWhite);
-  draw_round_line(ctx, start, middle);
-  draw_round_line(ctx, middle, end);
+  draw_round_line_with_radius(
+    ctx,
+    start,
+    middle,
+    radius
+  );
+  draw_round_line_with_radius(
+    ctx,
+    middle,
+    end,
+    radius
+  );
+}
+
+static void draw_confirmation_checkmark(
+    GContext *ctx,
+    GRect bounds
+) {
+  if (s_check_state == CHECK_HIDDEN || s_check_size <= 0) {
+    return;
+  }
+
+  draw_checkmark(
+    ctx,
+    bounds,
+    s_check_size,
+    current_check_stroke_radius()
+  );
+}
+
+void draw_confirmed_page(
+    GContext *ctx,
+    GRect bounds
+) {
+  graphics_context_set_fill_color(
+    ctx,
+    GColorGreen
+  );
+  graphics_fill_rect(
+    ctx,
+    bounds,
+    0,
+    GCornerNone
+  );
+
+  draw_checkmark(
+    ctx,
+    bounds,
+    CHECK_POP_SETTLE_SIZE,
+    CHECK_STROKE_RADIUS
+  );
 }
 
 static bool first_unconfirmed_due_symbol(
@@ -983,6 +1043,13 @@ void select_button_up(
     ClickRecognizerRef recognizer,
     void *context
 ) {
+  if (
+    s_confirmed_screen_active &&
+    !s_transfer_screen_active
+  ) {
+    return;
+  }
+
   if (s_confirmation_state == CONFIRM_COMPLETE) {
     if (unconfirmed_medication_group_is_due()) {
       refresh_app_screen_state();
@@ -1021,6 +1088,18 @@ void show_transfer_screen(void) {
 
   s_transfer_screen_active = true;
   s_confirmed_screen_active = false;
+
+  if (s_confirmation_layer) {
+    GRect frame =
+        layer_get_frame(s_confirmation_layer);
+    frame.origin.x = 0;
+    frame.origin.y = 0;
+    layer_set_frame(
+      s_confirmation_layer,
+      frame
+    );
+  }
+
   pill_physics_update_activity();
 
   cancel_timer(&s_ui_timer);

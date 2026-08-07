@@ -813,17 +813,26 @@ void alarm_handle_minute_tick(
   schedule_next_alarm_wakeup();
 }
 
-void alarm_reset_after_settings_save(void) {
+bool alarm_reset_after_settings_save(void) {
   alarm_stop();
   wakeup_cancel_all();
 
   time_t window_start = 0;
-  (void)alarm_window_bounds_at(
-    time(NULL),
-    &window_start,
-    NULL,
-    NULL
-  );
+
+  if (
+    !alarm_window_bounds_at(
+      time(NULL),
+      &window_start,
+      NULL,
+      NULL
+    )
+  ) {
+    APP_LOG(
+      APP_LOG_LEVEL_ERROR,
+      "Settings saved, but alarm window reset failed"
+    );
+    return false;
+  }
 
   s_alarm_window_state = (AlarmWindowState) {
     .window_start = (int32_t)window_start,
@@ -831,7 +840,41 @@ void alarm_reset_after_settings_save(void) {
     .confirmed_mask = 0
   };
   s_alarm_window_state_loaded = true;
-  persist_alarm_window_state();
+
+  /* Keep the UI mirrors in sync with the persisted reset immediately. */
+  s_pills_confirmed = false;
+  s_pen_confirmed = false;
+
+  const int bytes_written = persist_write_data(
+    ALARM_WINDOW_STATE_PERSIST_KEY,
+    &s_alarm_window_state,
+    sizeof(s_alarm_window_state)
+  );
+
+  AlarmWindowState verified = { 0 };
+  const int bytes_read =
+      persist_read_data(
+        ALARM_WINDOW_STATE_PERSIST_KEY,
+        &verified,
+        sizeof(verified)
+      );
+
+  const bool reset_verified =
+      bytes_written ==
+          (int)sizeof(s_alarm_window_state) &&
+      bytes_read == (int)sizeof(verified) &&
+      verified.window_start ==
+          s_alarm_window_state.window_start &&
+      verified.last_reminder == 0 &&
+      verified.confirmed_mask == 0;
+
+  if (!reset_verified) {
+    APP_LOG(
+      APP_LOG_LEVEL_ERROR,
+      "Settings saved, but intake reset could not be verified"
+    );
+    return false;
+  }
 
   if (!s_transfer_screen_active) {
     refresh_app_screen_state();
@@ -840,8 +883,9 @@ void alarm_reset_after_settings_save(void) {
 
   APP_LOG(
     APP_LOG_LEVEL_INFO,
-    "Settings saved: alarm plan reset"
+    "Settings saved: intake state reset and verified"
   );
+  return true;
 }
 
 void alarm_confirmation_received(

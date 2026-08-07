@@ -112,6 +112,7 @@ static void draw_tablet_icon(
     GContext *ctx,
     GRect frame,
     const MedicationSettings *medication,
+    const MedicationAppearance *appearance,
     GColor outline_color
 );
 static void draw_pen_icon(
@@ -124,7 +125,20 @@ static void draw_medication_icon(
     GContext *ctx,
     GRect frame,
     const MedicationSettings *medication,
+    const MedicationAppearance *appearance,
     GColor outline_color
+);
+static int16_t medication_name_width(
+    const char *name
+);
+static int16_t medication_marquee_offset(
+    int16_t overflow
+);
+static void draw_medication_name(
+    GContext *ctx,
+    const char *name,
+    GRect frame,
+    int row_index
 );
 static void draw_physics_round_line(
     GContext *ctx,
@@ -296,10 +310,26 @@ static void draw_tablet_icon(
     GContext *ctx,
     GRect frame,
     const MedicationSettings *medication,
+    const MedicationAppearance *appearance,
     GColor outline_color
 ) {
+  const bool use_appearance =
+      appearance && appearance->valid;
+  const uint8_t shape =
+      use_appearance
+          ? appearance->shape
+          : medication->shape;
   const GColor fill_color = {
-    .argb = medication->color
+    .argb =
+        use_appearance
+            ? appearance->primary_color
+            : medication->color
+  };
+  const GColor second_fill_color = {
+    .argb =
+        use_appearance
+            ? appearance->secondary_color
+            : medication->color
   };
 
   const int16_t center_x =
@@ -307,7 +337,7 @@ static void draw_tablet_icon(
   const int16_t center_y =
       frame.origin.y + frame.size.h / 2;
 
-  switch (medication->shape) {
+  switch (shape) {
     case 0:
       graphics_context_set_fill_color(
         ctx,
@@ -357,6 +387,85 @@ static void draw_tablet_icon(
         7,
         fill_color,
         outline_color
+      );
+
+      graphics_context_set_stroke_color(
+        ctx,
+        outline_color
+      );
+      graphics_context_set_stroke_width(
+        ctx,
+        2
+      );
+      graphics_draw_line(
+        ctx,
+        GPoint(center_x, center_y - 5),
+        GPoint(center_x, center_y + 5)
+      );
+      break;
+
+    case 4:
+      /*
+       * The full medication appearance owns the second colour. Draw the
+       * compact list icon as one outlined capsule with two joined inner
+       * halves, matching the two-colour pill used by the physics renderer.
+       */
+      graphics_context_set_fill_color(
+        ctx,
+        outline_color
+      );
+      graphics_fill_rect(
+        ctx,
+        GRect(
+          center_x - 15,
+          center_y - 7,
+          30,
+          14
+        ),
+        7,
+        GCornersAll
+      );
+
+      graphics_context_set_fill_color(
+        ctx,
+        fill_color
+      );
+      graphics_fill_circle(
+        ctx,
+        GPoint(center_x - 8, center_y),
+        5
+      );
+      graphics_fill_rect(
+        ctx,
+        GRect(
+          center_x - 8,
+          center_y - 5,
+          8,
+          10
+        ),
+        0,
+        GCornerNone
+      );
+
+      graphics_context_set_fill_color(
+        ctx,
+        second_fill_color
+      );
+      graphics_fill_rect(
+        ctx,
+        GRect(
+          center_x,
+          center_y - 5,
+          8,
+          10
+        ),
+        0,
+        GCornerNone
+      );
+      graphics_fill_circle(
+        ctx,
+        GPoint(center_x + 8, center_y),
+        5
       );
 
       graphics_context_set_stroke_color(
@@ -507,6 +616,7 @@ static void draw_medication_icon(
     GContext *ctx,
     GRect frame,
     const MedicationSettings *medication,
+    const MedicationAppearance *appearance,
     GColor outline_color
 ) {
   if (
@@ -533,6 +643,7 @@ static void draw_medication_icon(
     ctx,
     frame,
     medication,
+    appearance,
     outline_color
   );
 }
@@ -1614,9 +1725,12 @@ void draw_physics_pills(
     GRect bounds,
     int32_t arena_y
 ) {
+  const int32_t page_top =
+      visual_canvas_offset_y();
+
   if (
-    arena_y <= -s_frame_height ||
-    arena_y >= bounds.size.h
+    page_top >= bounds.size.h ||
+    page_top + bounds.size.h <= 0
   ) {
     return;
   }
@@ -1634,18 +1748,152 @@ void draw_physics_pills(
   }
 }
 
+static int16_t medication_name_width(
+    const char *name
+) {
+  const GSize size =
+      graphics_text_layout_get_content_size(
+        name,
+        s_medication_font,
+        GRect(
+          0,
+          0,
+          1000,
+          MEDICATION_NAME_LINE_HEIGHT
+        ),
+        GTextOverflowModeFill,
+        GTextAlignmentLeft
+      );
+
+  return size.w;
+}
+
+static int16_t medication_marquee_offset(
+    int16_t overflow
+) {
+  if (overflow <= 0) {
+    return 0;
+  }
+
+  const uint16_t travel_ticks =
+      (uint16_t)(
+        (
+          overflow +
+          MEDICATION_MARQUEE_PIXELS_PER_TICK - 1
+        ) /
+        MEDICATION_MARQUEE_PIXELS_PER_TICK
+      );
+
+  const uint16_t cycle_ticks =
+      MEDICATION_MARQUEE_START_PAUSE_TICKS +
+      travel_ticks +
+      MEDICATION_MARQUEE_END_PAUSE_TICKS;
+
+  if (cycle_ticks == 0) {
+    return 0;
+  }
+
+  const uint16_t phase =
+      s_medication_marquee_tick % cycle_ticks;
+
+  if (
+    phase <
+        MEDICATION_MARQUEE_START_PAUSE_TICKS
+  ) {
+    return 0;
+  }
+
+  const uint16_t travel_phase =
+      phase -
+      MEDICATION_MARQUEE_START_PAUSE_TICKS;
+
+  if (travel_phase >= travel_ticks) {
+    return overflow;
+  }
+
+  const int16_t offset =
+      (int16_t)(
+        travel_phase *
+        MEDICATION_MARQUEE_PIXELS_PER_TICK
+      );
+
+  return offset < overflow
+      ? offset
+      : overflow;
+}
+
+static void draw_medication_name(
+    GContext *ctx,
+    const char *name,
+    GRect frame,
+    int row_index
+) {
+  const int16_t name_width =
+      medication_name_width(name);
+
+  const int16_t overflow =
+      name_width - frame.size.w;
+
+  if (
+    row_index != s_medication_marquee_row ||
+    overflow <= 0
+  ) {
+    graphics_draw_text(
+      ctx,
+      name,
+      s_medication_font,
+      frame,
+      GTextOverflowModeTrailingEllipsis,
+      GTextAlignmentLeft,
+      NULL
+    );
+    return;
+  }
+
+  const int16_t offset =
+      medication_marquee_offset(overflow);
+
+  graphics_draw_text(
+    ctx,
+    name,
+    s_medication_font,
+    GRect(
+      frame.origin.x - offset,
+      frame.origin.y,
+      name_width + 2,
+      frame.size.h
+    ),
+    GTextOverflowModeFill,
+    GTextAlignmentLeft,
+    NULL
+  );
+}
+
 void draw_medications(
     GContext *ctx,
     GRect bounds,
-    int32_t pill_y,
-    GColor text_color
+    int32_t scroll_offset_y,
+    GColor text_color,
+    GColor background_color
 ) {
-  const int32_t label_y =
-      pill_y +
-      s_frame_height +
-      MEDICATION_HEADER_OFFSET_Y;
+  int16_t page_height = 228;
 
-  const int32_t rows_y = label_y + MEDICATION_HEADER_HEIGHT;
+  if (s_canvas_layer) {
+    page_height =
+        layer_get_bounds(s_canvas_layer).size.h;
+  }
+
+  const int32_t label_y =
+      MEDICATION_PAGE_HEADER_TOP(
+        page_height
+      ) +
+      scroll_offset_y;
+
+  const int32_t rows_y =
+      MEDICATION_PAGE_FIRST_ROW_TOP(
+        page_height
+      ) +
+      scroll_offset_y;
 
   if (
     rows_y +
@@ -1660,7 +1908,9 @@ void draw_medications(
 
   graphics_draw_text(
     ctx,
-    "MEDICATIONS",
+    s_confirmed_screen_active
+        ? "ALLE MEDIKAMENTE"
+        : "EINNAHME",
     s_header_font,
     GRect(
       bounds.origin.x + 10,
@@ -1685,68 +1935,138 @@ void draw_medications(
       continue;
     }
 
-    GRect text_frame = GRect(
-      bounds.origin.x + 8,
-      (int16_t)row_y + 3,
-      bounds.size.w - 16,
-      MEDICATION_ROW_HEIGHT - 3
-    );
-
-    GTextAlignment alignment =
-        GTextAlignmentCenter;
-
     if (
-      s_row_kinds[index] ==
+      s_row_kinds[index] !=
           MEDICATION_ROW_ITEM
     ) {
-      const int8_t medication_index =
-          s_row_medication_indices[index];
-
-      if (
-        medication_index >= 0 &&
-        medication_index <
-            (int8_t)s_medication_count
-      ) {
-        draw_medication_icon(
-          ctx,
-          GRect(
-            bounds.origin.x +
-                MEDICATION_ICON_LEFT,
-            (int16_t)row_y +
-                (
-                  MEDICATION_ROW_HEIGHT -
-                  MEDICATION_ICON_SIZE
-                ) /
-                2,
-            MEDICATION_ICON_SIZE,
-            MEDICATION_ICON_SIZE
-          ),
-          &s_medications[medication_index],
-          text_color
-        );
-
-        text_frame = GRect(
-          bounds.origin.x +
-              MEDICATION_ICON_TEXT_X,
-          (int16_t)row_y + 3,
-          bounds.size.w -
-              MEDICATION_ICON_TEXT_X -
-              MEDICATION_ICON_TEXT_RIGHT,
-          MEDICATION_ROW_HEIGHT - 3
-        );
-
-        alignment = GTextAlignmentLeft;
-      }
+      graphics_draw_text(
+        ctx,
+        s_rows[index],
+        s_medication_font,
+        GRect(
+          bounds.origin.x + 8,
+          (int16_t)row_y +
+              (
+                MEDICATION_ROW_HEIGHT -
+                MEDICATION_NAME_LINE_HEIGHT
+              ) /
+              2,
+          bounds.size.w - 16,
+          MEDICATION_NAME_LINE_HEIGHT
+        ),
+        GTextOverflowModeTrailingEllipsis,
+        GTextAlignmentCenter,
+        NULL
+      );
+      continue;
     }
+
+    const int8_t medication_index =
+        s_row_medication_indices[index];
+
+    if (
+      medication_index < 0 ||
+      medication_index >=
+          (int8_t)s_medication_count
+    ) {
+      continue;
+    }
+
+    const MedicationSettings *medication =
+        &s_medications[medication_index];
+
+    const GRect name_frame = GRect(
+      bounds.origin.x +
+          MEDICATION_ICON_TEXT_X,
+      (int16_t)row_y +
+          MEDICATION_NAME_LINE_Y,
+      bounds.size.w -
+          MEDICATION_ICON_TEXT_X -
+          MEDICATION_ICON_TEXT_RIGHT,
+      MEDICATION_NAME_LINE_HEIGHT
+    );
+
+    draw_medication_name(
+      ctx,
+      s_rows[index],
+      name_frame,
+      index
+    );
 
     graphics_draw_text(
       ctx,
-      s_rows[index],
-      s_medication_font,
-      text_frame,
+      medication->effect,
+      s_medication_detail_font,
+      GRect(
+        name_frame.origin.x,
+        (int16_t)row_y +
+            MEDICATION_EFFECT_LINE_Y,
+        name_frame.size.w,
+        MEDICATION_DETAIL_LINE_HEIGHT
+      ),
       GTextOverflowModeTrailingEllipsis,
-      alignment,
+      GTextAlignmentLeft,
       NULL
+    );
+
+    graphics_draw_text(
+      ctx,
+      medication->dosage,
+      s_medication_detail_font,
+      GRect(
+        name_frame.origin.x,
+        (int16_t)row_y +
+            MEDICATION_DOSAGE_LINE_Y,
+        name_frame.size.w,
+        MEDICATION_DETAIL_LINE_HEIGHT
+      ),
+      GTextOverflowModeTrailingEllipsis,
+      GTextAlignmentLeft,
+      NULL
+    );
+
+    if (index == s_medication_marquee_row) {
+      graphics_context_set_fill_color(
+        ctx,
+        background_color
+      );
+      graphics_fill_rect(
+        ctx,
+        GRect(
+          bounds.origin.x,
+          (int16_t)row_y,
+          MEDICATION_ICON_TEXT_X,
+          MEDICATION_ROW_HEIGHT
+        ),
+        0,
+        GCornerNone
+      );
+    }
+
+    const MedicationAppearance *appearance =
+        medication_index <
+            (int8_t)s_medication_appearance_count &&
+        s_medication_appearances[medication_index].valid
+            ? &s_medication_appearances[medication_index]
+            : NULL;
+
+    draw_medication_icon(
+      ctx,
+      GRect(
+        bounds.origin.x +
+            MEDICATION_ICON_LEFT,
+        (int16_t)row_y +
+            (
+              MEDICATION_ROW_HEIGHT -
+              MEDICATION_ICON_SIZE
+            ) /
+            2,
+        MEDICATION_ICON_SIZE,
+        MEDICATION_ICON_SIZE
+      ),
+      medication,
+      appearance,
+      text_color
     );
   }
 }

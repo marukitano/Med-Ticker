@@ -15,12 +15,13 @@
 #include "medication_ui.h"
 
 static GColor theme_foreground_color(void);
+static bool scroll_input_allowed(void);
 static void destroy_pill_bitmaps(void);
 static void canvas_update_proc(
     Layer *layer,
     GContext *ctx
 );
-static void cover_below_pill_arena(
+static void cover_scrolled_alert_area(
     GContext *ctx,
     GRect bounds
 );
@@ -31,6 +32,9 @@ static void band_arrow_update_proc(
 static void band_update_proc(
     Layer *layer,
     GContext *ctx
+);
+static void sync_medication_marquee(
+    bool advance
 );
 static void ui_timer_callback(void *context);
 static void start_ui_timer(void);
@@ -62,8 +66,15 @@ static GColor theme_foreground_color(void) {
       : GColorWhite;
 }
 
+static bool scroll_input_allowed(void) {
+  return
+      !s_transfer_screen_active &&
+      s_confirmation_state == CONFIRM_IDLE;
+}
+
 void mark_scene_dirty(void) {
   update_band_animation_target();
+  sync_medication_marquee(false);
 
   if (s_canvas_layer) {
     layer_mark_dirty(s_canvas_layer);
@@ -142,35 +153,27 @@ int32_t pill_arena_origin_y(void) {
       CANVAS_START_OFFSET_Y;
 }
 
-int32_t pill_arena_bottom_y(void) {
-  return
-      pill_arena_origin_y() +
-      s_frame_height +
-      MEDICATION_HEADER_OFFSET_Y -
-      PILL_PHYSICS_TO_HEADER_GAP;
-}
-
 int32_t current_pill_y(void) {
   return
       pill_arena_origin_y() +
       visual_canvas_offset_y();
 }
 
-static void cover_below_pill_arena(
+static void cover_scrolled_alert_area(
     GContext *ctx,
     GRect bounds
 ) {
-  const int32_t arena_bottom =
-      pill_arena_bottom_y() +
+  const int32_t alert_bottom =
+      (int32_t)bounds.size.h +
       visual_canvas_offset_y();
 
-  if (arena_bottom >= bounds.size.h) {
+  if (alert_bottom >= bounds.size.h) {
     return;
   }
 
   const int16_t cover_y =
-      arena_bottom > 0
-          ? (int16_t)arena_bottom
+      alert_bottom > 0
+          ? (int16_t)alert_bottom
           : 0;
 
   graphics_context_set_fill_color(
@@ -195,12 +198,38 @@ static void canvas_update_proc(
     GContext *ctx
 ) {
   const GRect bounds = layer_get_bounds(layer);
+  const int32_t scroll_offset_y =
+      visual_canvas_offset_y();
 
   graphics_context_set_fill_color(
     ctx,
     theme_background_color()
   );
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+
+  if (s_confirmed_screen_active) {
+    draw_confirmed_page(
+      ctx,
+      GRect(
+        bounds.origin.x,
+        (int16_t)(
+          bounds.origin.y +
+          scroll_offset_y
+        ),
+        bounds.size.w,
+        bounds.size.h
+      )
+    );
+
+    draw_medications(
+      ctx,
+      bounds,
+      scroll_offset_y,
+      theme_foreground_color(),
+      theme_background_color()
+    );
+    return;
+  }
 
   if (!s_sheet) {
     return;
@@ -209,12 +238,13 @@ static void canvas_update_proc(
   const int32_t pill_y = current_pill_y();
 
   draw_physics_pills(ctx, bounds, pill_y);
-  cover_below_pill_arena(ctx, bounds);
+  cover_scrolled_alert_area(ctx, bounds);
   draw_medications(
     ctx,
     bounds,
-    pill_y,
-    theme_foreground_color()
+    scroll_offset_y,
+    theme_foreground_color(),
+    theme_background_color()
   );
 }
 
@@ -295,8 +325,9 @@ static void band_update_proc(
   draw_medications(
     ctx,
     content_bounds,
-    current_pill_y() - frame.origin.y,
-    theme_background_color()
+    visual_canvas_offset_y() - frame.origin.y,
+    theme_background_color(),
+    theme_foreground_color()
   );
 
   draw_taken_button_hint(
@@ -307,22 +338,63 @@ static void band_update_proc(
   );
 }
 
+static void sync_medication_marquee(
+    bool advance
+) {
+  int8_t active_row = -1;
+
+  if (
+    s_scroll.mode == SCROLL_IDLE &&
+    !s_band.animating &&
+    s_band.target_visible &&
+    s_scroll.snap_index > 0
+  ) {
+    const int row_index =
+        s_scroll.snap_index - 1;
+
+    if (
+      row_index >= 0 &&
+      row_index < LIST_ROW_COUNT &&
+      s_row_kinds[row_index] ==
+          MEDICATION_ROW_ITEM
+    ) {
+      active_row = (int8_t)row_index;
+    }
+  }
+
+  if (active_row != s_medication_marquee_row) {
+    s_medication_marquee_row = active_row;
+    s_medication_marquee_tick = 0;
+    return;
+  }
+
+  if (
+    advance &&
+    active_row >= 0
+  ) {
+    s_medication_marquee_tick++;
+  }
+}
+
 static void ui_timer_callback(void *context) {
   s_ui_timer = NULL;
 
   if (
     !s_canvas_layer ||
-    s_confirmed_screen_active ||
     s_transfer_screen_active
   ) {
     return;
   }
 
-  s_animation_tick =
-      (s_animation_tick + 1) %
-      (FRAME_COUNT * PILL_TICKS_PER_FRAME);
+  if (!s_confirmed_screen_active) {
+    s_animation_tick =
+        (s_animation_tick + 1) %
+        (FRAME_COUNT * PILL_TICKS_PER_FRAME);
 
-  update_taken_button_hint_pulse();
+    update_taken_button_hint_pulse();
+  }
+
+  sync_medication_marquee(true);
   mark_scene_dirty();
 
   s_ui_timer = app_timer_register(
@@ -335,10 +407,7 @@ static void ui_timer_callback(void *context) {
 static void start_ui_timer(void) {
   cancel_timer(&s_ui_timer);
 
-  if (
-    s_confirmed_screen_active ||
-    s_transfer_screen_active
-  ) {
+  if (s_transfer_screen_active) {
     return;
   }
 
@@ -353,11 +422,7 @@ static void scroll_up_handler(
     ClickRecognizerRef recognizer,
     void *context
 ) {
-  if (
-    !s_confirmed_screen_active &&
-    !s_transfer_screen_active &&
-    s_confirmation_state == CONFIRM_IDLE
-  ) {
+  if (scroll_input_allowed()) {
     step_snap_index(-1);
   }
 }
@@ -366,11 +431,7 @@ static void scroll_down_handler(
     ClickRecognizerRef recognizer,
     void *context
 ) {
-  if (
-    !s_confirmed_screen_active &&
-    !s_transfer_screen_active &&
-    s_confirmation_state == CONFIRM_IDLE
-  ) {
+  if (scroll_input_allowed()) {
     step_snap_index(1);
   }
 }
@@ -452,6 +513,8 @@ static bool load_pill_sheet(void) {
 
 static void reset_ui_state(GRect bounds) {
   s_animation_tick = 0;
+  s_medication_marquee_tick = 0;
+  s_medication_marquee_row = -1;
   s_taken_hint_phase = -1;
 
   const int32_t initial_position_q8 =
@@ -514,8 +577,6 @@ void refresh_app_screen_state(void) {
   }
 
   reset_medication_confirmations();
-  rebuild_medication_rows();
-  pill_physics_rebuild();
 
   const bool show_confirmed_screen =
       alarm_unconfirmed_symbol_mask_at(
@@ -528,73 +589,50 @@ void refresh_app_screen_state(void) {
   s_confirmed_screen_active =
       show_confirmed_screen;
 
+  if (show_confirmed_screen) {
+    rebuild_all_medication_rows();
+  } else {
+    rebuild_medication_rows();
+  }
+
+  pill_physics_rebuild();
+
   if (!s_canvas_layer) {
     return;
   }
 
-  if (show_confirmed_screen) {
-    cancel_timer(&s_ui_timer);
-    cancel_timer(&s_band_animation_timer);
-    cancel_scroll_physics();
+  cancel_timer(&s_ui_timer);
+  cancel_timer(&s_band_animation_timer);
+  cancel_scroll_physics();
 
 #if defined(PBL_TOUCH)
-    s_touch.dragging = false;
+  s_touch.dragging = false;
 #endif
 
+  layer_set_hidden(
+    s_canvas_layer,
+    false
+  );
+
+  reset_ui_state(
+    layer_get_bounds(s_canvas_layer)
+  );
+
+  if (s_confirmation_layer) {
     layer_set_hidden(
-      s_canvas_layer,
-      true
+      s_confirmation_layer,
+      show_confirmed_screen
     );
-    set_band_and_arrow_hidden(true);
-
-    if (s_confirmation_layer) {
-      layer_set_hidden(
-        s_confirmation_layer,
-        false
-      );
-
-      /*
-       * Wird der letzte offene Eintrag gerade bestätigt, läuft die
-       * vorhandene Hakenanimation weiter. Bei einem normalen App-Start
-       * wird derselbe Endzustand sofort statisch dargestellt.
-       */
-      if (
-        s_confirmation_state !=
-            CONFIRM_COMPLETE
-      ) {
-        s_confirm_radius =
-            s_confirm_max_radius;
-        s_confirmation_state =
-            CONFIRM_COMPLETE;
-        s_confirmation_symbol_set = false;
-        s_check_size =
-            CHECK_POP_SETTLE_SIZE;
-        s_check_state = CHECK_VISIBLE;
-      }
-
-      layer_mark_dirty(
-        s_confirmation_layer
-      );
-    }
-  } else {
-    layer_set_hidden(
-      s_canvas_layer,
-      false
-    );
-
-    if (s_confirmation_layer) {
-      layer_set_hidden(
-        s_confirmation_layer,
-        false
-      );
-    }
-
-    reset_ui_state(
-      layer_get_bounds(s_canvas_layer)
-    );
-    start_ui_timer();
-    mark_scene_dirty();
   }
+
+  /*
+   * Der grüne Haken ist nur der Inhalt von Seite 0.
+   * Der Interaktionszustand bleibt exakt derselbe wie
+   * auf der normalen Pillenseite: CONFIRM_IDLE.
+   */
+
+  start_ui_timer();
+  mark_scene_dirty();
 
   pill_physics_update_activity();
 
@@ -603,7 +641,7 @@ void refresh_app_screen_state(void) {
       APP_LOG_LEVEL_INFO,
       "App screen: %s",
       show_confirmed_screen
-          ? "confirmed"
+          ? "confirmed with all medications"
           : "alert"
     );
   }
@@ -614,7 +652,9 @@ static void window_load(Window *window) {
   const GRect bounds = layer_get_bounds(root);
 
   s_medication_font =
-      fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
+      fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
+  s_medication_detail_font =
+      fonts_get_system_font(FONT_KEY_GOTHIC_18);
   s_header_font =
       fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
 
@@ -726,7 +766,6 @@ static void window_appear(Window *window) {
   }
 
   if (
-    !s_confirmed_screen_active &&
     !s_transfer_screen_active &&
     s_band.animating
   ) {

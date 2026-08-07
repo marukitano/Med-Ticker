@@ -11,6 +11,10 @@ void confirmation_update_proc(
     Layer *layer,
     GContext *ctx
 );
+void draw_confirmed_page(
+    GContext *ctx,
+    GRect bounds
+);
 void draw_taken_button_hint(
     GContext *ctx,
     GRect layer_bounds,

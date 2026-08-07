@@ -34,7 +34,11 @@
       "REMINDER_INTERVAL": 20,
       "MED_COLOR2": 21,
       "MED_SIZE": 22,
-      "MED_IMPRINT": 23
+      "MED_IMPRINT": 23,
+      "MED_DOSAGE": 24,
+      "MED_EFFECT": 25,
+      "SETTINGS_TRANSACTION": 26,
+      "SETTINGS_ACK": 27
     },
     "projectType": "native",
     "resources": {

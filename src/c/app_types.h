@@ -78,20 +78,46 @@
 #define CHECK_POP_SETTLE_SIZE 80
 #define CHECK_POP_OVERSHOOT_SIZE 140
 
-#define HINT_HEIGHT 10
-#define HINT_POSITION_ADJUST_Y -18
-
-#define MEDICATION_GAP 54
-#define MEDICATION_HEADER_OFFSET_Y \
-  ( \
-    MEDICATION_GAP - 7 + \
-    HINT_POSITION_ADJUST_Y + \
-    HINT_HEIGHT + 15 \
-  )
-#define PILL_PHYSICS_TO_HEADER_GAP 40
 #define MEDICATION_HEADER_HEIGHT 28
-#define MEDICATION_ROW_HEIGHT 50
+#define MEDICATION_ROW_HEIGHT 72
 #define MEDICATION_ROW_GAP 8
+
+#define MEDICATION_NAME_LINE_Y 0
+#define MEDICATION_NAME_LINE_HEIGHT 28
+#define MEDICATION_EFFECT_LINE_Y 26
+#define MEDICATION_DETAIL_LINE_HEIGHT 22
+#define MEDICATION_DOSAGE_LINE_Y 48
+#define MEDICATION_MARQUEE_START_PAUSE_TICKS 8
+#define MEDICATION_MARQUEE_END_PAUSE_TICKS 6
+#define MEDICATION_MARQUEE_PIXELS_PER_TICK 2
+
+/*
+ * The alert and medication views are two complete stacked pages.
+ * Page 0 occupies one full screen. Page 1 starts exactly one screen below it,
+ * with its first row centered vertically.
+ */
+#define MEDICATION_PAGE_FIRST_ROW_TOP(screen_height) \
+  ( \
+    (screen_height) + \
+    ((screen_height) - MEDICATION_ROW_HEIGHT) / 2 \
+  )
+#define MEDICATION_PAGE_HEADER_TOP(screen_height) \
+  ( \
+    MEDICATION_PAGE_FIRST_ROW_TOP(screen_height) - \
+    MEDICATION_HEADER_HEIGHT \
+  )
+#define MEDICATION_PAGE_ROW_TOP(screen_height, row_index) \
+  ( \
+    MEDICATION_PAGE_FIRST_ROW_TOP(screen_height) + \
+    (row_index) * \
+        (MEDICATION_ROW_HEIGHT + MEDICATION_ROW_GAP) \
+  )
+#define MEDICATION_PAGE_SNAP_OFFSET(screen_height, row_index) \
+  ( \
+    -(screen_height) - \
+    (row_index) * \
+        (MEDICATION_ROW_HEIGHT + MEDICATION_ROW_GAP) \
+  )
 #define MEDICATION_ICON_SIZE 30
 #define MEDICATION_ICON_LEFT 10
 #define MEDICATION_ICON_TEXT_X 46
@@ -104,8 +130,13 @@
 #define LEGACY_MEDICATION_PERSIST_KEY 201
 #define MEDICATION_LIST_PERSIST_KEY 202
 #define MEDICATION_COUNT_PERSIST_KEY 203
-#define SETTINGS_MESSAGE_BUFFER_SIZE 320
+#define MEDICATION_ITEM_PERSIST_KEY_BASE 230
+#define SETTINGS_MESSAGE_BUFFER_SIZE 512
+#define SETTINGS_ACK_OUTBOX_SIZE 128
+#define SETTINGS_ACK_RETRY_MS 1000
 #define MEDICATION_NAME_LENGTH 32
+#define MEDICATION_DOSAGE_LENGTH 21
+#define MEDICATION_EFFECT_LENGTH 32
 #define MEDICATION_LABEL_LENGTH 48
 #define MAX_MEDICATIONS 8
 #define MAX_LIST_ROWS (MAX_MEDICATIONS + 2)
@@ -213,6 +244,21 @@ typedef struct {
 
 typedef struct {
   char name[MEDICATION_NAME_LENGTH];
+  uint8_t quantity;
+  uint8_t time;
+  uint8_t schedule;
+  uint8_t day;
+  uint8_t symbol;
+  uint8_t shape;
+  uint8_t color;
+  uint8_t icon_set;
+  uint8_t enabled;
+} LegacyMedicationSettingsV2;
+
+typedef struct {
+  char name[MEDICATION_NAME_LENGTH];
+  char dosage[MEDICATION_DOSAGE_LENGTH];
+  char effect[MEDICATION_EFFECT_LENGTH];
   uint8_t quantity;
   uint8_t time;
   uint8_t schedule;
