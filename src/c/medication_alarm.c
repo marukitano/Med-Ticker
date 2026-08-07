@@ -14,6 +14,10 @@
 #include "confirmation_ui.h"
 #include "medication_ui.h"
 
+#define ALARM_AUDIO_REPEAT_SECONDS 40
+
+static time_t s_alarm_audio_next_allowed = 0;
+
 static void alarm_audio_reset_state(void);
 static void alarm_audio_stop(void);
 static bool alarm_audio_load_next_chunk(void);
@@ -171,11 +175,15 @@ static bool alarm_audio_load_next_chunk(void) {
     return false;
   }
 
+  /*
+   * Reaching EOF ends this playback. The alarm pulse logic decides
+   * when another complete playback may start.
+   */
   if (
     s_alarm_audio_resource_offset >=
         s_alarm_audio_resource_size
   ) {
-    s_alarm_audio_resource_offset = 0;
+    return false;
   }
 
   const size_t bytes_remaining =
@@ -272,12 +280,6 @@ static void alarm_audio_pump(void *context) {
       s_alarm_audio_buffer_size = 0;
       s_alarm_audio_buffer_offset = 0;
 
-      if (
-        s_alarm_audio_resource_offset >=
-            s_alarm_audio_resource_size
-      ) {
-        s_alarm_audio_resource_offset = 0;
-      }
     }
   }
 
@@ -703,6 +705,7 @@ void alarm_stop(void) {
   cancel_timer(&s_alarm_pulse_timer);
   vibes_cancel();
   alarm_audio_stop();
+  s_alarm_audio_next_allowed = 0;
   s_alarm_active = false;
   s_alarm_stop_time = 0;
   s_alarm_due_symbol_mask = 0;
@@ -716,15 +719,23 @@ static void alarm_pulse_timer_handler(void *context) {
     return;
   }
 
-  if (time(NULL) >= s_alarm_stop_time) {
+  const time_t now = time(NULL);
+
+  if (now >= s_alarm_stop_time) {
     alarm_stop();
     return;
   }
 
   alarm_vibrate();
 
-  if (!s_alarm_audio_active) {
-    (void)alarm_audio_start();
+  if (
+    !s_alarm_audio_active &&
+    now >= s_alarm_audio_next_allowed
+  ) {
+    if (alarm_audio_start()) {
+      s_alarm_audio_next_allowed =
+          now + ALARM_AUDIO_REPEAT_SECONDS;
+    }
   }
 
   s_alarm_pulse_timer = app_timer_register(
