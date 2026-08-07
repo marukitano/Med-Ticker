@@ -78,10 +78,11 @@ Allgemeine Einstellungen:
 - Alarmlautstärke
 - Vibration
 - Erinnerungsintervall
-- Sprache
-- Theme
-- Schweizer Wappen ein/aus
-- Japanisches Hintergrundmuster ein/aus
+- Darstellung: Theme, Sprache, Schweizer Wappen und japanisches Hintergrundmuster
+
+Bei einer frischen Installation richtet sich die Sprache zunächst nach der
+Systemsprache der Pebble. Die Sprache kann anschließend in **Darstellung**
+manuell auf Deutsch oder Englisch gestellt werden.
 
 Die Einstellungen werden lokal gespeichert und über
 **Pebble AppMessage** an die Uhr übertragen.
@@ -223,10 +224,11 @@ General settings include:
 - Alarm volume
 - Vibration
 - Reminder interval
-- Language
-- Theme
-- Swiss emblem on/off
-- Japanese background pattern on/off
+- Appearance: theme, language, Swiss emblem and Japanese background pattern
+
+On a fresh installation, the app initially follows the Pebble system
+language. Language can then be set manually to German or English under
+**Appearance**.
 
 Settings are stored locally and transferred to the watch through
 **Pebble AppMessage**.

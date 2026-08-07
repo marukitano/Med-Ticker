@@ -97,12 +97,55 @@ function currentTheme() {
     : 'dark';
 }
 
+function systemLanguage() {
+  var locale = '';
+
+  try {
+    if (
+      typeof Pebble !== 'undefined' &&
+      typeof Pebble.getActiveWatchInfo === 'function'
+    ) {
+      var watchInfo = Pebble.getActiveWatchInfo();
+
+      if (
+        watchInfo &&
+        typeof watchInfo.language === 'string'
+      ) {
+        locale = watchInfo.language;
+      }
+    }
+  } catch (error) {
+    console.log(
+      'Could not read watch language: ' +
+      error.message
+    );
+  }
+
+  if (
+    !locale &&
+    typeof navigator !== 'undefined'
+  ) {
+    locale =
+        navigator.language ||
+        navigator.userLanguage ||
+        '';
+  }
+
+  return /^de(?:[_-]|$)/i.test(locale)
+      ? 'de'
+      : 'en';
+}
+
 function currentLanguage() {
-  return localStorage.getItem(
+  var stored = localStorage.getItem(
     LANGUAGE_STORAGE_KEY
-  ) === 'en'
-    ? 'en'
-    : 'de';
+  );
+
+  if (stored === 'de' || stored === 'en') {
+    return stored;
+  }
+
+  return systemLanguage();
 }
 
 function normalizeDisplaySettings(value) {
@@ -991,28 +1034,26 @@ function configurationPage(
     '<section id="display-panel" class="collapsed">',
     '<button id="display-toggle" class="toggle" type="button">',
     '<span><span class="summary-main">Darstellung</span>',
-    '<span class="summary-sub">Wappen und Hintergrundmuster</span></span>',
+    '<span class="summary-sub">Theme, Sprache und Details</span></span>',
     '<span class="arrow">›</span>',
     '</button>',
     '<div id="display-body" class="body hidden">',
-    '<label class="check alarm-check"><input id="show-emblem" type="checkbox"' + emblemChecked + '><span>Schweizer Wappen</span></label>',
-    '<label class="check alarm-check"><input id="show-pattern" type="checkbox"' + patternChecked + '><span>Japanisches Muster</span></label>',
-    '</div>',
-    '</section>',
-    '<section class="plain theme-row">',
-    '<h2>Theme</h2>',
+    '<label>Theme',
     '<select id="theme" aria-label="Theme">',
     '<option value="light"' + lightSelected + '>Hell</option>',
     '<option value="dark"' + darkSelected + '>Dunkel</option>',
     '<option value="shake"' + shakeSelected + '>Shake</option>',
     '</select>',
-    '</section>',
-    '<section class="plain theme-row">',
-    '<h2>Sprache</h2>',
+    '</label>',
+    '<label>Sprache',
     '<select id="language" aria-label="Language">',
     '<option value="de"' + germanSelected + '>Deutsch</option>',
     '<option value="en"' + englishSelected + '>English</option>',
     '</select>',
+    '</label>',
+    '<label class="check alarm-check"><input id="show-emblem" type="checkbox"' + emblemChecked + '><span>Schweizer Wappen</span></label>',
+    '<label class="check alarm-check"><input id="show-pattern" type="checkbox"' + patternChecked + '><span>Japanisches Muster</span></label>',
+    '</div>',
     '</section>',
     '<button class="save" type="submit">Übertragen</button>',
     '</form>',
@@ -1023,7 +1064,7 @@ function configurationPage(
     'var medications=' + initialMedications + ';',
     'var language="' + language + '";',
     'function tr(de,en){return language==="en"?en:de;}',
-    'var translations={"Medikamente":"Medications","Hinzufügen, bearbeiten und deaktivieren":"Add, edit and disable","Tageszeiten":"Dayparts","Früh, Mittag, Abend und Nacht":"Morning, noon, evening and night","Früh beginnt":"Morning starts","Mittag beginnt":"Noon starts","Abend beginnt":"Evening starts","Nacht beginnt":"Night starts","Ton, Vibration und Erinnerung":"Sound, vibration and reminders","Alarmsound":"Alarm sound","Lautstärke":"Volume","Erneut erinnern":"Remind again","Darstellung":"Appearance","Wappen und Hintergrundmuster":"Emblem and background pattern","Schweizer Wappen":"Swiss emblem","Japanisches Muster":"Japanese pattern","Hell":"Light","Dunkel":"Dark","Sprache":"Language","Übertragen":"Save to watch","Noch kein Medikament angelegt.":"No medication added yet.","Neues Medikament":"New medication","Medikament verschieben":"Move medication","Wirkung":"Effect","z. B. Blutverdünner":"e.g. blood thinner","Dosierung":"Dosage","z. B. 20 mg":"e.g. 20 mg","Menge":"Quantity","Zeitpunkt":"Time","Früh":"Morning","Mittag":"Noon","Abend":"Evening","Nacht":"Night","Rhythmus":"Schedule","Täglich":"Daily","Wöchentlich":"Weekly","Monatlich":"Monthly","Wochentag":"Weekday","Montag":"Monday","Dienstag":"Tuesday","Mittwoch":"Wednesday","Donnerstag":"Thursday","Freitag":"Friday","Samstag":"Saturday","Sonntag":"Sunday","Tag im Monat":"Day of month","Art":"Type","Bitte auswählen":"Please select","Tablette":"Tablet","Pen / Spritze":"Pen / syringe","Form":"Shape","Rund":"Round","Pille":"Pill","Kapsel":"Capsule","Rhombus":"Diamond","Grösse":"Size","Beschriftung":"Imprint","z. B. 20":"e.g. 20","Farbe":"Color","Farbe 1":"Color 1","Farbe 2":"Color 2","Pen-Farbe":"Pen color","Akzent":"Accent","Farbpalette öffnen":"Open color palette","Aktiv":"Active","Bitte zuerst ein vollständiges Icon auswählen. Erst danach kann das Medikament aktiviert werden.":"Please select a complete icon first. Only then can the medication be activated.","Medikament löschen":"Delete medication","Medikament kopieren":"Copy medication","Schliessen":"Close"};',
+    'var translations={"Medikamente":"Medications","Hinzufügen, bearbeiten und deaktivieren":"Add, edit and disable","Tageszeiten":"Dayparts","Früh, Mittag, Abend und Nacht":"Morning, noon, evening and night","Früh beginnt":"Morning starts","Mittag beginnt":"Noon starts","Abend beginnt":"Evening starts","Nacht beginnt":"Night starts","Ton, Vibration und Erinnerung":"Sound, vibration and reminders","Alarmsound":"Alarm sound","Lautstärke":"Volume","Erneut erinnern":"Remind again","Darstellung":"Appearance","Theme, Sprache und Details":"Theme, language and details","Wappen und Hintergrundmuster":"Emblem and background pattern","Schweizer Wappen":"Swiss emblem","Japanisches Muster":"Japanese pattern","Hell":"Light","Dunkel":"Dark","Sprache":"Language","Übertragen":"Save to watch","Noch kein Medikament angelegt.":"No medication added yet.","Neues Medikament":"New medication","Medikament verschieben":"Move medication","Wirkung":"Effect","z. B. Blutverdünner":"e.g. blood thinner","Dosierung":"Dosage","z. B. 20 mg":"e.g. 20 mg","Menge":"Quantity","Zeitpunkt":"Time","Früh":"Morning","Mittag":"Noon","Abend":"Evening","Nacht":"Night","Rhythmus":"Schedule","Täglich":"Daily","Wöchentlich":"Weekly","Monatlich":"Monthly","Wochentag":"Weekday","Montag":"Monday","Dienstag":"Tuesday","Mittwoch":"Wednesday","Donnerstag":"Thursday","Freitag":"Friday","Samstag":"Saturday","Sonntag":"Sunday","Tag im Monat":"Day of month","Art":"Type","Bitte auswählen":"Please select","Tablette":"Tablet","Pen / Spritze":"Pen / syringe","Form":"Shape","Rund":"Round","Pille":"Pill","Kapsel":"Capsule","Rhombus":"Diamond","Grösse":"Size","Beschriftung":"Imprint","z. B. 20":"e.g. 20","Farbe":"Color","Farbe 1":"Color 1","Farbe 2":"Color 2","Pen-Farbe":"Pen color","Akzent":"Accent","Farbpalette öffnen":"Open color palette","Aktiv":"Active","Bitte zuerst ein vollständiges Icon auswählen. Erst danach kann das Medikament aktiviert werden.":"Please select a complete icon first. Only then can the medication be activated.","Medikament löschen":"Delete medication","Medikament kopieren":"Copy medication","Schliessen":"Close"};',
     'function translateNode(node){',
     'if(language!=="en"||!node){return;}',
     'if(node.nodeType===3){var raw=node.nodeValue;var trimmed=raw.replace(/^\\s+|\\s+$/g,"");if(translations[trimmed]){node.nodeValue=raw.replace(trimmed,translations[trimmed]);}return;}',

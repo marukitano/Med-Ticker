@@ -2001,18 +2001,31 @@ void watch_settings_init(void) {
     s_light_theme = false;
   }
 
-  int stored_language = APP_LANGUAGE_GERMAN;
-
   if (persist_exists(LANGUAGE_PERSIST_KEY)) {
-    stored_language = persist_read_int(
+    const int stored_language = persist_read_int(
       LANGUAGE_PERSIST_KEY
     );
-  }
 
-  s_language =
-      stored_language == APP_LANGUAGE_ENGLISH
-          ? APP_LANGUAGE_ENGLISH
-          : APP_LANGUAGE_GERMAN;
+    s_language =
+        stored_language == APP_LANGUAGE_ENGLISH
+            ? APP_LANGUAGE_ENGLISH
+            : APP_LANGUAGE_GERMAN;
+  } else {
+    /*
+     * On a fresh installation follow the Pebble system language.
+     * German locales use German; all other locales use English.
+     * Once the user saves a language choice, the persisted value wins.
+     */
+    const char *system_locale =
+        i18n_get_system_locale();
+
+    s_language =
+        system_locale &&
+        system_locale[0] == 'd' &&
+        system_locale[1] == 'e'
+            ? APP_LANGUAGE_GERMAN
+            : APP_LANGUAGE_ENGLISH;
+  }
 
   s_show_swiss_emblem =
       !persist_exists(
