@@ -1,4 +1,5 @@
 var THEME_STORAGE_KEY = 'pill-reminder-theme';
+var LANGUAGE_STORAGE_KEY = 'pill-reminder-language-v1';
 var LEGACY_MEDICATION_STORAGE_KEY = 'pill-reminder-medication-v1';
 var MEDICATIONS_STORAGE_KEY = 'pill-reminder-medications-v2';
 var DAYPART_STORAGE_KEY = 'pill-reminder-dayparts-v1';
@@ -36,6 +37,7 @@ var MED_DOSAGE_KEY = 24;
 var MED_EFFECT_KEY = 25;
 var SETTINGS_TRANSACTION_KEY = 26;
 var SETTINGS_ACK_KEY = 27;
+var LANGUAGE_KEY = 28;
 
 
 var COMMAND_RESET = 0;
@@ -79,7 +81,25 @@ var DEFAULT_MEDICATION = {
 };
 
 function currentTheme() {
-  return localStorage.getItem(THEME_STORAGE_KEY) || 'dark';
+  var stored = localStorage.getItem(
+    THEME_STORAGE_KEY
+  );
+
+  return (
+    stored === 'light' ||
+    stored === 'dark' ||
+    stored === 'shake'
+  )
+    ? stored
+    : 'dark';
+}
+
+function currentLanguage() {
+  return localStorage.getItem(
+    LANGUAGE_STORAGE_KEY
+  ) === 'en'
+    ? 'en'
+    : 'de';
 }
 
 function cloneDefaultDayparts() {
@@ -178,13 +198,28 @@ function reminderIntervalIndex(value) {
 }
 
 function normalizeAlarmSettings(value) {
-  var volume = value && integerInRange(
+  var rawVolume = value && integerInRange(
     value.audioVolume,
     0,
     100
   )
     ? value.audioVolume
     : DEFAULT_AUDIO_VOLUME;
+
+  var audioEnabled =
+      value &&
+      typeof value.audioEnabled === 'boolean'
+          ? value.audioEnabled
+          : rawVolume > 0;
+
+  if (!value) {
+    audioEnabled = true;
+  }
+
+  var volume =
+      rawVolume > 0
+          ? rawVolume
+          : DEFAULT_AUDIO_VOLUME;
 
   var reminderInterval =
       value && reminderIntervalIndex(
@@ -194,6 +229,7 @@ function normalizeAlarmSettings(value) {
           : DEFAULT_REMINDER_INTERVAL;
 
   return {
+    audioEnabled: audioEnabled,
     audioVolume: volume,
     vibrationEnabled:
         !value || value.vibrationEnabled !== false,
@@ -607,6 +643,7 @@ function sendMedicationAt(
 
 function sendAllSettings(
     theme,
+    language,
     dayparts,
     medications,
     alarm
@@ -628,7 +665,11 @@ function sendAllSettings(
   commitSettings[SETTINGS_TRANSACTION_KEY] = transaction;
 
   commitSettings[THEME_KEY] =
-      theme === 'light' ? 1 : 0;
+      theme === 'light'
+          ? 1
+          : (theme === 'shake' ? 2 : 0);
+  commitSettings[LANGUAGE_KEY] =
+      language === 'en' ? 1 : 0;
   commitSettings[DAYPART_MORNING_KEY] =
       dayparts.morning;
   commitSettings[DAYPART_NOON_KEY] =
@@ -638,7 +679,9 @@ function sendAllSettings(
   commitSettings[DAYPART_NIGHT_KEY] =
       dayparts.night;
   commitSettings[AUDIO_VOLUME_KEY] =
-      alarm.audioVolume;
+      alarm.audioEnabled
+          ? alarm.audioVolume
+          : 0;
   commitSettings[VIBRATION_ENABLED_KEY] =
       alarm.vibrationEnabled ? 1 : 0;
   commitSettings[REMINDER_INTERVAL_KEY] =
@@ -698,6 +741,7 @@ function timeToMinutes(value) {
 
 function configurationPage(
     theme,
+    language,
     dayparts,
     medications,
     alarm
@@ -711,10 +755,22 @@ function configurationPage(
       theme === 'light' ? ' selected' : '';
   var darkSelected =
       theme === 'dark' ? ' selected' : '';
+  var shakeSelected =
+      theme === 'shake' ? ' selected' : '';
+  var germanSelected =
+      language === 'de' ? ' selected' : '';
+  var englishSelected =
+      language === 'en' ? ' selected' : '';
   var bodyClass =
-      theme === 'dark' ? ' class="dark"' : '';
+      theme === 'light' ? '' : ' class="dark"';
   var alarmSettings = normalizeAlarmSettings(alarm);
   var alarmVolume = alarmSettings.audioVolume;
+  var audioEnabledChecked =
+      alarmSettings.audioEnabled ? ' checked' : '';
+  var audioControlsClass =
+      alarmSettings.audioEnabled
+          ? 'alarm-volume-controls'
+          : 'alarm-volume-controls hidden';
   var vibrationChecked =
       alarmSettings.vibrationEnabled ? ' checked' : '';
   var reminderIntervalSlider =
@@ -872,13 +928,16 @@ function configurationPage(
     '<span class="arrow">›</span>',
     '</button>',
     '<div id="alarm-body" class="body hidden">',
+    '<label class="check alarm-check"><input id="vibration-enabled" type="checkbox"' + vibrationChecked + '><span>Vibration</span></label>',
+    '<label class="check alarm-check"><input id="audio-enabled" type="checkbox"' + audioEnabledChecked + '><span>Alarmsound</span></label>',
+    '<div id="audio-volume-controls" class="' + audioControlsClass + '">',
     '<label class="alarm-volume-label"><span>Lautstärke</span>',
     '<span id="audio-volume-value" class="alarm-volume-value">' + alarmVolume + ' %</span></label>',
-    '<input id="audio-volume" type="range" min="0" max="100" step="1" value="' + alarmVolume + '">',
+    '<input id="audio-volume" type="range" min="1" max="100" step="1" value="' + alarmVolume + '">',
+    '</div>',
     '<label class="alarm-volume-label"><span>Erneut erinnern</span>',
     '<span id="reminder-interval-value" class="alarm-volume-value">' + alarmSettings.reminderInterval + ' min</span></label>',
     '<input id="reminder-interval" type="range" min="0" max="6" step="1" value="' + reminderIntervalSlider + '">',
-    '<label class="check alarm-check"><input id="vibration-enabled" type="checkbox"' + vibrationChecked + '><span>Vibration</span></label>',
     '</div>',
     '</section>',
     '<section class="plain theme-row">',
@@ -886,6 +945,14 @@ function configurationPage(
     '<select id="theme" aria-label="Theme">',
     '<option value="light"' + lightSelected + '>Hell</option>',
     '<option value="dark"' + darkSelected + '>Dunkel</option>',
+    '<option value="shake"' + shakeSelected + '>Shake</option>',
+    '</select>',
+    '</section>',
+    '<section class="plain theme-row">',
+    '<h2>Sprache</h2>',
+    '<select id="language" aria-label="Language">',
+    '<option value="de"' + germanSelected + '>Deutsch</option>',
+    '<option value="en"' + englishSelected + '>English</option>',
     '</select>',
     '</section>',
     '<button class="save" type="submit">Übertragen</button>',
@@ -895,7 +962,19 @@ function configurationPage(
     'var MAX_MEDICATIONS=' + MAX_MEDICATIONS + ';',
     'var dayparts=' + initialDayparts + ';',
     'var medications=' + initialMedications + ';',
-    'var timeNames=["Früh","Mittag","Abend","Nacht"];',
+    'var language="' + language + '";',
+    'function tr(de,en){return language==="en"?en:de;}',
+    'var translations={"Medikamente":"Medications","Hinzufügen, bearbeiten und deaktivieren":"Add, edit and disable","Tageszeiten":"Dayparts","Früh, Mittag, Abend und Nacht":"Morning, noon, evening and night","Früh beginnt":"Morning starts","Mittag beginnt":"Noon starts","Abend beginnt":"Evening starts","Nacht beginnt":"Night starts","Ton, Vibration und Erinnerung":"Sound, vibration and reminders","Alarmsound":"Alarm sound","Lautstärke":"Volume","Erneut erinnern":"Remind again","Hell":"Light","Dunkel":"Dark","Sprache":"Language","Übertragen":"Save to watch","Noch kein Medikament angelegt.":"No medication added yet.","Neues Medikament":"New medication","Medikament verschieben":"Move medication","Wirkung":"Effect","z. B. Blutverdünner":"e.g. blood thinner","Dosierung":"Dosage","z. B. 20 mg":"e.g. 20 mg","Menge":"Quantity","Zeitpunkt":"Time","Früh":"Morning","Mittag":"Noon","Abend":"Evening","Nacht":"Night","Rhythmus":"Schedule","Täglich":"Daily","Wöchentlich":"Weekly","Monatlich":"Monthly","Wochentag":"Weekday","Montag":"Monday","Dienstag":"Tuesday","Mittwoch":"Wednesday","Donnerstag":"Thursday","Freitag":"Friday","Samstag":"Saturday","Sonntag":"Sunday","Tag im Monat":"Day of month","Art":"Type","Bitte auswählen":"Please select","Tablette":"Tablet","Pen / Spritze":"Pen / syringe","Form":"Shape","Rund":"Round","Pille":"Pill","Kapsel":"Capsule","Rhombus":"Diamond","Grösse":"Size","Beschriftung":"Imprint","z. B. 20":"e.g. 20","Farbe":"Color","Farbe 1":"Color 1","Farbe 2":"Color 2","Pen-Farbe":"Pen color","Akzent":"Accent","Farbpalette öffnen":"Open color palette","Aktiv":"Active","Bitte zuerst ein vollständiges Icon auswählen. Erst danach kann das Medikament aktiviert werden.":"Please select a complete icon first. Only then can the medication be activated.","Medikament löschen":"Delete medication","Medikament kopieren":"Copy medication","Schliessen":"Close"};',
+    'function translateNode(node){',
+    'if(language!=="en"||!node){return;}',
+    'if(node.nodeType===3){var raw=node.nodeValue;var trimmed=raw.replace(/^\\s+|\\s+$/g,"");if(translations[trimmed]){node.nodeValue=raw.replace(trimmed,translations[trimmed]);}return;}',
+    'if(node.nodeType!==1){return;}',
+    'var attrs=["placeholder","aria-label","title"];',
+    'for(var attributeIndex=0;attributeIndex<attrs.length;attributeIndex++){var attr=attrs[attributeIndex];var value=node.getAttribute&&node.getAttribute(attr);if(value&&translations[value]){node.setAttribute(attr,translations[value]);}}',
+    'for(var childIndex=0;childIndex<node.childNodes.length;childIndex++){translateNode(node.childNodes[childIndex]);}',
+    '}',
+    'function translatePage(){translateNode(document.body);}',
+    'var timeNames=language==="en"?["Morning","Noon","Evening","Night"]:["Früh","Mittag","Abend","Nacht"];',
     'var reminderIntervals=[1,5,10,15,20,30,60];',
     'function escapeHtml(value){',
     'return String(value).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");',
@@ -1012,8 +1091,8 @@ function configurationPage(
     'card.querySelector(".pen-preview").style.backgroundColor=pebbleColorHex(color);',
     'card.querySelector(".pen-preview-accent").style.backgroundColor=pebbleColorHex(color2);',
     '}',
-    'card.querySelector(".primary-color-label").textContent=isPen?"Pen-Farbe":(isCapsule?"Farbe 1":"Farbe");',
-    'card.querySelector(".secondary-color-label").textContent=isPen?"Akzent":"Farbe 2";',
+    'card.querySelector(".primary-color-label").textContent=isPen?tr("Pen-Farbe","Pen color"):(isCapsule?tr("Farbe 1","Color 1"):tr("Farbe","Color"));',
+    'card.querySelector(".secondary-color-label").textContent=isPen?tr("Akzent","Accent"):tr("Farbe 2","Color 2");',
     'card.querySelector(".second-color-picker").className=(isPen||isCapsule)?"color-picker second-color-picker":"color-picker second-color-picker hidden";',
     'var primaryTile=card.querySelector("[data-palette-toggle=\\"color\\"]");',
     'primaryTile.style.backgroundColor=colorValid?pebbleColorHex(color):"transparent";',
@@ -1155,7 +1234,7 @@ function configurationPage(
     '}else{summaryStyle="background-color:"+pebbleColorHex(med.color);}',
     'summaryIcon="<span class=\\"summary-icon summary-shape-"+med.shape+"\\" style=\\""+summaryStyle+"\\"></span>";',
     '}else if(med.symbol===1){summaryIcon="<span class=\\"summary-icon summary-pen\\"></span>";}',
-    'var sub=timeNames[med.time]+(dosage?" · "+dosage:"")+(effect?" · "+effect:"")+(med.quantity>1?" · x"+med.quantity:"")+(med.enabled?"":" · aus");',
+    'var sub=timeNames[med.time]+(dosage?" · "+dosage:"")+(effect?" · "+effect:"")+(med.quantity>1?" · x"+med.quantity:"")+(med.enabled?"":" · "+tr("aus","off"));',
     'html+="<section class=\\"card\\" data-index=\\""+i+"\\">";',
     'html+="<div class=\\"card-header\\">";',
     'html+="<button class=\\"drag-handle\\" type=\\"button\\" data-drag=\\""+i+"\\" aria-label=\\"Medikament verschieben\\"><span></span><span></span><span></span></button>";',
@@ -1268,9 +1347,14 @@ function configurationPage(
     '};',
     '}',
     'document.getElementById("add").disabled=medications.length>=MAX_MEDICATIONS;',
+    'translatePage();',
     '}',
     'var audioVolume=document.getElementById("audio-volume");',
     'audioVolume.oninput=function(){document.getElementById("audio-volume-value").textContent=this.value+" %";};',
+    'var audioEnabled=document.getElementById("audio-enabled");',
+    'function updateAudioControls(){document.getElementById("audio-volume-controls").className=audioEnabled.checked?"alarm-volume-controls":"alarm-volume-controls hidden";}',
+    'audioEnabled.onchange=updateAudioControls;',
+    'updateAudioControls();',
     'var reminderInterval=document.getElementById("reminder-interval");',
     'reminderInterval.oninput=function(){document.getElementById("reminder-interval-value").textContent=reminderIntervals[parseInt(this.value,10)]+" min";};',
     'document.getElementById("theme").onchange=function(){',
@@ -1301,16 +1385,16 @@ function configurationPage(
     'night:window.__timeToMinutes(document.getElementById("night").value)',
     '};',
     'if(values.morning<0||values.noon<0||values.evening<0||values.night<0||!(values.morning<values.noon&&values.noon<values.evening&&values.evening<values.night)){',
-    'alert("Bitte die Startzeiten in der Reihenfolge Früh, Mittag, Abend und Nacht einstellen.");',
+    'alert(tr("Bitte die Startzeiten in der Reihenfolge Früh, Mittag, Abend und Nacht einstellen.","Please set the start times in the order morning, noon, evening and night."));',
     'document.getElementById("daypart-body").className="body";',
     'document.getElementById("daypart-panel").className="";',
     'return;',
     '}',
     'medications=readMedications();',
     'for(var medicationIndex=0;medicationIndex<medications.length;medicationIndex++){',
-    'if(medications[medicationIndex].enabled&&!medications[medicationIndex].iconSet){alert("Ein aktives Medikament benötigt ein vollständiges Icon.");return;}',
+    'if(medications[medicationIndex].enabled&&!medications[medicationIndex].iconSet){alert(tr("Ein aktives Medikament benötigt ein vollständiges Icon.","An active medication requires a complete icon."));return;}',
     '}',
-    'var result={theme:document.getElementById("theme").value,dayparts:values,medications:medications,alarm:{audioVolume:parseInt(document.getElementById("audio-volume").value,10),vibrationEnabled:document.getElementById("vibration-enabled").checked,reminderInterval:reminderIntervals[parseInt(document.getElementById("reminder-interval").value,10)]}};',
+    'var result={theme:document.getElementById("theme").value,language:document.getElementById("language").value,dayparts:values,medications:medications,alarm:{audioEnabled:document.getElementById("audio-enabled").checked,audioVolume:parseInt(document.getElementById("audio-volume").value,10),vibrationEnabled:document.getElementById("vibration-enabled").checked,reminderInterval:reminderIntervals[parseInt(document.getElementById("reminder-interval").value,10)]}};',
     'document.location="pebblejs://close#"+encodeURIComponent(JSON.stringify(result));',
     '};',
     'window.__timeToMinutes=' + timeToMinutes.toString() + ';',
@@ -1328,6 +1412,7 @@ Pebble.addEventListener('ready', function() {
 Pebble.addEventListener('showConfiguration', function() {
   var page = configurationPage(
     currentTheme(),
+    currentLanguage(),
     currentDayparts(),
     currentMedications(),
     currentAlarmSettings()
@@ -1394,10 +1479,16 @@ Pebble.addEventListener('webviewclosed', function(event) {
 
     if (
       settings.theme !== 'light' &&
-      settings.theme !== 'dark'
+      settings.theme !== 'dark' &&
+      settings.theme !== 'shake'
     ) {
       return;
     }
+
+    var language =
+        settings.language === 'en'
+            ? 'en'
+            : 'de';
 
     var dayparts = normalizeDayparts(
       settings.dayparts
@@ -1417,6 +1508,11 @@ Pebble.addEventListener('webviewclosed', function(event) {
     );
 
     localStorage.setItem(
+      LANGUAGE_STORAGE_KEY,
+      language
+    );
+
+    localStorage.setItem(
       DAYPART_STORAGE_KEY,
       JSON.stringify(dayparts)
     );
@@ -1433,6 +1529,7 @@ Pebble.addEventListener('webviewclosed', function(event) {
 
     sendAllSettings(
       settings.theme,
+      language,
       dayparts,
       medications,
       alarm

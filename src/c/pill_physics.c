@@ -1961,6 +1961,16 @@ static void pill_physics_accel_handler(
     return;
   }
 
+  theme_shake_process_accel(&sample);
+
+  if (
+    s_confirmed_screen_active ||
+    s_transfer_screen_active ||
+    s_pill_physics_body_count == 0
+  ) {
+    return;
+  }
+
   const int16_t target_x = sample.x;
   const int16_t target_y = (int16_t)-sample.y;
   const int16_t old_magnitude =
@@ -2043,14 +2053,29 @@ void pill_physics_stop(void) {
 }
 
 void pill_physics_update_activity(void) {
-  const bool should_run =
+  const bool physics_should_run =
       s_pill_physics_window_visible &&
       !s_confirmed_screen_active &&
       !s_transfer_screen_active &&
       s_pill_physics_body_count > 0;
 
-  if (!should_run) {
-    pill_physics_stop();
+  const bool accel_should_run =
+      s_pill_physics_window_visible &&
+      !s_transfer_screen_active &&
+      (
+        physics_should_run ||
+        s_theme_mode == THEME_MODE_SHAKE
+      );
+
+  if (!physics_should_run) {
+    cancel_timer(&s_pill_physics_timer);
+  }
+
+  if (!accel_should_run) {
+    if (s_pill_physics_accel_subscribed) {
+      accel_data_service_unsubscribe();
+      s_pill_physics_accel_subscribed = false;
+    }
     return;
   }
 
@@ -2065,7 +2090,10 @@ void pill_physics_update_activity(void) {
     s_pill_physics_accel_subscribed = true;
   }
 
-  if (!s_pill_physics_timer) {
+  if (
+    physics_should_run &&
+    !s_pill_physics_timer
+  ) {
     s_pill_physics_quiet_frames = 0;
     pill_physics_schedule_tick(
       s_alarm_active

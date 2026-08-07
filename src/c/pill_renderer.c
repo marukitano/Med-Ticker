@@ -2195,8 +2195,16 @@ void draw_medications(
   graphics_draw_text(
     ctx,
     s_confirmed_screen_active
-        ? "ALLE MEDIKAMENTE"
-        : "EINNAHME",
+        ? (
+            s_language == APP_LANGUAGE_ENGLISH
+                ? "ALL MEDICATIONS"
+                : "ALLE MEDIKAMENTE"
+          )
+        : (
+            s_language == APP_LANGUAGE_ENGLISH
+                ? "INTAKE"
+                : "EINNAHME"
+          ),
     s_header_font,
     GRect(
       bounds.origin.x + 10,

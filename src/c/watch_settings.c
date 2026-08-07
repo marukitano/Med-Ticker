@@ -84,6 +84,10 @@ static void apply_daypart_settings(
     const DaypartSettings *settings,
     bool save
 );
+static void apply_language(
+    AppLanguage language,
+    bool save
+);
 static bool medication_list_valid(
     const MedicationSettings *medications,
     uint8_t count
@@ -534,6 +538,28 @@ static void apply_daypart_settings(
   refresh_medication_rows_for_time();
 }
 
+static void apply_language(
+    AppLanguage language,
+    bool save
+) {
+  if (
+    language > APP_LANGUAGE_ENGLISH
+  ) {
+    language = APP_LANGUAGE_GERMAN;
+  }
+
+  s_language = language;
+
+  if (save) {
+    persist_write_int(
+      LANGUAGE_PERSIST_KEY,
+      (int)s_language
+    );
+  }
+
+  mark_scene_dirty();
+}
+
 static bool medication_list_valid(
     const MedicationSettings *medications,
     uint8_t count
@@ -566,7 +592,15 @@ static int medication_persist_key(uint8_t index) {
 static bool persist_scalar_settings(void) {
   const int theme_written = persist_write_int(
     THEME_PERSIST_KEY,
+    (int)s_theme_mode
+  );
+  const int shake_state_written = persist_write_int(
+    THEME_SHAKE_STATE_PERSIST_KEY,
     s_light_theme ? 1 : 0
+  );
+  const int language_written = persist_write_int(
+    LANGUAGE_PERSIST_KEY,
+    (int)s_language
   );
   const int dayparts_written = persist_write_data(
     DAYPART_PERSIST_KEY,
@@ -595,12 +629,18 @@ static bool persist_scalar_settings(void) {
 
   const bool verified =
       theme_written == (int)sizeof(int32_t) &&
+      shake_state_written == (int)sizeof(int32_t) &&
+      language_written == (int)sizeof(int32_t) &&
       dayparts_written == (int)sizeof(s_dayparts) &&
       volume_written == (int)sizeof(int32_t) &&
       vibration_written == (int)sizeof(int32_t) &&
       interval_written == (int)sizeof(int32_t) &&
       persist_read_int(THEME_PERSIST_KEY) ==
+          (int)s_theme_mode &&
+      persist_read_int(THEME_SHAKE_STATE_PERSIST_KEY) ==
           (s_light_theme ? 1 : 0) &&
+      persist_read_int(LANGUAGE_PERSIST_KEY) ==
+          (int)s_language &&
       dayparts_read == (int)sizeof(verified_dayparts) &&
       memcmp(
         &verified_dayparts,
@@ -1757,6 +1797,10 @@ static void settings_inbox_received(
     iterator,
     MESSAGE_KEY_THEME
   );
+  Tuple *language_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_LANGUAGE
+  );
   Tuple *audio_volume_tuple = dict_find(
     iterator,
     MESSAGE_KEY_AUDIO_VOLUME
@@ -1775,6 +1819,7 @@ static void settings_inbox_received(
   );
 
   int32_t theme_value;
+  int32_t language_value;
   int32_t audio_volume;
   int32_t vibration_enabled;
   int32_t reminder_interval;
@@ -1786,7 +1831,14 @@ static void settings_inbox_received(
       theme_tuple,
       &theme_value
     ) ||
-    (theme_value != 0 && theme_value != 1) ||
+    theme_value < THEME_MODE_DARK ||
+    theme_value > THEME_MODE_SHAKE ||
+    !tuple_read_int32(
+      language_tuple,
+      &language_value
+    ) ||
+    language_value < APP_LANGUAGE_GERMAN ||
+    language_value > APP_LANGUAGE_ENGLISH ||
     !read_dayparts_from_message(
       iterator,
       &dayparts
@@ -1822,8 +1874,12 @@ static void settings_inbox_received(
     return;
   }
 
-  apply_theme(
-    theme_value == 1,
+  apply_theme_mode(
+    (ThemeMode)theme_value,
+    true
+  );
+  apply_language(
+    (AppLanguage)language_value,
     true
   );
   apply_daypart_settings(
@@ -1874,9 +1930,49 @@ static void settings_inbox_received(
 }
 
 void watch_settings_init(void) {
-  s_light_theme =
-      persist_exists(THEME_PERSIST_KEY) &&
-      persist_read_int(THEME_PERSIST_KEY) == 1;
+  int stored_theme = THEME_MODE_DARK;
+
+  if (persist_exists(THEME_PERSIST_KEY)) {
+    stored_theme = persist_read_int(
+      THEME_PERSIST_KEY
+    );
+  }
+
+  if (
+    stored_theme < THEME_MODE_DARK ||
+    stored_theme > THEME_MODE_SHAKE
+  ) {
+    stored_theme = THEME_MODE_DARK;
+  }
+
+  s_theme_mode = (ThemeMode)stored_theme;
+
+  if (s_theme_mode == THEME_MODE_LIGHT) {
+    s_light_theme = true;
+  } else if (s_theme_mode == THEME_MODE_SHAKE) {
+    s_light_theme =
+        persist_exists(
+          THEME_SHAKE_STATE_PERSIST_KEY
+        ) &&
+        persist_read_int(
+          THEME_SHAKE_STATE_PERSIST_KEY
+        ) == 1;
+  } else {
+    s_light_theme = false;
+  }
+
+  int stored_language = APP_LANGUAGE_GERMAN;
+
+  if (persist_exists(LANGUAGE_PERSIST_KEY)) {
+    stored_language = persist_read_int(
+      LANGUAGE_PERSIST_KEY
+    );
+  }
+
+  s_language =
+      stored_language == APP_LANGUAGE_ENGLISH
+          ? APP_LANGUAGE_ENGLISH
+          : APP_LANGUAGE_GERMAN;
 
   load_daypart_settings();
   load_medication_settings();

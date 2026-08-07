@@ -43,6 +43,8 @@ uint16_t s_medication_marquee_tick;
 int8_t s_medication_marquee_row = -1;
 int8_t s_taken_hint_phase;
 bool s_light_theme;
+ThemeMode s_theme_mode = THEME_MODE_DARK;
+AppLanguage s_language = APP_LANGUAGE_GERMAN;
 bool s_confirmed_screen_active;
 
 bool s_transfer_screen_active;

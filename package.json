@@ -38,7 +38,8 @@
       "MED_DOSAGE": 24,
       "MED_EFFECT": 25,
       "SETTINGS_TRANSACTION": 26,
-      "SETTINGS_ACK": 27
+      "SETTINGS_ACK": 27,
+      "LANGUAGE": 28
     },
     "projectType": "native",
     "resources": {
@@ -46,6 +47,16 @@
         {
           "file": "images/pill_rotate_sheet.png",
           "name": "IMAGE_PILL_SHEET",
+          "type": "bitmap"
+        },
+        {
+          "file": "images/seigaiha_dark.png",
+          "name": "IMAGE_SEIGAIHA_DARK",
+          "type": "bitmap"
+        },
+        {
+          "file": "images/seigaiha_light.png",
+          "name": "IMAGE_SEIGAIHA_LIGHT",
           "type": "bitmap"
         },
         {

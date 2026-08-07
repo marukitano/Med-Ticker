@@ -16,7 +16,21 @@
 
 static GColor theme_foreground_color(void);
 static bool scroll_input_allowed(void);
-static GColor alert_pattern_color(void);
+
+static GBitmap *s_alert_pattern_dark_bitmap;
+static GBitmap *s_alert_pattern_light_bitmap;
+static time_t s_theme_shake_last_time;
+static AccelData s_theme_shake_previous_sample;
+static bool s_theme_shake_has_previous_sample;
+static uint8_t s_theme_shake_score;
+
+#define THEME_SHAKE_MEDIUM_DELTA_MG 550
+#define THEME_SHAKE_STRONG_DELTA_MG 900
+#define THEME_SHAKE_TRIGGER_SCORE 5
+#define THEME_SHAKE_MAX_SCORE 7
+
+static void apply_effective_theme(bool light_theme);
+static void reset_theme_shake_detector(void);
 static void draw_alert_background_pattern(
     GContext *ctx,
     GRect bounds
@@ -98,18 +112,8 @@ void mark_scene_dirty(void) {
   }
 }
 
-void apply_theme(
-    bool light_theme,
-    bool save
-) {
+static void apply_effective_theme(bool light_theme) {
   s_light_theme = light_theme;
-
-  if (save) {
-    persist_write_int(
-      THEME_PERSIST_KEY,
-      light_theme ? 1 : 0
-    );
-  }
 
   if (s_window) {
     window_set_background_color(
@@ -127,9 +131,146 @@ void apply_theme(
   }
 }
 
+static void reset_theme_shake_detector(void) {
+  s_theme_shake_has_previous_sample = false;
+  s_theme_shake_score = 0;
+}
 
-static GColor alert_pattern_color(void) {
-  return GColorDarkGray;
+void theme_shake_process_accel(
+    const AccelData *sample
+) {
+  if (
+    !sample ||
+    sample->did_vibrate ||
+    s_theme_mode != THEME_MODE_SHAKE ||
+    !s_pill_physics_window_visible ||
+    s_transfer_screen_active
+  ) {
+    reset_theme_shake_detector();
+    return;
+  }
+
+  if (!s_theme_shake_has_previous_sample) {
+    s_theme_shake_previous_sample = *sample;
+    s_theme_shake_has_previous_sample = true;
+    return;
+  }
+
+  const int32_t delta =
+      abs_int32(
+        (int32_t)sample->x -
+        s_theme_shake_previous_sample.x
+      ) +
+      abs_int32(
+        (int32_t)sample->y -
+        s_theme_shake_previous_sample.y
+      ) +
+      abs_int32(
+        (int32_t)sample->z -
+        s_theme_shake_previous_sample.z
+      );
+
+  s_theme_shake_previous_sample = *sample;
+
+  if (delta >= THEME_SHAKE_STRONG_DELTA_MG) {
+    if (
+      s_theme_shake_score <=
+          THEME_SHAKE_MAX_SCORE - 2
+    ) {
+      s_theme_shake_score += 2;
+    } else {
+      s_theme_shake_score =
+          THEME_SHAKE_MAX_SCORE;
+    }
+  } else if (delta >= THEME_SHAKE_MEDIUM_DELTA_MG) {
+    if (
+      s_theme_shake_score <
+          THEME_SHAKE_MAX_SCORE
+    ) {
+      s_theme_shake_score++;
+    }
+  } else if (s_theme_shake_score > 0) {
+    s_theme_shake_score--;
+  }
+
+  if (
+    s_theme_shake_score <
+        THEME_SHAKE_TRIGGER_SCORE
+  ) {
+    return;
+  }
+
+  s_theme_shake_score = 0;
+
+  const time_t now = time(NULL);
+
+  if (
+    s_theme_shake_last_time != 0 &&
+    now - s_theme_shake_last_time <
+        THEME_SHAKE_COOLDOWN_SECONDS
+  ) {
+    return;
+  }
+
+  s_theme_shake_last_time = now;
+  apply_effective_theme(!s_light_theme);
+
+  persist_write_int(
+    THEME_SHAKE_STATE_PERSIST_KEY,
+    s_light_theme ? 1 : 0
+  );
+
+  APP_LOG(
+    APP_LOG_LEVEL_INFO,
+    "Theme changed by wrist shake"
+  );
+}
+
+void apply_theme_mode(
+    ThemeMode mode,
+    bool save
+) {
+  if (
+    mode > THEME_MODE_SHAKE
+  ) {
+    mode = THEME_MODE_DARK;
+  }
+
+  s_theme_mode = mode;
+
+  if (mode == THEME_MODE_DARK) {
+    apply_effective_theme(false);
+  } else if (mode == THEME_MODE_LIGHT) {
+    apply_effective_theme(true);
+  } else {
+    apply_effective_theme(s_light_theme);
+  }
+
+  if (save) {
+    persist_write_int(
+      THEME_PERSIST_KEY,
+      (int)s_theme_mode
+    );
+    persist_write_int(
+      THEME_SHAKE_STATE_PERSIST_KEY,
+      s_light_theme ? 1 : 0
+    );
+  }
+
+  reset_theme_shake_detector();
+  pill_physics_update_activity();
+}
+
+void apply_theme(
+    bool light_theme,
+    bool save
+) {
+  apply_theme_mode(
+    light_theme
+        ? THEME_MODE_LIGHT
+        : THEME_MODE_DARK,
+    save
+  );
 }
 
 static void draw_alert_background_pattern(
@@ -143,87 +284,47 @@ static void draw_alert_background_pattern(
     return;
   }
 
-  const int16_t page_top =
-      (int16_t)visual_canvas_offset_y();
-  const int16_t page_bottom =
+  const int32_t page_top =
+      bounds.origin.y +
+      visual_canvas_offset_y();
+  const int32_t page_bottom =
       page_top + bounds.size.h;
+  const int32_t screen_bottom =
+      bounds.origin.y + bounds.size.h;
 
-  const int16_t clip_top =
-      page_top > 0 ? page_top : 0;
-  const int16_t clip_bottom =
-      page_bottom < bounds.size.h
-          ? page_bottom
-          : bounds.size.h;
-
-  if (clip_bottom <= clip_top) {
+  if (
+    page_bottom <= bounds.origin.y ||
+    page_top >= screen_bottom
+  ) {
     return;
   }
 
-  const GRect clip_rect = GRect(
-    0,
-    clip_top,
-    bounds.size.w,
-    clip_bottom - clip_top
-  );
+  GBitmap *pattern_bitmap =
+      s_light_theme
+          ? s_alert_pattern_light_bitmap
+          : s_alert_pattern_dark_bitmap;
 
-  graphics_context_set_clip_rect(
-    ctx,
-    clip_rect
-  );
-  graphics_context_set_stroke_color(
-    ctx,
-    alert_pattern_color()
-  );
-  graphics_context_set_stroke_width(ctx, 1);
-
-  const int16_t column_step = 28;
-  const int16_t row_step = 14;
-  const int16_t radius_step = 4;
-  const int16_t max_radius = 12;
-  const int16_t first_row_y =
-      page_top - row_step;
-
-  int16_t row_index = 0;
-
-  for (
-    int16_t center_y = first_row_y;
-    center_y <= page_bottom + row_step;
-    center_y += row_step, row_index++
-  ) {
-    const int16_t x_offset =
-        (row_index & 1) != 0
-            ? -(column_step / 2)
-            : 0;
-
-    for (
-      int16_t center_x = x_offset;
-      center_x <= bounds.size.w + column_step / 2;
-      center_x += column_step
-    ) {
-      for (
-        int16_t radius = radius_step;
-        radius <= max_radius;
-        radius += radius_step
-      ) {
-        graphics_draw_arc(
-          ctx,
-          GRect(
-            center_x - radius,
-            center_y - radius,
-            radius * 2 + 1,
-            radius * 2 + 1
-          ),
-          GOvalScaleModeFitCircle,
-          TRIG_MAX_ANGLE / 2,
-          TRIG_MAX_ANGLE
-        );
-      }
-    }
+  if (!pattern_bitmap) {
+    return;
   }
 
-  graphics_context_set_clip_rect(
+  /*
+   * One opaque full-screen bitmap blit only. No alpha compositing and
+   * no tiled bitmap loops during scrolling/animation.
+   */
+  graphics_context_set_compositing_mode(
     ctx,
-    bounds
+    GCompOpAssign
+  );
+  graphics_draw_bitmap_in_rect(
+    ctx,
+    pattern_bitmap,
+    GRect(
+      bounds.origin.x,
+      (int16_t)page_top,
+      bounds.size.w,
+      bounds.size.h
+    )
   );
 }
 
@@ -322,7 +423,7 @@ static void draw_alert_page_button_hint(
    */
   graphics_context_set_fill_color(
     ctx,
-    theme_foreground_color()
+    GColorWhite
   );
   graphics_fill_circle(
     ctx,
@@ -857,6 +958,25 @@ static void window_load(Window *window) {
     return;
   }
 
+  s_alert_pattern_dark_bitmap =
+      gbitmap_create_with_resource(
+        RESOURCE_ID_IMAGE_SEIGAIHA_DARK
+      );
+  s_alert_pattern_light_bitmap =
+      gbitmap_create_with_resource(
+        RESOURCE_ID_IMAGE_SEIGAIHA_LIGHT
+      );
+
+  if (
+    !s_alert_pattern_dark_bitmap ||
+    !s_alert_pattern_light_bitmap
+  ) {
+    APP_LOG(
+      APP_LOG_LEVEL_WARNING,
+      "Seigaiha backgrounds could not be loaded"
+    );
+  }
+
   s_canvas_layer = layer_create(bounds);
   layer_set_update_proc(
     s_canvas_layer,
@@ -949,6 +1069,7 @@ static void window_load(Window *window) {
 static void window_appear(Window *window) {
   (void)window;
   s_pill_physics_window_visible = true;
+  reset_theme_shake_detector();
 
   refresh_medication_rows_for_time();
 
@@ -974,6 +1095,7 @@ static void window_appear(Window *window) {
 
 static void window_disappear(Window *window) {
   s_pill_physics_window_visible = false;
+  reset_theme_shake_detector();
   pill_physics_update_activity();
 
   cancel_timer(&s_ui_timer);
@@ -995,6 +1117,21 @@ static void window_unload(Window *window) {
   cancel_timer(&s_confirmation_timer);
   cancel_timer(&s_band_animation_timer);
   cancel_scroll_physics();
+
+  if (s_alert_pattern_dark_bitmap) {
+    gbitmap_destroy(
+      s_alert_pattern_dark_bitmap
+    );
+    s_alert_pattern_dark_bitmap = NULL;
+  }
+
+  if (s_alert_pattern_light_bitmap) {
+    gbitmap_destroy(
+      s_alert_pattern_light_bitmap
+    );
+    s_alert_pattern_light_bitmap = NULL;
+  }
+
   destroy_pill_bitmaps();
 
   if (s_confirmation_layer) {
@@ -1050,6 +1187,7 @@ void medication_ui_init(void) {
 }
 
 void medication_ui_deinit(void) {
+  reset_theme_shake_detector();
   cancel_timer(&s_transfer_close_timer);
   cancel_timer(&s_transfer_animation_timer);
   cancel_timer(&s_ui_timer);
