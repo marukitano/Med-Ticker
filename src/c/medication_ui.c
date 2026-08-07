@@ -16,6 +16,11 @@
 
 static GColor theme_foreground_color(void);
 static bool scroll_input_allowed(void);
+static GColor alert_pattern_color(void);
+static void draw_alert_background_pattern(
+    GContext *ctx,
+    GRect bounds
+);
 static void destroy_pill_bitmaps(void);
 static void canvas_update_proc(
     Layer *layer,
@@ -120,6 +125,106 @@ void apply_theme(
       s_confirmation_layer
     );
   }
+}
+
+
+static GColor alert_pattern_color(void) {
+  return GColorDarkGray;
+}
+
+static void draw_alert_background_pattern(
+    GContext *ctx,
+    GRect bounds
+) {
+  if (
+    s_confirmed_screen_active ||
+    s_transfer_screen_active
+  ) {
+    return;
+  }
+
+  const int16_t page_top =
+      (int16_t)visual_canvas_offset_y();
+  const int16_t page_bottom =
+      page_top + bounds.size.h;
+
+  const int16_t clip_top =
+      page_top > 0 ? page_top : 0;
+  const int16_t clip_bottom =
+      page_bottom < bounds.size.h
+          ? page_bottom
+          : bounds.size.h;
+
+  if (clip_bottom <= clip_top) {
+    return;
+  }
+
+  const GRect clip_rect = GRect(
+    0,
+    clip_top,
+    bounds.size.w,
+    clip_bottom - clip_top
+  );
+
+  graphics_context_set_clip_rect(
+    ctx,
+    clip_rect
+  );
+  graphics_context_set_stroke_color(
+    ctx,
+    alert_pattern_color()
+  );
+  graphics_context_set_stroke_width(ctx, 1);
+
+  const int16_t column_step = 28;
+  const int16_t row_step = 14;
+  const int16_t radius_step = 4;
+  const int16_t max_radius = 12;
+  const int16_t first_row_y =
+      page_top - row_step;
+
+  int16_t row_index = 0;
+
+  for (
+    int16_t center_y = first_row_y;
+    center_y <= page_bottom + row_step;
+    center_y += row_step, row_index++
+  ) {
+    const int16_t x_offset =
+        (row_index & 1) != 0
+            ? -(column_step / 2)
+            : 0;
+
+    for (
+      int16_t center_x = x_offset;
+      center_x <= bounds.size.w + column_step / 2;
+      center_x += column_step
+    ) {
+      for (
+        int16_t radius = radius_step;
+        radius <= max_radius;
+        radius += radius_step
+      ) {
+        graphics_draw_arc(
+          ctx,
+          GRect(
+            center_x - radius,
+            center_y - radius,
+            radius * 2 + 1,
+            radius * 2 + 1
+          ),
+          GOvalScaleModeFitCircle,
+          TRIG_MAX_ANGLE / 2,
+          TRIG_MAX_ANGLE
+        );
+      }
+    }
+  }
+
+  graphics_context_set_clip_rect(
+    ctx,
+    bounds
+  );
 }
 
 static void destroy_pill_bitmaps(void) {
@@ -242,6 +347,8 @@ static void canvas_update_proc(
     theme_background_color()
   );
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+
+  draw_alert_background_pattern(ctx, bounds);
 
   if (s_confirmed_screen_active) {
     const int32_t confirmed_page_top =
