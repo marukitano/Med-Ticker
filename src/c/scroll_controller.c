@@ -628,6 +628,24 @@ static void scroll_physics_tick(void *context) {
     return;
   }
 
+#if defined(PBL_TOUCH)
+  /* Defensive invariant: SCROLL_TOUCH is valid only while a finger is down. */
+  if (
+    s_scroll.mode == SCROLL_TOUCH &&
+    !s_touch.dragging
+  ) {
+    s_scroll.velocity_q8 = 0;
+
+    start_scroll_snap(
+      nearest_snap_index_for_position_q8(
+        s_scroll.position_q8
+      ),
+      false
+    );
+    return;
+  }
+#endif
+
   int32_t force_q8;
 
   if (s_scroll.mode == SCROLL_TOUCH) {
@@ -1175,6 +1193,23 @@ static void touch_end(void) {
   s_scroll.breakaway_locked = false;
 
   if (s_touch.edge_consumed) {
+    /*
+     * A position update can restart SCROLL_TOUCH after the automatic
+     * one-step snap has already finished. Liftoff must never leave that
+     * mode running without an active finger, otherwise the 16 ms timer
+     * redraws forever and can trip the Pebble watchdog.
+     */
+    if (s_scroll.mode == SCROLL_TOUCH) {
+      s_scroll.velocity_q8 = 0;
+
+      start_scroll_snap(
+        nearest_snap_index_for_position_q8(
+          s_scroll.position_q8
+        ),
+        false
+      );
+    }
+
     return;
   }
 
