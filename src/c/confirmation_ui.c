@@ -23,6 +23,296 @@ static const VibePattern s_impact_vibration_pattern = {
   .num_segments = ARRAY_LENGTH(s_impact_vibration_durations)
 };
 
+#define CONFIRM_IMAGE_WIDTH 200
+#define CONFIRM_IMAGE_HEIGHT 228
+#define CONFIRM_IMAGE_ROWS_PER_CHUNK 5
+#define CONFIRM_IMAGE_CHUNK_BYTES \
+  (CONFIRM_IMAGE_WIDTH * CONFIRM_IMAGE_ROWS_PER_CHUNK)
+
+static ResHandle s_confirmation_image_resource;
+static bool s_confirmation_image_active;
+static bool s_confirmation_image_error_logged;
+static uint8_t
+    s_confirmation_image_chunk[CONFIRM_IMAGE_CHUNK_BYTES];
+
+static uint16_t integer_sqrt_u32(uint32_t value) {
+  uint32_t remainder = value;
+  uint32_t result = 0;
+  uint32_t bit = 1u << 30;
+
+  while (bit > remainder) {
+    bit >>= 2;
+  }
+
+  while (bit != 0) {
+    if (remainder >= result + bit) {
+      remainder -= result + bit;
+      result = (result >> 1) + bit;
+    } else {
+      result >>= 1;
+    }
+
+    bit >>= 2;
+  }
+
+  return (uint16_t)result;
+}
+
+static void reset_confirmation_image(void) {
+  s_confirmation_image_active = false;
+  s_confirmation_image_resource = NULL;
+  s_confirmation_image_error_logged = false;
+}
+
+static bool prepare_confirmation_image(void) {
+  s_confirmation_image_resource =
+      resource_get_handle(
+        RESOURCE_ID_RAW_OK2
+      );
+
+  if (!s_confirmation_image_resource) {
+    APP_LOG(
+      APP_LOG_LEVEL_ERROR,
+      "Confirmation RAW_OK2 resource missing"
+    );
+    reset_confirmation_image();
+    return false;
+  }
+
+  const size_t resource_bytes =
+      resource_size(
+        s_confirmation_image_resource
+      );
+
+  if (
+    resource_bytes !=
+        CONFIRM_IMAGE_WIDTH *
+        CONFIRM_IMAGE_HEIGHT
+  ) {
+    APP_LOG(
+      APP_LOG_LEVEL_ERROR,
+      "Confirmation RAW_OK2 wrong size: %lu",
+      (unsigned long)resource_bytes
+    );
+    reset_confirmation_image();
+    return false;
+  }
+
+  s_confirmation_image_active = true;
+  s_confirmation_image_error_logged = false;
+  return true;
+}
+
+static void log_confirmation_image_render_error(
+    const char *message
+) {
+  if (s_confirmation_image_error_logged) {
+    return;
+  }
+
+  s_confirmation_image_error_logged = true;
+
+  APP_LOG(
+    APP_LOG_LEVEL_ERROR,
+    "%s",
+    message
+  );
+}
+
+static bool draw_confirmation_image_reveal(
+    GContext *ctx,
+    GRect bounds
+) {
+  if (
+    !s_confirmation_image_active ||
+    !s_confirmation_image_resource ||
+    s_confirm_radius <= 0
+  ) {
+    return false;
+  }
+
+  if (
+    bounds.origin.x != 0 ||
+    bounds.origin.y != 0 ||
+    bounds.size.w != CONFIRM_IMAGE_WIDTH ||
+    bounds.size.h != CONFIRM_IMAGE_HEIGHT
+  ) {
+    log_confirmation_image_render_error(
+      "Confirmation layer geometry unexpected"
+    );
+    return false;
+  }
+
+  GBitmap *framebuffer =
+      graphics_capture_frame_buffer(ctx);
+
+  if (!framebuffer) {
+    log_confirmation_image_render_error(
+      "Could not capture framebuffer"
+    );
+    return false;
+  }
+
+  bool rendered = false;
+
+  do {
+    if (
+      gbitmap_get_format(framebuffer) !=
+          GBitmapFormat8Bit
+    ) {
+      log_confirmation_image_render_error(
+        "Framebuffer is not 8-bit"
+      );
+      break;
+    }
+
+    uint8_t *framebuffer_data =
+        gbitmap_get_data(framebuffer);
+
+    const int framebuffer_stride =
+        gbitmap_get_bytes_per_row(framebuffer);
+
+    if (
+      !framebuffer_data ||
+      framebuffer_stride <
+          CONFIRM_IMAGE_WIDTH
+    ) {
+      log_confirmation_image_render_error(
+        "Framebuffer data unavailable"
+      );
+      break;
+    }
+
+    const int16_t center_x =
+        bounds.size.w +
+        CONFIRM_CENTER_OUTSIDE_X;
+    const int16_t center_y =
+        bounds.size.h / 2;
+
+    const uint32_t radius_squared =
+        (uint32_t)s_confirm_radius *
+        (uint32_t)s_confirm_radius;
+
+    const int16_t visible_top =
+        center_y - s_confirm_radius;
+    const int16_t visible_bottom =
+        center_y + s_confirm_radius;
+
+    for (
+      int16_t block_row = 0;
+      block_row < CONFIRM_IMAGE_HEIGHT;
+      block_row += CONFIRM_IMAGE_ROWS_PER_CHUNK
+    ) {
+      const int16_t rows_in_block =
+          block_row +
+                  CONFIRM_IMAGE_ROWS_PER_CHUNK <=
+              CONFIRM_IMAGE_HEIGHT
+              ? CONFIRM_IMAGE_ROWS_PER_CHUNK
+              : CONFIRM_IMAGE_HEIGHT -
+                    block_row;
+
+      const int16_t block_last_row =
+          block_row + rows_in_block - 1;
+
+      if (
+        block_last_row < visible_top ||
+        block_row > visible_bottom
+      ) {
+        continue;
+      }
+
+      const size_t block_bytes =
+          (size_t)rows_in_block *
+          CONFIRM_IMAGE_WIDTH;
+
+      const size_t loaded =
+          resource_load_byte_range(
+            s_confirmation_image_resource,
+            (uint32_t)block_row *
+                CONFIRM_IMAGE_WIDTH,
+            s_confirmation_image_chunk,
+            block_bytes
+          );
+
+      if (loaded != block_bytes) {
+        log_confirmation_image_render_error(
+          "Could not stream RAW_OK2"
+        );
+        break;
+      }
+
+      for (
+        int16_t local_row = 0;
+        local_row < rows_in_block;
+        local_row++
+      ) {
+        const int16_t y =
+            block_row + local_row;
+        const int32_t dy =
+            (int32_t)y - center_y;
+
+        const int32_t remaining =
+            (int32_t)radius_squared -
+            dy * dy;
+
+        if (remaining < 0) {
+          continue;
+        }
+
+        const int16_t half_width =
+            (int16_t)integer_sqrt_u32(
+              (uint32_t)remaining
+            );
+
+        int16_t left =
+            center_x - half_width;
+        int16_t right =
+            center_x + half_width;
+
+        if (
+          right < 0 ||
+          left >= CONFIRM_IMAGE_WIDTH
+        ) {
+          continue;
+        }
+
+        if (left < 0) {
+          left = 0;
+        }
+
+        if (right >= CONFIRM_IMAGE_WIDTH) {
+          right = CONFIRM_IMAGE_WIDTH - 1;
+        }
+
+        const size_t copy_bytes =
+            (size_t)(right - left + 1);
+
+        memcpy(
+          framebuffer_data +
+              y * framebuffer_stride +
+              left,
+          s_confirmation_image_chunk +
+              local_row *
+                  CONFIRM_IMAGE_WIDTH +
+              left,
+          copy_bytes
+        );
+      }
+    }
+
+    if (!s_confirmation_image_error_logged) {
+      rendered = true;
+    }
+  } while (false);
+
+  graphics_release_frame_buffer(
+    ctx,
+    framebuffer
+  );
+
+  return rendered;
+}
+
 static void draw_confirmation_circle(
     GContext *ctx,
     GRect bounds
@@ -731,6 +1021,16 @@ void confirmation_update_proc(
     return;
   }
 
+  if (
+    s_confirmation_image_active &&
+    draw_confirmation_image_reveal(
+      ctx,
+      bounds
+    )
+  ) {
+    return;
+  }
+
   draw_confirmation_circle(
     ctx,
     bounds
@@ -774,8 +1074,17 @@ static void update_confirmation_circle(void) {
 
     s_confirm_radius = s_confirm_max_radius;
     s_confirmation_state = CONFIRM_COMPLETE;
-    s_check_size = 8;
-    s_check_state = CHECK_POPPING_OUT;
+
+    if (s_confirmation_image_active) {
+      s_check_size = 0;
+      s_check_state = CHECK_HIDDEN;
+      vibes_enqueue_custom_pattern(
+        s_impact_vibration_pattern
+      );
+    } else {
+      s_check_size = 8;
+      s_check_state = CHECK_POPPING_OUT;
+    }
 
     cancel_timer(&s_ui_timer);
 
@@ -805,6 +1114,7 @@ static void update_confirmation_circle(void) {
     s_confirm_radius = 0;
     s_confirmation_state = CONFIRM_IDLE;
     s_confirmation_symbol_set = false;
+    reset_confirmation_image();
   }
 }
 
@@ -881,15 +1191,20 @@ void select_button_down(
     return;
   }
 
+  prepare_confirmation_image();
+
   s_confirmation_symbol = symbol;
   s_confirmation_symbol_set = true;
   s_confirmation_state = CONFIRM_GROWING;
+  s_check_size = 0;
+  s_check_state = CHECK_HIDDEN;
   schedule_confirmation_timer();
 }
 
 static void exit_app(void) {
   cancel_timer(&s_transfer_close_timer);
   cancel_timer(&s_transfer_animation_timer);
+  reset_confirmation_image();
   s_transfer_screen_active = false;
   s_transfer_animation_state =
       TRANSFER_ANIMATION_IDLE;
@@ -1080,6 +1395,7 @@ void select_button_up(
 
   if (s_confirmation_state == CONFIRM_COMPLETE) {
     if (unconfirmed_medication_group_is_due()) {
+      reset_confirmation_image();
       refresh_app_screen_state();
       return;
     }

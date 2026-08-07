@@ -63,6 +63,11 @@
         },
         {
           "type": "raw",
+          "name": "RAW_OK2",
+          "file": "images/OK2.raw"
+        },
+        {
+          "type": "raw",
           "name": "ALARM_PCM",
           "file": "sounds/alarm.pcm"
         }
