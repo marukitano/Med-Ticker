@@ -602,6 +602,14 @@ static bool persist_scalar_settings(void) {
     LANGUAGE_PERSIST_KEY,
     (int)s_language
   );
+  const int emblem_written = persist_write_int(
+    SHOW_SWISS_EMBLEM_PERSIST_KEY,
+    s_show_swiss_emblem ? 1 : 0
+  );
+  const int pattern_written = persist_write_int(
+    SHOW_JAPANESE_PATTERN_PERSIST_KEY,
+    s_show_japanese_pattern ? 1 : 0
+  );
   const int dayparts_written = persist_write_data(
     DAYPART_PERSIST_KEY,
     &s_dayparts,
@@ -631,6 +639,8 @@ static bool persist_scalar_settings(void) {
       theme_written == (int)sizeof(int32_t) &&
       shake_state_written == (int)sizeof(int32_t) &&
       language_written == (int)sizeof(int32_t) &&
+      emblem_written == (int)sizeof(int32_t) &&
+      pattern_written == (int)sizeof(int32_t) &&
       dayparts_written == (int)sizeof(s_dayparts) &&
       volume_written == (int)sizeof(int32_t) &&
       vibration_written == (int)sizeof(int32_t) &&
@@ -641,6 +651,10 @@ static bool persist_scalar_settings(void) {
           (s_light_theme ? 1 : 0) &&
       persist_read_int(LANGUAGE_PERSIST_KEY) ==
           (int)s_language &&
+      persist_read_int(SHOW_SWISS_EMBLEM_PERSIST_KEY) ==
+          (s_show_swiss_emblem ? 1 : 0) &&
+      persist_read_int(SHOW_JAPANESE_PATTERN_PERSIST_KEY) ==
+          (s_show_japanese_pattern ? 1 : 0) &&
       dayparts_read == (int)sizeof(verified_dayparts) &&
       memcmp(
         &verified_dayparts,
@@ -1801,6 +1815,14 @@ static void settings_inbox_received(
     iterator,
     MESSAGE_KEY_LANGUAGE
   );
+  Tuple *show_emblem_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_SHOW_SWISS_EMBLEM
+  );
+  Tuple *show_pattern_tuple = dict_find(
+    iterator,
+    MESSAGE_KEY_SHOW_JAPANESE_PATTERN
+  );
   Tuple *audio_volume_tuple = dict_find(
     iterator,
     MESSAGE_KEY_AUDIO_VOLUME
@@ -1820,6 +1842,8 @@ static void settings_inbox_received(
 
   int32_t theme_value;
   int32_t language_value;
+  int32_t show_emblem;
+  int32_t show_pattern;
   int32_t audio_volume;
   int32_t vibration_enabled;
   int32_t reminder_interval;
@@ -1839,6 +1863,16 @@ static void settings_inbox_received(
     ) ||
     language_value < APP_LANGUAGE_GERMAN ||
     language_value > APP_LANGUAGE_ENGLISH ||
+    !tuple_read_int32(
+      show_emblem_tuple,
+      &show_emblem
+    ) ||
+    (show_emblem != 0 && show_emblem != 1) ||
+    !tuple_read_int32(
+      show_pattern_tuple,
+      &show_pattern
+    ) ||
+    (show_pattern != 0 && show_pattern != 1) ||
     !read_dayparts_from_message(
       iterator,
       &dayparts
@@ -1882,6 +1916,12 @@ static void settings_inbox_received(
     (AppLanguage)language_value,
     true
   );
+
+  s_show_swiss_emblem =
+      show_emblem == 1;
+  s_show_japanese_pattern =
+      show_pattern == 1;
+
   apply_daypart_settings(
     &dayparts,
     true
@@ -1973,6 +2013,22 @@ void watch_settings_init(void) {
       stored_language == APP_LANGUAGE_ENGLISH
           ? APP_LANGUAGE_ENGLISH
           : APP_LANGUAGE_GERMAN;
+
+  s_show_swiss_emblem =
+      !persist_exists(
+        SHOW_SWISS_EMBLEM_PERSIST_KEY
+      ) ||
+      persist_read_int(
+        SHOW_SWISS_EMBLEM_PERSIST_KEY
+      ) != 0;
+
+  s_show_japanese_pattern =
+      !persist_exists(
+        SHOW_JAPANESE_PATTERN_PERSIST_KEY
+      ) ||
+      persist_read_int(
+        SHOW_JAPANESE_PATTERN_PERSIST_KEY
+      ) != 0;
 
   load_daypart_settings();
   load_medication_settings();

@@ -45,6 +45,8 @@ int8_t s_taken_hint_phase;
 bool s_light_theme;
 ThemeMode s_theme_mode = THEME_MODE_DARK;
 AppLanguage s_language = APP_LANGUAGE_GERMAN;
+bool s_show_swiss_emblem = true;
+bool s_show_japanese_pattern = true;
 bool s_confirmed_screen_active;
 
 bool s_transfer_screen_active;

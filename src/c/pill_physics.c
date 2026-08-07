@@ -821,13 +821,11 @@ static void pill_rb_initialize_body(
       pill_rb_medication_size(medication_index);
 
   int16_t arena_width = 228;
-  int16_t arena_height = 228;
   int16_t arena_y = 0;
 
   if (s_canvas_layer) {
     const GRect bounds = layer_get_bounds(s_canvas_layer);
     arena_width = bounds.size.w;
-    arena_height = bounds.size.h;
     arena_y = (int16_t)pill_arena_origin_y();
   }
 
@@ -836,10 +834,20 @@ static void pill_rb_initialize_body(
   int16_t x = (int16_t)(
     ((int32_t)(column * 2 + 1) * arena_width) / 6
   );
-  int16_t screen_y = (int16_t)(22 + row * 38);
-  int16_t local_y = (int16_t)(screen_y - arena_y);
   const int16_t extent =
       radius + half_length + PILL_PHYSICS_EDGE_MARGIN;
+
+  /*
+   * Spawn complete rows above the display. Later rows start progressively
+   * higher so the pills naturally rain in instead of appearing on-screen.
+   */
+  const int16_t screen_y = (int16_t)(
+    -extent -
+    4 -
+    row * PILL_RB_ENTRY_ROW_GAP_PX
+  );
+  const int16_t local_y =
+      (int16_t)(screen_y - arena_y);
 
   if (x < extent) {
     x = extent;
@@ -847,17 +855,11 @@ static void pill_rb_initialize_body(
     x = arena_width - extent;
   }
 
-  if (screen_y < extent) {
-    local_y = extent - arena_y;
-  } else if (screen_y > arena_height - extent) {
-    local_y = arena_height - extent - arena_y;
-  }
-
   *body = (PillPhysicsBody) {
     .x_q8 = (int32_t)x * PILL_PHYSICS_Q8,
     .y_q8 = (int32_t)local_y * PILL_PHYSICS_Q8,
     .vx_q8 = 0,
-    .vy_q8 = 0,
+    .vy_q8 = PILL_RB_ENTRY_MIN_SPEED_Q8,
     .angle =
         ((int32_t)(body_index * 5u + 1u) *
          TRIG_MAX_ANGLE) /
@@ -866,6 +868,7 @@ static void pill_rb_initialize_body(
     .medication_index = medication_index,
     .collision_radius = radius,
     .collision_half_length = half_length,
+    .entered_arena = false,
     .mass_q8 = pill_rb_mass_from_size_q8(size),
     .surface_friction_q8 =
         pill_rb_surface_friction_for_body_q8(
@@ -873,12 +876,6 @@ static void pill_rb_initialize_body(
           body_index
         )
   };
-
-  /* Keep the static pre-alarm spawn frame clear of the emblem. */
-  (void)pill_rb_solve_swiss_emblem(
-    body,
-    arena_y
-  );
 }
 
 static bool pill_rb_add_body(uint8_t medication_index) {
@@ -1590,7 +1587,10 @@ static bool pill_rb_solve_swiss_emblem(
     PillPhysicsBody *body,
     int16_t arena_y
 ) {
-  if (!body) {
+  if (
+    !body ||
+    !s_show_swiss_emblem
+  ) {
     return false;
   }
 
@@ -1885,6 +1885,18 @@ static void pill_physics_tick(void *context) {
       PILL_RB_MAX_LINEAR_Q8
     );
 
+    /*
+     * Until a pill has fully crossed the top edge, guarantee a real downward
+     * entry. Horizontal wrist movement still affects it normally.
+     */
+    if (
+      !body->entered_arena &&
+      body->vy_q8 < PILL_RB_ENTRY_MIN_SPEED_Q8
+    ) {
+      body->vy_q8 =
+          PILL_RB_ENTRY_MIN_SPEED_Q8;
+    }
+
     body->angular_velocity = (int32_t)(
       ((int64_t)body->angular_velocity *
        PILL_RB_ANGULAR_DAMPING_NUM) /
@@ -1896,6 +1908,21 @@ static void pill_physics_tick(void *context) {
     body->angle = pill_rb_clamp_angle(
       body->angle + body->angular_velocity
     );
+
+    if (!body->entered_arena) {
+      const int32_t fully_inside_y_q8 =
+          (
+            body->collision_radius +
+            body->collision_half_length +
+            PILL_PHYSICS_EDGE_MARGIN -
+            arena_y
+          ) *
+          PILL_PHYSICS_Q8;
+
+      if (body->y_q8 >= fully_inside_y_q8) {
+        body->entered_arena = true;
+      }
+    }
   }
 
   bool had_contact = false;
@@ -1928,14 +1955,20 @@ static void pill_physics_tick(void *context) {
         minimum_y_q8,
         maximum_y_q8
       );
-      had_contact |= pill_rb_solve_wall(
-        body,
-        2,
-        minimum_x_q8,
-        maximum_x_q8,
-        minimum_y_q8,
-        maximum_y_q8
-      );
+      /*
+       * Do not let the top wall teleport a freshly spawned off-screen pill
+       * into the arena. After it entered once, the top wall is solid again.
+       */
+      if (body->entered_arena) {
+        had_contact |= pill_rb_solve_wall(
+          body,
+          2,
+          minimum_x_q8,
+          maximum_x_q8,
+          minimum_y_q8,
+          maximum_y_q8
+        );
+      }
       had_contact |= pill_rb_solve_wall(
         body,
         3,

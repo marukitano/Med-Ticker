@@ -283,6 +283,7 @@ static void draw_alert_background_pattern(
     GRect bounds
 ) {
   if (
+    !s_show_japanese_pattern ||
     s_confirmed_screen_active ||
     s_transfer_screen_active
   ) {
@@ -334,13 +335,18 @@ static void draw_alert_background_pattern(
 }
 
 /*
- * Exact 13 x 14 Swiss emblem from FCK_Gravity.
- * Original pivot: (100, 100), colors: GColorRed / GColorWhite.
+ * Exact 13 x 14 Swiss emblem raster from FCK_Gravity.
+ * Colors stay GColorRed / GColorWhite. Med Ticker places the same raster at
+ * the true display center, matching the middle-button marker at y=114.
  */
 static void draw_swiss_emblem(
     GContext *ctx,
     int32_t scroll_offset_y
 ) {
+  if (!s_show_swiss_emblem) {
+    return;
+  }
+
   static const char *EMBLEM_ROWS[SWISS_EMBLEM_HEIGHT] = {
     "..RRRRRRRRR..",
     ".RRRRWWWRRRR.",

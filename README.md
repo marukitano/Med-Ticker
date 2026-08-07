@@ -14,7 +14,6 @@ erledigt markiert wird.
   <img src="docs/screenshots/screenshot.png" width="30%" alt="Med Ticker – screenshot">
   <img src="docs/screenshots/screenshot2.png" width="30%" alt="Med Ticker – screenshot2">
   <img src="docs/screenshots/screenshot3.png" width="30%" alt="Med Ticker – screenshot3">
-  <img src="docs/screenshots/screenshot4.png" width="30%" alt="Med Ticker – screenshot4">
 </p>
 
 ### Funktionen
@@ -25,7 +24,9 @@ erledigt markiert wird.
 - Vier konfigurierbare Tageszeiten: Früh, Mittag, Abend und Nacht
 - Einstellbare Tablettenform, Farbe, Größe und Beschriftung
 - Einstellbare Farben für Pen und Akzent
-- Animierte Tabletten mit beschleunigungssensorbasierter Physik
+- Tabletten fallen von oben in den Erinnerungsbildschirm und reagieren danach auf die Bewegung der Uhr
+- Optionales Schweizer Wappen als festes Kollisionshindernis
+- Optionales dezentes japanisches Hintergrundmuster
 - **Gedrückthalten zum Bestätigen**
 - Scrollen per Touch und Tasten
 - Wiederholte Erinnerungen mit einstellbarem Intervall
@@ -79,6 +80,8 @@ Allgemeine Einstellungen:
 - Erinnerungsintervall
 - Sprache
 - Theme
+- Schweizer Wappen ein/aus
+- Japanisches Hintergrundmuster ein/aus
 
 Die Einstellungen werden lokal gespeichert und über
 **Pebble AppMessage** an die Uhr übertragen.
@@ -158,7 +161,6 @@ deliberate confirmation before marking it as taken.
   <img src="docs/screenshots/screenshot.png" width="30%" alt="Med Ticker – screenshot">
   <img src="docs/screenshots/screenshot2.png" width="30%" alt="Med Ticker – screenshot2">
   <img src="docs/screenshots/screenshot3.png" width="30%" alt="Med Ticker – screenshot3">
-  <img src="docs/screenshots/screenshot4.png" width="30%" alt="Med Ticker – screenshot4">
 </p>
 
 ### Features
@@ -169,7 +171,9 @@ deliberate confirmation before marking it as taken.
 - Four configurable dayparts: morning, noon, evening and night
 - Configurable pill shape, color, size and imprint
 - Configurable pen body and accent colors
-- Animated pills with accelerometer-driven physics
+- Pills fall into the reminder screen from above and then react to watch movement
+- Optional Swiss emblem as a fixed collision obstacle
+- Optional subtle Japanese background pattern
 - Deliberate **hold-to-confirm** interaction
 - Touch and button scrolling
 - Repeating reminders with configurable intervals
@@ -221,6 +225,8 @@ General settings include:
 - Reminder interval
 - Language
 - Theme
+- Swiss emblem on/off
+- Japanese background pattern on/off
 
 Settings are stored locally and transferred to the watch through
 **Pebble AppMessage**.

@@ -1,5 +1,6 @@
 var THEME_STORAGE_KEY = 'pill-reminder-theme';
 var LANGUAGE_STORAGE_KEY = 'pill-reminder-language-v1';
+var DISPLAY_STORAGE_KEY = 'pill-reminder-display-v1';
 var LEGACY_MEDICATION_STORAGE_KEY = 'pill-reminder-medication-v1';
 var MEDICATIONS_STORAGE_KEY = 'pill-reminder-medications-v2';
 var DAYPART_STORAGE_KEY = 'pill-reminder-dayparts-v1';
@@ -38,6 +39,8 @@ var MED_EFFECT_KEY = 25;
 var SETTINGS_TRANSACTION_KEY = 26;
 var SETTINGS_ACK_KEY = 27;
 var LANGUAGE_KEY = 28;
+var SHOW_SWISS_EMBLEM_KEY = 29;
+var SHOW_JAPANESE_PATTERN_KEY = 30;
 
 
 var COMMAND_RESET = 0;
@@ -100,6 +103,39 @@ function currentLanguage() {
   ) === 'en'
     ? 'en'
     : 'de';
+}
+
+function normalizeDisplaySettings(value) {
+  return {
+    showEmblem:
+        !value ||
+        value.showEmblem !== false,
+    showPattern:
+        !value ||
+        value.showPattern !== false
+  };
+}
+
+function currentDisplaySettings() {
+  var stored = localStorage.getItem(
+    DISPLAY_STORAGE_KEY
+  );
+
+  if (!stored) {
+    return normalizeDisplaySettings(null);
+  }
+
+  try {
+    return normalizeDisplaySettings(
+      JSON.parse(stored)
+    );
+  } catch (error) {
+    console.log(
+      'Could not read display settings: ' +
+      error.message
+    );
+    return normalizeDisplaySettings(null);
+  }
 }
 
 function cloneDefaultDayparts() {
@@ -646,7 +682,8 @@ function sendAllSettings(
     language,
     dayparts,
     medications,
-    alarm
+    alarm,
+    display
 ) {
   var transaction = Math.floor(
     Date.now() % 2147483647
@@ -670,6 +707,10 @@ function sendAllSettings(
           : (theme === 'shake' ? 2 : 0);
   commitSettings[LANGUAGE_KEY] =
       language === 'en' ? 1 : 0;
+  commitSettings[SHOW_SWISS_EMBLEM_KEY] =
+      display.showEmblem ? 1 : 0;
+  commitSettings[SHOW_JAPANESE_PATTERN_KEY] =
+      display.showPattern ? 1 : 0;
   commitSettings[DAYPART_MORNING_KEY] =
       dayparts.morning;
   commitSettings[DAYPART_NOON_KEY] =
@@ -744,7 +785,8 @@ function configurationPage(
     language,
     dayparts,
     medications,
-    alarm
+    alarm,
+    display
 ) {
   var initialDayparts =
       safeJsonForScript(dayparts);
@@ -773,6 +815,12 @@ function configurationPage(
           : 'alarm-volume-controls hidden';
   var vibrationChecked =
       alarmSettings.vibrationEnabled ? ' checked' : '';
+  var displaySettings =
+      normalizeDisplaySettings(display);
+  var emblemChecked =
+      displaySettings.showEmblem ? ' checked' : '';
+  var patternChecked =
+      displaySettings.showPattern ? ' checked' : '';
   var reminderIntervalSlider =
       reminderIntervalIndex(
         alarmSettings.reminderInterval
@@ -940,6 +988,17 @@ function configurationPage(
     '<input id="reminder-interval" type="range" min="0" max="6" step="1" value="' + reminderIntervalSlider + '">',
     '</div>',
     '</section>',
+    '<section id="display-panel" class="collapsed">',
+    '<button id="display-toggle" class="toggle" type="button">',
+    '<span><span class="summary-main">Darstellung</span>',
+    '<span class="summary-sub">Wappen und Hintergrundmuster</span></span>',
+    '<span class="arrow">›</span>',
+    '</button>',
+    '<div id="display-body" class="body hidden">',
+    '<label class="check alarm-check"><input id="show-emblem" type="checkbox"' + emblemChecked + '><span>Schweizer Wappen</span></label>',
+    '<label class="check alarm-check"><input id="show-pattern" type="checkbox"' + patternChecked + '><span>Japanisches Muster</span></label>',
+    '</div>',
+    '</section>',
     '<section class="plain theme-row">',
     '<h2>Theme</h2>',
     '<select id="theme" aria-label="Theme">',
@@ -964,7 +1023,7 @@ function configurationPage(
     'var medications=' + initialMedications + ';',
     'var language="' + language + '";',
     'function tr(de,en){return language==="en"?en:de;}',
-    'var translations={"Medikamente":"Medications","Hinzufügen, bearbeiten und deaktivieren":"Add, edit and disable","Tageszeiten":"Dayparts","Früh, Mittag, Abend und Nacht":"Morning, noon, evening and night","Früh beginnt":"Morning starts","Mittag beginnt":"Noon starts","Abend beginnt":"Evening starts","Nacht beginnt":"Night starts","Ton, Vibration und Erinnerung":"Sound, vibration and reminders","Alarmsound":"Alarm sound","Lautstärke":"Volume","Erneut erinnern":"Remind again","Hell":"Light","Dunkel":"Dark","Sprache":"Language","Übertragen":"Save to watch","Noch kein Medikament angelegt.":"No medication added yet.","Neues Medikament":"New medication","Medikament verschieben":"Move medication","Wirkung":"Effect","z. B. Blutverdünner":"e.g. blood thinner","Dosierung":"Dosage","z. B. 20 mg":"e.g. 20 mg","Menge":"Quantity","Zeitpunkt":"Time","Früh":"Morning","Mittag":"Noon","Abend":"Evening","Nacht":"Night","Rhythmus":"Schedule","Täglich":"Daily","Wöchentlich":"Weekly","Monatlich":"Monthly","Wochentag":"Weekday","Montag":"Monday","Dienstag":"Tuesday","Mittwoch":"Wednesday","Donnerstag":"Thursday","Freitag":"Friday","Samstag":"Saturday","Sonntag":"Sunday","Tag im Monat":"Day of month","Art":"Type","Bitte auswählen":"Please select","Tablette":"Tablet","Pen / Spritze":"Pen / syringe","Form":"Shape","Rund":"Round","Pille":"Pill","Kapsel":"Capsule","Rhombus":"Diamond","Grösse":"Size","Beschriftung":"Imprint","z. B. 20":"e.g. 20","Farbe":"Color","Farbe 1":"Color 1","Farbe 2":"Color 2","Pen-Farbe":"Pen color","Akzent":"Accent","Farbpalette öffnen":"Open color palette","Aktiv":"Active","Bitte zuerst ein vollständiges Icon auswählen. Erst danach kann das Medikament aktiviert werden.":"Please select a complete icon first. Only then can the medication be activated.","Medikament löschen":"Delete medication","Medikament kopieren":"Copy medication","Schliessen":"Close"};',
+    'var translations={"Medikamente":"Medications","Hinzufügen, bearbeiten und deaktivieren":"Add, edit and disable","Tageszeiten":"Dayparts","Früh, Mittag, Abend und Nacht":"Morning, noon, evening and night","Früh beginnt":"Morning starts","Mittag beginnt":"Noon starts","Abend beginnt":"Evening starts","Nacht beginnt":"Night starts","Ton, Vibration und Erinnerung":"Sound, vibration and reminders","Alarmsound":"Alarm sound","Lautstärke":"Volume","Erneut erinnern":"Remind again","Darstellung":"Appearance","Wappen und Hintergrundmuster":"Emblem and background pattern","Schweizer Wappen":"Swiss emblem","Japanisches Muster":"Japanese pattern","Hell":"Light","Dunkel":"Dark","Sprache":"Language","Übertragen":"Save to watch","Noch kein Medikament angelegt.":"No medication added yet.","Neues Medikament":"New medication","Medikament verschieben":"Move medication","Wirkung":"Effect","z. B. Blutverdünner":"e.g. blood thinner","Dosierung":"Dosage","z. B. 20 mg":"e.g. 20 mg","Menge":"Quantity","Zeitpunkt":"Time","Früh":"Morning","Mittag":"Noon","Abend":"Evening","Nacht":"Night","Rhythmus":"Schedule","Täglich":"Daily","Wöchentlich":"Weekly","Monatlich":"Monthly","Wochentag":"Weekday","Montag":"Monday","Dienstag":"Tuesday","Mittwoch":"Wednesday","Donnerstag":"Thursday","Freitag":"Friday","Samstag":"Saturday","Sonntag":"Sunday","Tag im Monat":"Day of month","Art":"Type","Bitte auswählen":"Please select","Tablette":"Tablet","Pen / Spritze":"Pen / syringe","Form":"Shape","Rund":"Round","Pille":"Pill","Kapsel":"Capsule","Rhombus":"Diamond","Grösse":"Size","Beschriftung":"Imprint","z. B. 20":"e.g. 20","Farbe":"Color","Farbe 1":"Color 1","Farbe 2":"Color 2","Pen-Farbe":"Pen color","Akzent":"Accent","Farbpalette öffnen":"Open color palette","Aktiv":"Active","Bitte zuerst ein vollständiges Icon auswählen. Erst danach kann das Medikament aktiviert werden.":"Please select a complete icon first. Only then can the medication be activated.","Medikament löschen":"Delete medication","Medikament kopieren":"Copy medication","Schliessen":"Close"};',
     'function translateNode(node){',
     'if(language!=="en"||!node){return;}',
     'if(node.nodeType===3){var raw=node.nodeValue;var trimmed=raw.replace(/^\\s+|\\s+$/g,"");if(translations[trimmed]){node.nodeValue=raw.replace(trimmed,translations[trimmed]);}return;}',
@@ -1368,6 +1427,10 @@ function configurationPage(
     'var body=document.getElementById("alarm-body");',
     'setPanelOpen("alarm-panel","alarm-body",body.className.indexOf("hidden")>=0);',
     '};',
+    'document.getElementById("display-toggle").onclick=function(){',
+    'var body=document.getElementById("display-body");',
+    'setPanelOpen("display-panel","display-body",body.className.indexOf("hidden")>=0);',
+    '};',
     'document.getElementById("medication-toggle").onclick=function(){',
     'var body=document.getElementById("medication-body");',
     'setPanelOpen("medication-panel","medication-body",body.className.indexOf("hidden")>=0);',
@@ -1394,7 +1457,7 @@ function configurationPage(
     'for(var medicationIndex=0;medicationIndex<medications.length;medicationIndex++){',
     'if(medications[medicationIndex].enabled&&!medications[medicationIndex].iconSet){alert(tr("Ein aktives Medikament benötigt ein vollständiges Icon.","An active medication requires a complete icon."));return;}',
     '}',
-    'var result={theme:document.getElementById("theme").value,language:document.getElementById("language").value,dayparts:values,medications:medications,alarm:{audioEnabled:document.getElementById("audio-enabled").checked,audioVolume:parseInt(document.getElementById("audio-volume").value,10),vibrationEnabled:document.getElementById("vibration-enabled").checked,reminderInterval:reminderIntervals[parseInt(document.getElementById("reminder-interval").value,10)]}};',
+    'var result={theme:document.getElementById("theme").value,language:document.getElementById("language").value,dayparts:values,medications:medications,alarm:{audioEnabled:document.getElementById("audio-enabled").checked,audioVolume:parseInt(document.getElementById("audio-volume").value,10),vibrationEnabled:document.getElementById("vibration-enabled").checked,reminderInterval:reminderIntervals[parseInt(document.getElementById("reminder-interval").value,10)]},display:{showEmblem:document.getElementById("show-emblem").checked,showPattern:document.getElementById("show-pattern").checked}};',
     'document.location="pebblejs://close#"+encodeURIComponent(JSON.stringify(result));',
     '};',
     'window.__timeToMinutes=' + timeToMinutes.toString() + ';',
@@ -1415,7 +1478,8 @@ Pebble.addEventListener('showConfiguration', function() {
     currentLanguage(),
     currentDayparts(),
     currentMedications(),
-    currentAlarmSettings()
+    currentAlarmSettings(),
+    currentDisplaySettings()
   );
 
   Pebble.openURL(
@@ -1502,6 +1566,10 @@ Pebble.addEventListener('webviewclosed', function(event) {
       settings.alarm
     );
 
+    var display = normalizeDisplaySettings(
+      settings.display
+    );
+
     localStorage.setItem(
       THEME_STORAGE_KEY,
       settings.theme
@@ -1527,12 +1595,18 @@ Pebble.addEventListener('webviewclosed', function(event) {
       JSON.stringify(alarm)
     );
 
+    localStorage.setItem(
+      DISPLAY_STORAGE_KEY,
+      JSON.stringify(display)
+    );
+
     sendAllSettings(
       settings.theme,
       language,
       dayparts,
       medications,
-      alarm
+      alarm,
+      display
     );
   } catch (error) {
     console.log(

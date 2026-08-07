@@ -46,6 +46,8 @@ extern int8_t s_taken_hint_phase;
 extern bool s_light_theme;
 extern ThemeMode s_theme_mode;
 extern AppLanguage s_language;
+extern bool s_show_swiss_emblem;
+extern bool s_show_japanese_pattern;
 extern bool s_confirmed_screen_active;
 
 extern bool s_transfer_screen_active;

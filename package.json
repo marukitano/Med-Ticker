@@ -39,7 +39,9 @@
       "MED_EFFECT": 25,
       "SETTINGS_TRANSACTION": 26,
       "SETTINGS_ACK": 27,
-      "LANGUAGE": 28
+      "LANGUAGE": 28,
+      "SHOW_SWISS_EMBLEM": 29,
+      "SHOW_JAPANESE_PATTERN": 30
     },
     "projectType": "native",
     "resources": {

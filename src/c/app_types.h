@@ -12,9 +12,12 @@
 
 #define CANVAS_START_OFFSET_Y 0
 
-/* Same Swiss emblem geometry as FCK_Gravity. */
+/*
+ * Same 13 x 14 pixel emblem geometry as FCK_Gravity, but centered on the
+ * Emery display. y=114 is exactly the height of the middle-button marker.
+ */
 #define SWISS_EMBLEM_PIVOT_X 100
-#define SWISS_EMBLEM_PIVOT_Y 100
+#define SWISS_EMBLEM_PIVOT_Y 114
 #define SWISS_EMBLEM_WIDTH 13
 #define SWISS_EMBLEM_HEIGHT 14
 #define SWISS_EMBLEM_COLLISION_RADIUS 7
@@ -155,6 +158,8 @@
 #define ALARM_WINDOW_STATE_PERSIST_KEY 208
 #define LANGUAGE_PERSIST_KEY 209
 #define THEME_SHAKE_STATE_PERSIST_KEY 210
+#define SHOW_SWISS_EMBLEM_PERSIST_KEY 211
+#define SHOW_JAPANESE_PATTERN_PERSIST_KEY 212
 #define DAYPART_MINUTES_PER_DAY 1440
 #define LEGACY_DEFAULT_MORNING_START_MINUTE (5 * 60)
 #define LEGACY_DEFAULT_NOON_START_MINUTE (11 * 60)
@@ -215,6 +220,14 @@
 #define PILL_RB_TILT_WAKE_HYSTERESIS_MG 10
 #define PILL_RB_REST_TRAVEL_Q8 (2 * PILL_PHYSICS_Q8)
 #define PILL_RB_REST_ANGLE (TRIG_MAX_ANGLE / 180)
+
+/*
+ * New pills are born above the display and must physically enter through
+ * the top. A minimum downward entry speed guarantees the intro even when
+ * the wrist is tilted upward at that exact moment.
+ */
+#define PILL_RB_ENTRY_MIN_SPEED_Q8 (2 * PILL_PHYSICS_Q8)
+#define PILL_RB_ENTRY_ROW_GAP_PX 34
 
 typedef enum {
   THEME_MODE_DARK = 0,
@@ -346,6 +359,7 @@ typedef struct {
   uint8_t medication_index;
   uint8_t collision_radius;
   uint8_t collision_half_length;
+  bool entered_arena;
 
   /* Q8 mass and deterministic surface-friction variation. */
   uint16_t mass_q8;
