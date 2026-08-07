@@ -292,29 +292,7 @@ void draw_confirmed_page(
 static bool first_unconfirmed_due_symbol(
     MedicationSymbol *symbol
 ) {
-  if (
-    medication_group_is_due(
-      MEDICATION_SYMBOL_PILL
-    )
-  ) {
-    if (symbol) {
-      *symbol = MEDICATION_SYMBOL_PILL;
-    }
-    return true;
-  }
-
-  if (
-    medication_group_is_due(
-      MEDICATION_SYMBOL_PEN
-    )
-  ) {
-    if (symbol) {
-      *symbol = MEDICATION_SYMBOL_PEN;
-    }
-    return true;
-  }
-
-  return false;
+  return active_medication_symbol(symbol);
 }
 
 static bool selected_confirmation_symbol(

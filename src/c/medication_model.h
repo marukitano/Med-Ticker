@@ -10,6 +10,9 @@ void mark_medication_group_confirmed(
 bool medication_group_is_due(
     MedicationSymbol symbol
 );
+bool active_medication_symbol(
+    MedicationSymbol *symbol
+);
 void rebuild_medication_rows(void);
 void rebuild_all_medication_rows(void);
 void refresh_medication_rows_for_time(void);

@@ -33,9 +33,6 @@ static bool medication_matches_group(
     MedicationTime visible_time,
     MedicationSymbol symbol
 );
-static void append_confirmation_row(
-    MedicationSymbol symbol
-);
 void daypart_tick_handler(
     struct tm *tick_time,
     TimeUnits units_changed
@@ -209,42 +206,36 @@ bool medication_group_is_due(
   return false;
 }
 
-bool unconfirmed_medication_group_is_due(void) {
-  return
-      medication_group_is_due(
-        MEDICATION_SYMBOL_PILL
-      ) ||
-      medication_group_is_due(
-        MEDICATION_SYMBOL_PEN
-      );
+bool active_medication_symbol(
+    MedicationSymbol *symbol
+) {
+  if (
+    medication_group_is_due(
+      MEDICATION_SYMBOL_PILL
+    )
+  ) {
+    if (symbol) {
+      *symbol = MEDICATION_SYMBOL_PILL;
+    }
+    return true;
+  }
+
+  if (
+    medication_group_is_due(
+      MEDICATION_SYMBOL_PEN
+    )
+  ) {
+    if (symbol) {
+      *symbol = MEDICATION_SYMBOL_PEN;
+    }
+    return true;
+  }
+
+  return false;
 }
 
-static void append_confirmation_row(
-    MedicationSymbol symbol
-) {
-  const char *prompt =
-      symbol == MEDICATION_SYMBOL_PILL
-          ? "Tabletten genommen?"
-          : "Pen injiziert?";
-
-  snprintf(
-    s_row_labels[s_list_row_count],
-    sizeof(s_row_labels[s_list_row_count]),
-    "%s",
-    prompt
-  );
-
-  s_rows[s_list_row_count] =
-      s_row_labels[s_list_row_count];
-
-  s_row_kinds[s_list_row_count] =
-      symbol == MEDICATION_SYMBOL_PILL
-          ? MEDICATION_ROW_CONFIRM_PILLS
-          : MEDICATION_ROW_CONFIRM_PEN;
-
-  s_row_medication_indices[s_list_row_count] = -1;
-
-  s_list_row_count++;
+bool unconfirmed_medication_group_is_due(void) {
+  return active_medication_symbol(NULL);
 }
 
 void rebuild_medication_rows(void) {
@@ -261,57 +252,43 @@ void rebuild_medication_rows(void) {
     sizeof(s_row_medication_indices)
   );
 
-  for (
-    uint8_t group_index = 0;
-    group_index < 2;
-    group_index++
-  ) {
-    const MedicationSymbol symbol =
-        (MedicationSymbol)group_index;
+  MedicationSymbol symbol;
 
-    if (medication_group_is_confirmed(symbol)) {
+  if (!active_medication_symbol(&symbol)) {
+    return;
+  }
+
+  for (
+    uint8_t index = 0;
+    index < s_medication_count;
+    index++
+  ) {
+    if (
+      !medication_matches_group(
+        &s_medications[index],
+        visible_time,
+        symbol
+      )
+    ) {
       continue;
     }
 
-    bool group_has_medication = false;
+    format_medication_label(
+      &s_medications[index],
+      s_row_labels[s_list_row_count],
+      sizeof(s_row_labels[s_list_row_count])
+    );
 
-    for (
-      uint8_t index = 0;
-      index < s_medication_count;
-      index++
-    ) {
-      if (
-        !medication_matches_group(
-          &s_medications[index],
-          visible_time,
-          symbol
-        )
-      ) {
-        continue;
-      }
+    s_rows[s_list_row_count] =
+        s_row_labels[s_list_row_count];
 
-      format_medication_label(
-        &s_medications[index],
-        s_row_labels[s_list_row_count],
-        sizeof(s_row_labels[s_list_row_count])
-      );
+    s_row_kinds[s_list_row_count] =
+        MEDICATION_ROW_ITEM;
 
-      s_rows[s_list_row_count] =
-          s_row_labels[s_list_row_count];
+    s_row_medication_indices[s_list_row_count] =
+        (int8_t)index;
 
-      s_row_kinds[s_list_row_count] =
-          MEDICATION_ROW_ITEM;
-
-      s_row_medication_indices[s_list_row_count] =
-          (int8_t)index;
-
-      s_list_row_count++;
-      group_has_medication = true;
-    }
-
-    if (group_has_medication) {
-      append_confirmation_row(symbol);
-    }
+    s_list_row_count++;
   }
 }
 

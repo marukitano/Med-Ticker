@@ -25,6 +25,10 @@ static void cover_scrolled_alert_area(
     GContext *ctx,
     GRect bounds
 );
+static void draw_alert_page_button_hint(
+    GContext *ctx,
+    GRect bounds
+);
 static void band_arrow_update_proc(
     Layer *layer,
     GContext *ctx
@@ -193,6 +197,38 @@ static void cover_scrolled_alert_area(
   );
 }
 
+static void draw_alert_page_button_hint(
+    GContext *ctx,
+    GRect bounds
+) {
+  if (
+    s_scroll.snap_index != 0 ||
+    s_confirmation_state != CONFIRM_IDLE ||
+    !unconfirmed_medication_group_is_due()
+  ) {
+    return;
+  }
+
+  /*
+   * Kleiner Hinweis auf die mittlere Seitentaste.
+   * x == bounds.size.w liegt genau einen Pixel rechts
+   * vom letzten sichtbaren Pixel. Radius 4 ergibt auf
+   * Pebble einen Kreis von praktisch 9 px Durchmesser.
+   */
+  graphics_context_set_fill_color(
+    ctx,
+    theme_foreground_color()
+  );
+  graphics_fill_circle(
+    ctx,
+    GPoint(
+      bounds.origin.x + bounds.size.w,
+      bounds.origin.y + bounds.size.h / 2
+    ),
+    8
+  );
+}
+
 static void canvas_update_proc(
     Layer *layer,
     GContext *ctx
@@ -211,6 +247,33 @@ static void canvas_update_proc(
     const int32_t confirmed_page_top =
         bounds.origin.y +
         scroll_offset_y;
+
+    /*
+     * Beim Overscroll nach unten liegt oberhalb der eigentlichen
+     * Haken-Seite ein kurzer freigelegter Bereich. Dieser muss zur
+     * Seite gehören und deshalb ebenfalls grün sein; sonst blitzt dort
+     * der normale Theme-Hintergrund durch.
+     */
+    if (confirmed_page_top > bounds.origin.y) {
+      const int16_t overscroll_height = (int16_t)(
+        confirmed_page_top - bounds.origin.y > bounds.size.h
+            ? bounds.size.h
+            : confirmed_page_top - bounds.origin.y
+      );
+
+      graphics_context_set_fill_color(ctx, GColorGreen);
+      graphics_fill_rect(
+        ctx,
+        GRect(
+          bounds.origin.x,
+          bounds.origin.y,
+          bounds.size.w,
+          overscroll_height
+        ),
+        0,
+        GCornerNone
+      );
+    }
 
     /* Do not render the green page once it is completely off-screen. */
     if (
@@ -243,9 +306,27 @@ static void canvas_update_proc(
   }
 
   const int32_t pill_y = current_pill_y();
+  MedicationSymbol active_symbol;
+  const bool pen_alert_active =
+      active_medication_symbol(&active_symbol) &&
+      active_symbol == MEDICATION_SYMBOL_PEN;
 
-  draw_physics_pills(ctx, bounds, pill_y);
+  if (pen_alert_active) {
+    draw_pen_alert_animation(
+      ctx,
+      bounds,
+      scroll_offset_y,
+      (uint8_t)(
+        s_animation_tick / PILL_TICKS_PER_FRAME
+      ),
+      theme_foreground_color()
+    );
+  } else {
+    draw_physics_pills(ctx, bounds, pill_y);
+  }
+
   cover_scrolled_alert_area(ctx, bounds);
+  draw_alert_page_button_hint(ctx, bounds);
   draw_medications(
     ctx,
     bounds,

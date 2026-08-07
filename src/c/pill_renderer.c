@@ -100,6 +100,13 @@ static const uint8_t s_pill_imprint_space[7] = {
 #define PHYSICS_ROUNDED_OVAL_TOP_CONTROL_NUM 57
 #define PHYSICS_ROUNDED_OVAL_CONTROL_DEN 100
 
+static const int8_t s_pen_alert_y_offsets[8] = {
+  2, 0, -3, -5, -3, 0, 2, 3
+};
+static const int8_t s_pen_alert_angle_degrees[8] = {
+  -4, -2, 0, 2, 4, 2, 0, -2
+};
+
 
 static void draw_icon_rounded_rect(
     GContext *ctx,
@@ -313,6 +320,8 @@ static void draw_tablet_icon(
     const MedicationAppearance *appearance,
     GColor outline_color
 ) {
+  (void)outline_color;
+
   const bool use_appearance =
       appearance && appearance->valid;
   const uint8_t shape =
@@ -331,22 +340,32 @@ static void draw_tablet_icon(
             ? appearance->secondary_color
             : medication->color
   };
+  const GColor primary_outline_color =
+      medication_appearance_darker_color(
+        fill_color.argb
+      );
+  const GColor secondary_outline_color =
+      medication_appearance_darker_color(
+        second_fill_color.argb
+      );
 
   const int16_t center_x =
       frame.origin.x + frame.size.w / 2;
   const int16_t center_y =
       frame.origin.y + frame.size.h / 2;
+  const GPoint center =
+      GPoint(center_x, center_y);
 
   switch (shape) {
     case 0:
       graphics_context_set_fill_color(
         ctx,
-        outline_color
+        primary_outline_color
       );
       graphics_fill_circle(
         ctx,
-        GPoint(center_x, center_y),
-        10
+        center,
+        8 + PILL_RENDER_OUTLINE_PX
       );
 
       graphics_context_set_fill_color(
@@ -355,128 +374,149 @@ static void draw_tablet_icon(
       );
       graphics_fill_circle(
         ctx,
-        GPoint(center_x, center_y),
+        center,
         8
       );
       break;
 
     case 1:
-      draw_icon_rounded_rect(
+      draw_physics_true_ellipse(
         ctx,
-        GRect(
-          center_x - 13,
-          center_y - 9,
-          26,
-          18
-        ),
-        9,
+        center,
+        0,
+        4,
+        6,
         fill_color,
-        outline_color
+        primary_outline_color
       );
       break;
 
     case 2:
-      draw_icon_rounded_rect(
+      draw_physics_capsule(
         ctx,
-        GRect(
-          center_x - 15,
-          center_y - 7,
-          30,
-          14
-        ),
-        7,
+        center,
+        0,
+        8,
+        4,
         fill_color,
-        outline_color
-      );
-
-      graphics_context_set_stroke_color(
-        ctx,
-        outline_color
-      );
-      graphics_context_set_stroke_width(
-        ctx,
-        2
-      );
-      graphics_draw_line(
-        ctx,
-        GPoint(center_x, center_y - 5),
-        GPoint(center_x, center_y + 5)
+        primary_outline_color,
+        true
       );
       break;
 
-    case 4: {
-      /*
-       * Reuse the exact two-colour capsule renderer from the physics view.
-       * This gives the list icon the same two-pixel outline geometry and
-       * the same darker outline colour for each capsule half.
-       */
-      const GColor first_outline_color =
-          medication_appearance_darker_color(
-            fill_color.argb
-          );
-      const GColor second_outline_color =
-          medication_appearance_darker_color(
-            second_fill_color.argb
-          );
-
+    case 4:
       draw_physics_two_color_capsule(
         ctx,
-        GPoint(center_x, center_y),
+        center,
         0,
         7,
         7,
         fill_color,
         second_fill_color,
-        first_outline_color,
-        second_outline_color
+        primary_outline_color,
+        secondary_outline_color
       );
       break;
-    }
 
-    case 3: {
-      GPoint points[] = {
-        GPoint(0, -11),
-        GPoint(11, 0),
-        GPoint(0, 11),
-        GPoint(-11, 0)
-      };
-
-      const GPathInfo path_info = {
-        .num_points = ARRAY_LENGTH(points),
-        .points = points
-      };
-
-      GPath *path =
-          gpath_create(&path_info);
-
-      if (!path) {
-        return;
-      }
-
-      gpath_move_to(
-        path,
-        GPoint(center_x, center_y)
-      );
-
-      graphics_context_set_fill_color(
+    case 3:
+      draw_physics_appearance_diamond(
         ctx,
-        fill_color
+        center,
+        0,
+        11,
+        fill_color,
+        primary_outline_color
       );
-      graphics_context_set_stroke_color(
-        ctx,
-        outline_color
-      );
-      graphics_context_set_stroke_width(
-        ctx,
-        2
-      );
-
-      gpath_draw_filled(ctx, path);
-      gpath_draw_outline(ctx, path);
-      gpath_destroy(path);
       break;
-    }
   }
+
+  graphics_context_set_stroke_width(ctx, 1);
+}
+
+static void draw_pen_shape(
+    GContext *ctx,
+    GPoint center,
+    int32_t angle,
+    int16_t half_length,
+    uint8_t outline_width,
+    uint8_t fill_width,
+    uint8_t detail_width,
+    GColor fill_color,
+    GColor outline_color
+) {
+  const int16_t dx = (int16_t)(
+    ((int32_t)cos_lookup(angle) * half_length) /
+    TRIG_MAX_RATIO
+  );
+  const int16_t dy = (int16_t)(
+    ((int32_t)sin_lookup(angle) * half_length) /
+    TRIG_MAX_RATIO
+  );
+  const GPoint barrel_start = GPoint(
+    center.x - dx,
+    center.y - dy
+  );
+  const GPoint barrel_end = GPoint(
+    center.x + dx,
+    center.y + dy
+  );
+
+  graphics_context_set_stroke_color(ctx, outline_color);
+  graphics_context_set_stroke_width(ctx, outline_width);
+  graphics_draw_line(ctx, barrel_start, barrel_end);
+
+  graphics_context_set_stroke_color(ctx, fill_color);
+  graphics_context_set_stroke_width(ctx, fill_width);
+  graphics_draw_line(ctx, barrel_start, barrel_end);
+
+  const int32_t normal_angle =
+      angle + TRIG_MAX_ANGLE / 4;
+  const int16_t cap_half =
+      outline_width / 2 + 1;
+  const int16_t cap_dx = (int16_t)(
+    ((int32_t)cos_lookup(normal_angle) * cap_half) /
+    TRIG_MAX_RATIO
+  );
+  const int16_t cap_dy = (int16_t)(
+    ((int32_t)sin_lookup(normal_angle) * cap_half) /
+    TRIG_MAX_RATIO
+  );
+
+  graphics_context_set_stroke_color(ctx, outline_color);
+  graphics_context_set_stroke_width(ctx, detail_width);
+  graphics_draw_line(
+    ctx,
+    GPoint(
+      barrel_start.x - cap_dx,
+      barrel_start.y - cap_dy
+    ),
+    GPoint(
+      barrel_start.x + cap_dx,
+      barrel_start.y + cap_dy
+    )
+  );
+
+  const int16_t needle_length =
+      half_length > 20
+          ? half_length / 3
+          : 6;
+  const int16_t needle_dx = (int16_t)(
+    ((int32_t)cos_lookup(angle) * needle_length) /
+    TRIG_MAX_RATIO
+  );
+  const int16_t needle_dy = (int16_t)(
+    ((int32_t)sin_lookup(angle) * needle_length) /
+    TRIG_MAX_RATIO
+  );
+
+  graphics_draw_line(
+    ctx,
+    barrel_end,
+    GPoint(
+      barrel_end.x + needle_dx,
+      barrel_end.y + needle_dy
+    )
+  );
 
   graphics_context_set_stroke_width(ctx, 1);
 }
@@ -491,75 +531,104 @@ static void draw_pen_icon(
     .argb = medication->color
   };
 
-  const GPoint barrel_start = GPoint(
-    frame.origin.x + 7,
-    frame.origin.y + frame.size.h - 7
-  );
-
-  const GPoint barrel_end = GPoint(
-    frame.origin.x + frame.size.w - 9,
-    frame.origin.y + 8
-  );
-
-  graphics_context_set_stroke_color(
-    ctx,
-    outline_color
-  );
-  graphics_context_set_stroke_width(
-    ctx,
-    8
-  );
-  graphics_draw_line(
-    ctx,
-    barrel_start,
-    barrel_end
-  );
-
-  graphics_context_set_stroke_color(
-    ctx,
-    fill_color
-  );
-  graphics_context_set_stroke_width(
-    ctx,
-    5
-  );
-  graphics_draw_line(
-    ctx,
-    barrel_start,
-    barrel_end
-  );
-
-  graphics_context_set_stroke_color(
-    ctx,
-    outline_color
-  );
-  graphics_context_set_stroke_width(
-    ctx,
-    2
-  );
-
-  graphics_draw_line(
+  draw_pen_shape(
     ctx,
     GPoint(
-      barrel_start.x - 4,
-      barrel_start.y - 4
+      frame.origin.x + frame.size.w / 2,
+      frame.origin.y + frame.size.h / 2
     ),
-    GPoint(
-      barrel_start.x + 3,
-      barrel_start.y + 3
-    )
+    -(TRIG_MAX_ANGLE / 8),
+    11,
+    8,
+    5,
+    2,
+    fill_color,
+    outline_color
+  );
+}
+
+void draw_pen_alert_animation(
+    GContext *ctx,
+    GRect bounds,
+    int32_t scroll_offset_y,
+    uint8_t phase,
+    GColor outline_color
+) {
+  MedicationSymbol symbol;
+
+  if (
+    !active_medication_symbol(&symbol) ||
+    symbol != MEDICATION_SYMBOL_PEN
+  ) {
+    return;
+  }
+
+  const MedicationTime visible_time =
+      current_medication_time();
+  const MedicationSettings *pen = NULL;
+
+  for (
+    uint8_t index = 0;
+    index < s_medication_count;
+    index++
+  ) {
+    const MedicationSettings *candidate =
+        &s_medications[index];
+
+    if (
+      candidate->enabled &&
+      candidate->icon_set &&
+      candidate->symbol == MEDICATION_SYMBOL_PEN &&
+      candidate->time == (uint8_t)visible_time
+    ) {
+      pen = candidate;
+      break;
+    }
+  }
+
+  if (!pen) {
+    return;
+  }
+
+  phase %= ARRAY_LENGTH(s_pen_alert_y_offsets);
+
+  const int16_t center_y = (int16_t)(
+    bounds.origin.y +
+    bounds.size.h / 2 +
+    scroll_offset_y +
+    s_pen_alert_y_offsets[phase]
   );
 
-  graphics_draw_line(
+  if (
+    center_y < bounds.origin.y - 64 ||
+    center_y > bounds.origin.y + bounds.size.h + 64
+  ) {
+    return;
+  }
+
+  const GColor fill_color = {
+    .argb = pen->color
+  };
+  const int32_t angle =
+      -(TRIG_MAX_ANGLE / 8) +
+      ((int32_t)s_pen_alert_angle_degrees[phase] *
+       TRIG_MAX_ANGLE) /
+          360;
+
+  draw_pen_shape(
     ctx,
-    barrel_end,
     GPoint(
-      frame.origin.x + frame.size.w - 2,
-      frame.origin.y + 1
-    )
+      bounds.origin.x + bounds.size.w / 2,
+      center_y
+    ),
+    angle,
+    44,
+    14,
+    9,
+    3,
+    fill_color,
+    outline_color
   );
-
-  graphics_context_set_stroke_width(ctx, 1);
 }
 
 static void draw_medication_icon(

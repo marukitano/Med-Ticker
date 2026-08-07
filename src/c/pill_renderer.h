@@ -15,3 +15,10 @@ void draw_physics_pills(
     GRect bounds,
     int32_t arena_y
 );
+void draw_pen_alert_animation(
+    GContext *ctx,
+    GRect bounds,
+    int32_t scroll_offset_y,
+    uint8_t phase,
+    GColor outline_color
+);
