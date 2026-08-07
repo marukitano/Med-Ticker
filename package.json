@@ -6,9 +6,9 @@
     "medication",
     "pill"
   ],
-  "name": "med-ticker",
+  "name": "nasu",
   "pebble": {
-    "displayName": "Med Ticker",
+    "displayName": "ナース",
     "enableMultiJS": false,
     "messageKeys": {
       "THEME": 0,

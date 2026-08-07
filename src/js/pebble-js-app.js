@@ -875,7 +875,7 @@ function configurationPage(
     '<head>',
     '<meta charset="utf-8">',
     '<meta name="viewport" content="width=device-width,initial-scale=1">',
-    '<title>Med Ticker</title>',
+    '<title>ナース (Nāsu)</title>',
     '<style>',
     'body{margin:0;background:#f2f2f2;color:#111;font-family:sans-serif}',
     'main{max-width:520px;margin:auto;padding:20px 14px 36px}',
@@ -978,7 +978,7 @@ function configurationPage(
     '</head>',
     '<body' + bodyClass + '>',
     '<main>',
-    '<h1>Med Ticker</h1>',
+    '<h1>ナース <span style="font-size:.62em;font-weight:normal">Nāsu</span></h1>',
     '<form id="settings">',
     '<section id="medication-panel">',
     '<button id="medication-toggle" class="toggle" type="button">',
@@ -1510,7 +1510,7 @@ function configurationPage(
 }
 
 Pebble.addEventListener('ready', function() {
-  console.log('Med Ticker companion ready');
+  console.log('Nasu companion ready');
 });
 
 Pebble.addEventListener('showConfiguration', function() {

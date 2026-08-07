@@ -1,8 +1,8 @@
-# Med Ticker
+# ナース (Nāsu)
 
 ## Deutsch
 
-**Med Ticker** ist eine native Medikamenten-Erinnerungs-App für die
+**ナース (Nāsu)** ist eine native Medikamenten-Erinnerungs-App für die
 **Pebble Time 2** (`emery`).
 
 Wenn ein Medikament fällig ist, zeigt die Uhr die konfigurierten
@@ -11,9 +11,9 @@ und wartet auf eine bewusste Bestätigung, bevor die Einnahme als
 erledigt markiert wird.
 
 <p align="center">
-  <img src="docs/screenshots/screenshot.png" width="30%" alt="Med Ticker – screenshot">
-  <img src="docs/screenshots/screenshot2.png" width="30%" alt="Med Ticker – screenshot2">
-  <img src="docs/screenshots/screenshot3.png" width="30%" alt="Med Ticker – screenshot3">
+  <img src="docs/screenshots/screenshot.png" width="30%" alt="Nāsu – screenshot">
+  <img src="docs/screenshots/screenshot2.png" width="30%" alt="Nāsu – screenshot2">
+  <img src="docs/screenshots/screenshot3.png" width="30%" alt="Nāsu – screenshot3">
 </p>
 
 ### Funktionen
@@ -40,7 +40,7 @@ erledigt markiert wird.
 
 ### Funktionsweise
 
-Wird ein Medikament fällig, öffnet Med Ticker einen eigenen
+Wird ein Medikament fällig, öffnet Nāsu einen eigenen
 Erinnerungsbildschirm.
 
 Tabletten verhalten sich wie kleine physikalische Objekte und reagieren
@@ -133,7 +133,7 @@ Weitere Architekturdetails stehen in
 
 ### Medizinischer Hinweis
 
-Med Ticker ist ein Komfortwerkzeug und **kein Medizinprodukt**.
+Nāsu ist ein Komfortwerkzeug und **kein Medizinprodukt**.
 
 Verlasse dich nicht ausschließlich auf diese App, wenn ein Medikament
 exakt zu einem bestimmten Zeitpunkt eingenommen werden muss oder eine
@@ -142,7 +142,7 @@ haben kann.
 
 ### Lizenz
 
-Med Ticker ist freie Software unter der
+Nāsu ist freie Software unter der
 **GNU General Public License v3.0**.
 
 Siehe [`LICENSE`](LICENSE).
@@ -151,7 +151,7 @@ Siehe [`LICENSE`](LICENSE).
 
 ## English
 
-**Med Ticker** is a native medication reminder app for the
+**ナース (Nāsu)** is a native medication reminder app for the
 **Pebble Time 2** (`emery`).
 
 When medication is due, the watch displays the configured pills or
@@ -159,9 +159,9 @@ injection pen, alerts you with sound and/or vibration, and waits for a
 deliberate confirmation before marking it as taken.
 
 <p align="center">
-  <img src="docs/screenshots/screenshot.png" width="30%" alt="Med Ticker – screenshot">
-  <img src="docs/screenshots/screenshot2.png" width="30%" alt="Med Ticker – screenshot2">
-  <img src="docs/screenshots/screenshot3.png" width="30%" alt="Med Ticker – screenshot3">
+  <img src="docs/screenshots/screenshot.png" width="30%" alt="Nāsu – screenshot">
+  <img src="docs/screenshots/screenshot2.png" width="30%" alt="Nāsu – screenshot2">
+  <img src="docs/screenshots/screenshot3.png" width="30%" alt="Nāsu – screenshot3">
 </p>
 
 ### Features
@@ -187,7 +187,7 @@ deliberate confirmation before marking it as taken.
 
 ### How it works
 
-When medication becomes due, Med Ticker opens a dedicated reminder
+When medication becomes due, Nāsu opens a dedicated reminder
 screen.
 
 Pills behave like small physical objects and react to movement of the
@@ -279,7 +279,7 @@ More details about the internal structure can be found in
 
 ### Medical disclaimer
 
-Med Ticker is a convenience tool and is **not a medical device**.
+Nāsu is a convenience tool and is **not a medical device**.
 
 Do not rely on this app as the only safeguard for medication that must
 be taken at an exact time or where a missed or incorrect dose could
@@ -287,7 +287,7 @@ cause harm.
 
 ### License
 
-Med Ticker is free software released under the
+Nāsu is free software released under the
 **GNU General Public License v3.0**.
 
 See [`LICENSE`](LICENSE).
