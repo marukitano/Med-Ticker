@@ -404,84 +404,34 @@ static void draw_tablet_icon(
       );
       break;
 
-    case 4:
+    case 4: {
       /*
-       * The full medication appearance owns the second colour. Draw the
-       * compact list icon as one outlined capsule with two joined inner
-       * halves, matching the two-colour pill used by the physics renderer.
+       * Reuse the exact two-colour capsule renderer from the physics view.
+       * This gives the list icon the same two-pixel outline geometry and
+       * the same darker outline colour for each capsule half.
        */
-      graphics_context_set_fill_color(
+      const GColor first_outline_color =
+          medication_appearance_darker_color(
+            fill_color.argb
+          );
+      const GColor second_outline_color =
+          medication_appearance_darker_color(
+            second_fill_color.argb
+          );
+
+      draw_physics_two_color_capsule(
         ctx,
-        outline_color
-      );
-      graphics_fill_rect(
-        ctx,
-        GRect(
-          center_x - 15,
-          center_y - 7,
-          30,
-          14
-        ),
+        GPoint(center_x, center_y),
+        0,
         7,
-        GCornersAll
-      );
-
-      graphics_context_set_fill_color(
-        ctx,
-        fill_color
-      );
-      graphics_fill_circle(
-        ctx,
-        GPoint(center_x - 8, center_y),
-        5
-      );
-      graphics_fill_rect(
-        ctx,
-        GRect(
-          center_x - 8,
-          center_y - 5,
-          8,
-          10
-        ),
-        0,
-        GCornerNone
-      );
-
-      graphics_context_set_fill_color(
-        ctx,
-        second_fill_color
-      );
-      graphics_fill_rect(
-        ctx,
-        GRect(
-          center_x,
-          center_y - 5,
-          8,
-          10
-        ),
-        0,
-        GCornerNone
-      );
-      graphics_fill_circle(
-        ctx,
-        GPoint(center_x + 8, center_y),
-        5
-      );
-
-      graphics_context_set_stroke_color(
-        ctx,
-        outline_color
-      );
-      graphics_context_set_stroke_width(
-        ctx,
-        2
-      );
-      graphics_draw_line(
-        ctx,
-        GPoint(center_x, center_y - 5),
-        GPoint(center_x, center_y + 5)
+        7,
+        fill_color,
+        second_fill_color,
+        first_outline_color,
+        second_outline_color
       );
       break;
+    }
 
     case 3: {
       GPoint points[] = {

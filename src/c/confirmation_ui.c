@@ -40,6 +40,10 @@ static void draw_checkmark(
     int16_t size,
     int16_t radius
 );
+static void draw_static_checkmark(
+    GContext *ctx,
+    GRect bounds
+);
 static void draw_confirmation_checkmark(
     GContext *ctx,
     GRect bounds
@@ -200,6 +204,54 @@ static void draw_checkmark(
   );
 }
 
+static void draw_static_checkmark(
+    GContext *ctx,
+    GRect bounds
+) {
+  const int16_t size = CHECK_POP_SETTLE_SIZE;
+  const int16_t radius = CHECK_STROKE_RADIUS;
+  const int16_t center_x =
+      bounds.origin.x +
+      bounds.size.w / 2;
+  const int16_t center_y =
+      bounds.origin.y +
+      bounds.size.h / 2;
+
+  const GPoint start = GPoint(
+    center_x - (size * 42) / 100,
+    center_y
+  );
+  const GPoint middle = GPoint(
+    center_x - (size * 10) / 100,
+    center_y + (size * 28) / 100
+  );
+  const GPoint end = GPoint(
+    center_x + (size * 45) / 100,
+    center_y - (size * 30) / 100
+  );
+
+  /*
+   * The animated checkmark is rasterized as many overlapping circles.
+   * That is acceptable for a short confirmation animation, but far too
+   * expensive for the 16 ms touch-scroll redraw loop. The static page uses
+   * two thick strokes and only three circles for rounded joins and caps.
+   */
+  graphics_context_set_stroke_color(ctx, GColorWhite);
+  graphics_context_set_stroke_width(
+    ctx,
+    (uint8_t)(radius * 2)
+  );
+  graphics_draw_line(ctx, start, middle);
+  graphics_draw_line(ctx, middle, end);
+
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_circle(ctx, start, radius);
+  graphics_fill_circle(ctx, middle, radius);
+  graphics_fill_circle(ctx, end, radius);
+
+  graphics_context_set_stroke_width(ctx, 1);
+}
+
 static void draw_confirmation_checkmark(
     GContext *ctx,
     GRect bounds
@@ -231,11 +283,9 @@ void draw_confirmed_page(
     GCornerNone
   );
 
-  draw_checkmark(
+  draw_static_checkmark(
     ctx,
-    bounds,
-    CHECK_POP_SETTLE_SIZE,
-    CHECK_STROKE_RADIUS
+    bounds
   );
 }
 

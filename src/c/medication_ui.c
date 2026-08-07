@@ -208,18 +208,25 @@ static void canvas_update_proc(
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
   if (s_confirmed_screen_active) {
-    draw_confirmed_page(
-      ctx,
-      GRect(
-        bounds.origin.x,
-        (int16_t)(
-          bounds.origin.y +
-          scroll_offset_y
-        ),
-        bounds.size.w,
-        bounds.size.h
-      )
-    );
+    const int32_t confirmed_page_top =
+        bounds.origin.y +
+        scroll_offset_y;
+
+    /* Do not render the green page once it is completely off-screen. */
+    if (
+      confirmed_page_top < bounds.size.h &&
+      confirmed_page_top + bounds.size.h > 0
+    ) {
+      draw_confirmed_page(
+        ctx,
+        GRect(
+          bounds.origin.x,
+          (int16_t)confirmed_page_top,
+          bounds.size.w,
+          bounds.size.h
+        )
+      );
+    }
 
     draw_medications(
       ctx,
